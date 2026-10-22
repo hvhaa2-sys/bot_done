@@ -1,0 +1,18 @@
+# systemd: бот и админка круглосуточно, перезапуск при сбое и после перезагрузки сервера.
+# Установка — см. README, раздел «Запуск на сервере».
+[Unit]
+Description=ИИ-помощник менеджера по продажам (Telegram-бот и админка)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=bot
+WorkingDirectory=/opt/ai-sales-assistant
+ExecStart=/opt/ai-sales-assistant/.venv/bin/python -m app
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+Environment=TIMEZONE=Asia/Yekaterinburg
+
+[Install]
+WantedBy=multi-user.target

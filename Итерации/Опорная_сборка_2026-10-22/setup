@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Запускать из скачанного проекта: ./setup, затем docker compose up -d --build.
+set -euo pipefail
+umask 077
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
+ACTION="${1:-init}"
+case "$ACTION" in
+  init|check|backup|restore|smoke) [[ $# -eq 0 ]] || shift ;;
+  *) ACTION=init ;;
+esac
+
+need_docker() {
+  command -v docker >/dev/null || { echo 'Docker не найден. Установите Docker Engine / Docker Desktop и Compose 2.30+.' >&2; exit 1; }
+  docker info >/dev/null 2>&1 || { echo 'Docker Engine не запущен или недоступен.' >&2; exit 1; }
+  local version major minor
+  version="$(docker compose version --short)"
+  version="${version#v}"
+  IFS=. read -r major minor _ <<< "$version"
+  if (( major < 2 || (major == 2 && minor < 30) )); then
+    echo 'Нужен Docker Compose 2.30+ (поддержка env_file format: raw).' >&2
+    exit 1
+  fi
+}
+
+compose() { docker compose -f "$ROOT/docker-compose.yml" "$@"; }
+RUNNING=0
+PART=''
+restart_on_exit() {
+  local code=$?
+  if [[ -n "$PART" && -f "$PART" ]]; then rm -f -- "$PART"; fi
+  if [[ "$RUNNING" == 1 ]]; then
+    compose start app >/dev/null || { echo 'Не удалось перезапустить приложение. Выполните docker compose up -d.' >&2; exit 1; }
+  fi
+  exit "$code"
+}
+quiesce() {
+  if compose ps --status running --services | grep -qx app; then RUNNING=1; fi
+  trap restart_on_exit EXIT
+  compose stop app >/dev/null
+}
+snapshot() {
+  local output="$1"
+  [[ ! -e "$output" ]] || { echo 'Такой архив уже существует. Выберите новое имя.' >&2; exit 1; }
+  mkdir -p -- "$(dirname "$output")"
+  PART="$output.partial.$$"
+  compose run --rm --no-deps -T app python -m tools.deploy backup --archive - > "$PART"
+  mv -- "$PART" "$output"
+  PART=''
+}
+
+case "$ACTION" in
+  init)
+    PY=''
+    for candidate in "$ROOT/.venv/bin/python" python3.13 python3.12 python3.11 python3; do
+      if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
+        PY="$candidate"; break
+      fi
+    done
+    if [[ -n "$PY" ]]; then
+      exec "$PY" "$ROOT/tools/deploy.py" init "$@"
+    fi
+    # На чистом Docker-хосте мастер использует Python из официального образа.
+    need_docker
+    TTY=()
+    if [[ -t 0 ]]; then TTY=(-it); else TTY=(-i); fi
+    exec docker run --rm "${TTY[@]}" --user "$(id -u):$(id -g)" \
+      -v "$ROOT:/workspace" -w /workspace python:3.13-slim \
+      python tools/deploy.py init "$@"
+    ;;
+  check)
+    need_docker
+    compose config --quiet
+    compose run --rm --no-deps -T app python -m app.check
+    ;;
+  backup)
+    [[ $# == 1 ]] || { echo 'Использование: ./setup backup /путь/backup.tar.gz' >&2; exit 2; }
+    need_docker
+    quiesce
+    snapshot "$1"
+    echo 'Полный бэкап data/ создан. .env храните отдельно.'
+    ;;
+  restore)
+    [[ $# == 2 && "$2" == '--yes' ]] || { echo 'Использование: ./setup restore backup.tar.gz --yes (заменит data/)' >&2; exit 2; }
+    [[ -f "$1" ]] || { echo 'Архив не найден.' >&2; exit 1; }
+    need_docker
+    quiesce
+    SAFETY="$1.before-restore.$(date +%Y%m%d-%H%M%S).$$.tar.gz"
+    snapshot "$SAFETY"
+    compose run --rm --no-deps -T app python -m tools.deploy restore --archive - --yes < "$1"
+    echo 'База восстановлена. Предыдущее состояние сохранено рядом с исходным архивом.'
+    ;;
+  smoke)
+    need_docker
+    exec bash "$ROOT/deploy/container/smoke.sh"
+    ;;
+esac

@@ -1,0 +1,92 @@
+"""Проверка перед запуском: python -m app.check
+
+Отвечает на вопрос «можно ли проверять бота в Telegram» и подсказывает, что поправить:
+ключ GigaChat, токен бота, бизнес-режим в BotFather, подключения менеджеров, адрес админки.
+"""
+from __future__ import annotations
+
+import asyncio
+import sys
+
+from .config import Settings
+from .services import Services, model_title
+
+QUESTION = "Сколько стоит экран на фуд-корте в ВЕЕР Молл?"
+
+
+def line(ok: bool | None, title: str, text: str = "") -> None:
+    mark = {True: "✓", False: "✗", None: "·"}[ok]
+    print(f" {mark} {title}" + (f": {text}" if text else ""))
+
+
+async def check_model(services: Services) -> bool:
+    if services.settings.llm_provider == "mock":
+        line(None, "Модель", "заглушка без нейросети — для живой проверки поставьте LLM_PROVIDER=gigachat")
+        return True
+    reply = await services.answer(QUESTION)
+    if reply.reason.startswith("llm_error"):
+        line(False, f"Модель {model_title(services.settings)}",
+             f"не отвечает ({reply.reason.split(':', 1)[-1]}) — проверьте GIGACHAT_AUTH_KEY и интернет")
+        return False
+    line(True, f"Модель {model_title(services.settings)}", f"ответила за {reply.latency_ms / 1000:.1f} с")
+    print(f"     «{QUESTION}» → {reply.text[:160]}")
+    return True
+
+
+async def check_telegram(settings: Settings) -> bool:
+    if not settings.telegram_bot_token:
+        line(False, "Telegram", "нет TELEGRAM_BOT_TOKEN в .env — создайте бота в @BotFather (/newbot)")
+        return False
+    from aiogram import Bot
+    from aiogram.exceptions import TelegramUnauthorizedError
+
+    bot = Bot(settings.telegram_bot_token)
+    try:
+        me = await bot.get_me()
+        hook = await bot.get_webhook_info()
+    except TelegramUnauthorizedError:
+        line(False, "Telegram", "токен не принят — скопируйте его из @BotFather заново")
+        return False
+    except Exception as exc:  # noqa: BLE001
+        line(False, "Telegram", f"нет связи ({type(exc).__name__}) — проверьте интернет или VPN")
+        return False
+    finally:
+        await bot.session.close()
+    ok = True
+    line(True, "Бот", f"@{me.username}")
+    if me.can_connect_to_business:
+        line(True, "Бизнес-режим", "включён")
+    else:
+        line(False, "Бизнес-режим", "выключен: @BotFather → /mybots → бот → Bot Settings → Secretary Mode")
+        ok = False
+    if hook.url:
+        line(False, "Вебхук", f"у бота задан вебхук {hook.url} — он мешает. Удалите: "
+                              f"https://api.telegram.org/bot<токен>/deleteWebhook")
+        ok = False
+    return ok
+
+
+async def main() -> int:
+    settings = Settings.load()
+    services = Services(settings)
+    print("Проверка перед запуском\n")
+    ok = await check_model(services)
+    ok = await check_telegram(settings) and ok
+    conns = services.db.connections()
+    if conns:
+        modes = ", ".join("автоответ" if c.mode == "auto" else "черновики" for c in conns)
+        line(True, "Подключения", f"{len(conns)} ({modes})")
+    else:
+        line(None, "Подключения", "пока нет — после запуска добавьте бота: Настройки → Автоматизация чатов")
+    kb = services.kb
+    line(bool(kb.prices), "База знаний", f"{len(kb.prices)} позиций прайса, {len(kb.faq)} ответов")
+    if settings.admin_token == "change-me":
+        line(False, "Админка", "смените ADMIN_TOKEN в .env на свой")
+    await services.llm.close()
+    print(f"\nАдминка после запуска: http://localhost:{settings.admin_port}/?token={settings.admin_token}")
+    print("Запуск: .venv/bin/python -m app" if ok else "Сначала поправьте пункты с ✗.")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))

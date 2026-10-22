@@ -1,0 +1,8 @@
+# Снимок должен сохранять точные байты для проверки SHA-256 на другой ОС.
+Итерации/Опорная_сборка_2026-10-22/** -text
+*.pdf binary
+*.pptx binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.csv whitespace=cr-at-eol

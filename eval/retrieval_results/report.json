@@ -1,0 +1,102 @@
+{
+  "corpus_hash": "2ce420099ada31fee63a214a7d2fad417e14644e6e6ca8f78b34da730be05720",
+  "documents": 480,
+  "questions": 480,
+  "judged_queries": 40,
+  "k": 8,
+  "rrf_constant": 60,
+  "rrf_depth": 60,
+  "embedding_model": null,
+  "endpoint": "https://gigachat.devices.sberbank.ru/api/v1",
+  "query_instruction": "",
+  "embedding_prepare_ms": 0.0002910092007368803,
+  "api_requests": 0,
+  "embedding_tokens": 0,
+  "qrels_sha256": "7fff2d40df1cd0c3778609fd1f3aea6b31ebffa70c30c9ebdaefa6ef3b6b487f",
+  "summary": [
+    {
+      "method": "bm25",
+      "dataset": "ALL",
+      "questions": 480,
+      "judged": 40,
+      "recall_at_k": 0.8875,
+      "hit_at_k": 0.95,
+      "mrr": 0.6540277777777778,
+      "mrr_at_k": 0.6495833333333333,
+      "retrieval_ms_median": 0.8538750043953769
+    },
+    {
+      "method": "bm25",
+      "dataset": "questions.csv",
+      "questions": 37,
+      "judged": 8,
+      "recall_at_k": 1.0,
+      "hit_at_k": 1.0,
+      "mrr": 0.6145833333333334,
+      "mrr_at_k": 0.6145833333333334,
+      "retrieval_ms_median": 0.8200000011129305
+    },
+    {
+      "method": "bm25",
+      "dataset": "questions_kb.csv",
+      "questions": 115,
+      "judged": 6,
+      "recall_at_k": 0.75,
+      "hit_at_k": 1.0,
+      "mrr": 0.5194444444444445,
+      "mrr_at_k": 0.5194444444444445,
+      "retrieval_ms_median": 0.6730000022798777
+    },
+    {
+      "method": "bm25",
+      "dataset": "questions_live.csv",
+      "questions": 32,
+      "judged": 8,
+      "recall_at_k": 1.0,
+      "hit_at_k": 1.0,
+      "mrr": 0.7333333333333333,
+      "mrr_at_k": 0.7333333333333333,
+      "retrieval_ms_median": 0.8726249943720177
+    },
+    {
+      "method": "bm25",
+      "dataset": "questions_personas.csv",
+      "questions": 169,
+      "judged": 6,
+      "recall_at_k": 0.9166666666666666,
+      "hit_at_k": 1.0,
+      "mrr": 0.6666666666666666,
+      "mrr_at_k": 0.6666666666666666,
+      "retrieval_ms_median": 1.4202909951563925
+    },
+    {
+      "method": "bm25",
+      "dataset": "questions_sales.csv",
+      "questions": 20,
+      "judged": 5,
+      "recall_at_k": 0.7,
+      "hit_at_k": 0.8,
+      "mrr": 0.6633333333333333,
+      "mrr_at_k": 0.65,
+      "retrieval_ms_median": 1.1040210010833107
+    },
+    {
+      "method": "bm25",
+      "dataset": "questions_stress.csv",
+      "questions": 107,
+      "judged": 7,
+      "recall_at_k": 0.8571428571428571,
+      "hit_at_k": 0.8571428571428571,
+      "mrr": 0.7063492063492064,
+      "mrr_at_k": 0.6904761904761905,
+      "retrieval_ms_median": 0.5462499975692481
+    }
+  ],
+  "notes": [
+    "Retrieval-only, не качество готовых ответов",
+    "Клиентская история: три предыдущих реплики, без ответов из эталона",
+    "Фильтры ТЦ и арендатора одинаковы",
+    "Без разметки вопрос не входит в Recall/MRR",
+    "retrieval_ms не включает сетевое получение эмбеддинга запроса"
+  ]
+}
