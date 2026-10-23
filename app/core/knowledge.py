@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .price_guard import extract_amounts, months_named
+from .client_intent import active_request
 from .text import STOPWORDS, fix_mixed_script, stem, tokenize
 
 
@@ -453,7 +454,7 @@ class KnowledgeBase:
         return match[0] if match else None
 
     def matched_stop_topic(self, question: str) -> str | None:
-        low = fix_mixed_script(question).lower().replace("ё", "е")  # «cкидка» с латинской c — тоже скидка
+        low = active_request(fix_mixed_script(question)).lower().replace("ё", "е")
         low = _STOP_EXCEPTIONS_RE.sub(" ", low)
         for topic in self.stop_topics:
             # «Фото» в названии бизнеса и «коммерческие форматы» не означают просьбу прислать материал.

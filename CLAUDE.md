@@ -16,6 +16,7 @@
 make install-dev                    # Ruff, pytest-cov, pip-audit и импорт документов
 make check                          # линтер + тесты с покрытием строк/веток
 make audit                          # известные уязвимости зафиксированных зависимостей
+make security                       # + gitleaks, Bandit, Semgrep (OWASP Top 10); нужны gitleaks и uv
 make lock                           # после изменения requirements*.txt пересобрать оба lock-файла
 cp .env.example .env                 # LLM_PROVIDER=mock работает без ключей
 python -m app.check                  # перед живым тестом: ключ GigaChat, токен, Business Mode, вебхук
@@ -291,3 +292,26 @@ pip install -r requirements-tools.txt && python -m tools.import_docs <папка
 размечены Codex по источникам, менеджером не проверены. BM25 на них: Recall@8 0,8875, MRR ≈ 0,654.
 Живые embedding-запросы вернули HTTP 402: результатов эмбеддингов/RRF пока нет, нужна квота.
 Протокол и команды — `docs/RETRIEVAL.md`. `make check`: 510 тестов, линтер прошёл.
+
+## Наблюдение (22.10.2026)
+
+По просьбе пользователя добавлен `observe`: сначала проверяем на его Telegram, клиента пока не подключаем.
+Сбор переписки идёт через `app/channels/observation.py` в `observed_messages`, без ответов и черновиков.
+Кандидаты используют прежний механизм утверждения; источник и зависимые сообщения сохраняются.
+Пауза и устаревание автоответов не мешают наблюдению. Команда `/mode observe`, журнал —
+«Диалоги → Наблюдение». Инструкция и ограничения — `docs/OBSERVE.md`, проверки — `tests/test_observe.py`.
+Режим `off` (Claude Code, 22.10, по просьбе пользователя): `/mode off` — бот молчит, не пишет менеджеру и ничего
+не сохраняет; `D.MODES`, `D.SILENT_MODES` (`off`, `observe`) закрывают все пути отправки. Связка вопроса и ответа
+в наблюдении: явный reply — без ограничения по времени, иначе `OBSERVE_PAIR_HOURS`=24, куски — `OBSERVE_PIECE_MINUTES`=30.
+Тесты — `tests/test_mode_off.py`.
+
+## Безопасность (Claude Code, 22.10.2026)
+
+Токен админки — только в cookie: `?token=` в ссылке входит один раз и перенаправляет на адрес без токена,
+POST с токеном в адресе — 401; журнал uvicorn маскирует `token=***` (`HideToken` в `__main__.py`); при старте
+и в `app.check` адрес печатается без токена. `ADMIN_TOKEN` сменён 22.10 (старый был в логе). `make security`:
+gitleaks — история чистая; Bandit — 10 находок, все ложные (SQL только с «?», `0.0.0.0` — сравнение, `change-me` —
+проверка), помечены `# nosec`; Semgrep (p/python, p/owasp-top-ten, p/secrets) — 1 ложная (`escape` есть);
+pip-audit нашёл certifi 2026.7.22 со скомпрометированными корнями emSign (PYSEC-2026-4320) — обновлён до 2026.10.19.
+Semgrep из PyPI ставится только с `pydantic==2.11.7` (конфликт его модуля MCP со свежей pydantic).
+

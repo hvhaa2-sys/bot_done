@@ -79,6 +79,15 @@ def test_broken_json_from_gigachat_still_gives_facts():
     assert facts == [C.Fact("Делаете ролик?", "Готовый ролик даёт рекламодатель, мы не делаем.")]
 
 
+def test_pair_without_model_drops_greetings_and_client_contacts():
+    # Наблюдение на дневном лимите модели: пара берётся как есть — без «Здравствуйте» и без номера клиента
+    facts = C.raw_facts("Здравствуйте! Какой длины ролик на экране в атриуме ВЕЕР? Мой номер +7 912 345-67-89",
+                        "Добрый день! Ролик до 15 секунд, без звука, файл MP4 до 50 МБ.")
+    assert facts == [C.Fact("Какой длины ролик на экране в атриуме ВЕЕР?", "Ролик до 15 секунд, без звука, файл MP4 до 50 МБ.")]
+    assert C.raw_facts("Здравствуйте! Мой номер 89123456789", "Добрый день! Ролик до 15 секунд, без звука.") == []
+    assert C.tidy("Спасибо!") == "" and C.tidy("Спасибо за вопрос! Макет делаете вы.") == "Макет делаете вы."
+
+
 def test_phone_from_manager_answer_never_reaches_the_candidate():
     facts = C.raw_facts("Как с вами связаться по рекламе?", "Пишите в этот чат или звоните +7 912 345-67-89, отвечаем днём.")
     assert facts and "912" not in facts[0].answer and "[телефон]" in facts[0].answer
@@ -154,7 +163,7 @@ def test_admin_shows_candidates_and_approves_or_rejects(tmp_path):
     page = client.get("/learn", params={"token": "secret"}).text
     assert "Из переписки" in page and "Делаете ли вы дизайн баннера?" in page and "Откуда взято" in page
     ids = ",".join(str(r["id"]) for r in services.db.candidates())
-    resp = client.post("/candidates/approve", params={"token": "secret"},
+    resp = client.post("/candidates/approve",
                        data={"ids": ids, "question": fact["question"], "answer": fact["answer"]})
     assert resp.status_code == 200 and "Факт утверждён" in resp.text and services.db.candidates() == []
     note = services.settings.kb_dir / "notes" / "Из переписки" / "Общее.md"

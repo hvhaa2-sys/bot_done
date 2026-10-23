@@ -192,7 +192,8 @@ def test_admin_shows_pending_changes_publishes_and_rolls_back(tmp_path):
 def test_publish_mode_setting_is_validated(tmp_path):
     services = make_services(tmp_path)
     client = TestClient(create_app(services))
-    r = client.post("/settings?token=secret", data={"kb_publish": "sometimes"})
+    client.cookies.set("admin_token", "secret")
+    r = client.post("/settings", data={"kb_publish": "sometimes"})
     assert "Не сохранено" in r.text
     client.post("/settings", data={"kb_publish": "manual"})
     assert services.current()["kb_publish"] == "manual"

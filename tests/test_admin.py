@@ -7,7 +7,7 @@ from app.config import ROOT, Settings
 from app.services import Services
 
 
-def make_client(tmp_path):
+def make_client(tmp_path, login=True):
     kb_dir = tmp_path / "kb"
     kb_dir.mkdir()
     for name in ("faq.md", "prices.csv", "stop_topics.txt"):
@@ -15,11 +15,14 @@ def make_client(tmp_path):
     settings = replace(Settings.load(), db_path=tmp_path / "a.db", kb_dir=kb_dir,
                        llm_provider="mock", admin_token="secret", exam_files="")
     services = Services(settings)
-    return TestClient(create_app(services)), services
+    client = TestClient(create_app(services))
+    if login:  # как после формы входа: токен живёт в cookie, а не в адресе страницы
+        client.cookies.set("admin_token", "secret")
+    return client, services
 
 
 def test_requires_token(tmp_path):
-    client, _ = make_client(tmp_path)
+    client, _ = make_client(tmp_path, login=False)
     assert client.get("/").status_code == 401
     assert client.get("/?token=secret").status_code == 200
     assert client.get("/dialogs").status_code == 200  # токен запомнен в cookie
@@ -27,7 +30,7 @@ def test_requires_token(tmp_path):
 
 def test_sandbox_answers_and_logs(tmp_path):
     client, services = make_client(tmp_path)
-    r = client.post("/sandbox?token=secret", data={"question": "Сколько стоит экран в атриуме?"})
+    r = client.post("/sandbox", data={"question": "Сколько стоит экран в атриуме?"})
     assert r.status_code == 200 and "30 000" in r.text
     assert services.db.stats()["total"] == 1
 
@@ -35,16 +38,16 @@ def test_sandbox_answers_and_logs(tmp_path):
 def test_upload_kb(tmp_path):
     client, services = make_client(tmp_path)
     faq = "## Есть ли парковка?\nДа, бесплатная парковка на 300 мест.\n"
-    r = client.post("/kb/upload?token=secret", files={"faq": ("faq.md", faq.encode(), "text/markdown")})
+    r = client.post("/kb/upload", files={"faq": ("faq.md", faq.encode(), "text/markdown")})
     assert "Загружено: faq.md" in r.text
     assert len(services.kb.faq) == 1
-    r = client.post("/sandbox?token=secret", data={"question": "У вас есть парковка?"})
+    r = client.post("/sandbox", data={"question": "У вас есть парковка?"})
     assert "300 мест" in r.text
 
 
 def test_settings_apply_live_and_persist(tmp_path):
     client, services = make_client(tmp_path)
-    r = client.post("/settings?token=secret", data={
+    r = client.post("/settings", data={
         "model": "mock", "default_mode": "auto", "holding_message": "Секунду, уточню у коллег!",
         "greeting_message": "Добрый день!", "manager_pause_minutes": "45", "stale_message_minutes": "10",
         "confidence_threshold": "0,6", "retrieval_min_score": "1.0"})
@@ -56,13 +59,13 @@ def test_settings_apply_live_and_persist(tmp_path):
     again = Services(services.base_settings)
     assert again.settings.manager_pause_minutes == 45 and again.holding_message.startswith("Секунду")
     # сброс возвращает .env
-    client.post("/settings/reset?token=secret")
+    client.post("/settings/reset")
     assert services.settings.manager_pause_minutes == services.base_settings.manager_pause_minutes
 
 
 def test_settings_reject_bad_values(tmp_path):
     client, services = make_client(tmp_path)
-    r = client.post("/settings?token=secret", data={"model": "mock", "manager_pause_minutes": "много",
+    r = client.post("/settings", data={"model": "mock", "manager_pause_minutes": "много",
                                                     "holding_message": ""})
     assert "Не сохранено" in r.text
     assert services.db.get_settings() == {}
@@ -70,7 +73,7 @@ def test_settings_reject_bad_values(tmp_path):
 
 def test_flag_dialog_and_export(tmp_path):
     client, services = make_client(tmp_path)
-    client.post("/sandbox?token=secret", data={"question": "Сколько стоит экран в атриуме?"})
+    client.post("/sandbox", data={"question": "Сколько стоит экран в атриуме?"})
     dialog_id = services.db.recent_dialogs(1)[0]["id"]
     client.post(f"/dialogs/{dialog_id}/flag", data={"flagged": "1", "back": "/dialogs?f=flagged"})
     assert services.db.recent_dialogs(10, flagged=True)
@@ -90,7 +93,7 @@ def test_flag_dialog_and_export(tmp_path):
 def test_edit_stop_topics_in_browser(tmp_path):
     client, services = make_client(tmp_path)
     assert services.kb.matched_stop_topic("Нужен акт сверки") is None
-    r = client.post("/kb/save?token=secret", data={"name": "stop_topics.txt", "text": "скидк\nакт\n"})
+    r = client.post("/kb/save", data={"name": "stop_topics.txt", "text": "скидк\nакт\n"})
     assert "Сохранено" in r.text
     assert services.kb.matched_stop_topic("Нужен акт сверки") == "акт"
     assert client.get("/kb/file/stop_topics.txt").text == "скидк\nакт\n"
@@ -119,7 +122,7 @@ def test_schedule_off_hours(tmp_path):
     import asyncio
     import datetime as dt
     client, services = make_client(tmp_path)
-    r = client.post("/settings?token=secret", data={
+    r = client.post("/settings", data={
         "auto_schedule": "off_hours", "work_start": "09:00", "work_end": "19:00",
         "work_day": ["1", "2", "3", "4", "5"]})
     assert "Сохранено" in r.text, r.text[:300]
@@ -128,7 +131,7 @@ def test_schedule_off_hours(tmp_path):
     assert not services.auto_allowed(tue_noon)
     assert services.auto_allowed(tue_night) and services.auto_allowed(sat_noon)
     assert services.schedule_text() == "Пн–Пт 09:00–19:00"
-    r = client.post("/settings?token=secret", data={"auto_schedule": "off_hours", "work_start": "9 утра"})
+    r = client.post("/settings", data={"auto_schedule": "off_hours", "work_start": "9 утра"})
     assert "Не сохранено" in r.text
     asyncio.run(services.reset_settings())
     assert services.auto_allowed(tue_noon)
@@ -138,7 +141,7 @@ def test_import_chats_and_before_after_card(tmp_path):
     from tests.test_import import full_export
     client, services = make_client(tmp_path)
     export = full_export(tmp_path).read_bytes()
-    r = client.post("/import?token=secret", files={"files": ("result.json", export, "application/json")})
+    r = client.post("/import", files={"files": ("result.json", export, "application/json")})
     assert "Импорт готов: чатов 2" in r.text and "повторяющиеся вопросы: 100%" in r.text
     assert "Черновик FAQ" in r.text
     assert "## " in client.get("/import/file/faq_draft.md").text
@@ -150,7 +153,7 @@ def test_import_chats_and_before_after_card(tmp_path):
 
 def test_merge_and_summary_settings(tmp_path):
     client, services = make_client(tmp_path)
-    r = client.post("/settings?token=secret", data={"merge_seconds": "2,5", "summary_time": ""})
+    r = client.post("/settings", data={"merge_seconds": "2,5", "summary_time": ""})
     assert "Сохранено" in r.text
     assert services.current()["merge_seconds"] == "2.5" and services.current()["summary_time"] == ""
     assert "Не сохранено" in client.post("/settings", data={"summary_time": "вечером"}).text
@@ -223,7 +226,7 @@ def test_edit_add_delete_price_in_browser(tmp_path):
 
 
 def test_login_form_and_logout(tmp_path):
-    client, _ = make_client(tmp_path)
+    client, _ = make_client(tmp_path, login=False)
     page = client.get("/")
     assert page.status_code == 401 and "Войти" in page.text
     assert "Неверный токен" in client.post("/login", data={"token": "nope"}).text
@@ -271,14 +274,14 @@ def test_stranger_connection_approve_and_reject(tmp_path):
 
 
 def test_login_lockout_after_wrong_tokens(tmp_path):
-    client, _ = make_client(tmp_path)
+    client, _ = make_client(tmp_path, login=False)
     for _ in range(5):
         assert client.post("/login", data={"token": "guess"}).status_code == 401
     assert client.post("/login", data={"token": "secret"}).status_code == 429, "подбор остановлен"
 
 
 def test_stale_cookie_does_not_lock_owner_out(tmp_path):
-    client, _ = make_client(tmp_path)
+    client, _ = make_client(tmp_path, login=False)
     client.cookies.set("admin_token", "old-token")  # ADMIN_TOKEN сменили, а cookie осталась
     for _ in range(10):
         assert client.get("/").status_code == 401
@@ -287,7 +290,7 @@ def test_stale_cookie_does_not_lock_owner_out(tmp_path):
 
 def test_model_usage_on_overview(tmp_path):
     client, services = make_client(tmp_path)
-    client.post("/sandbox?token=secret", data={"question": "Сколько стоит экран в атриуме?"})
+    client.post("/sandbox", data={"question": "Сколько стоит экран в атриуме?"})
     assert services.usage_today()[0] == 1, "тестовый чат тоже расходует модель и считается"
     assert "Модель сегодня" in client.get("/").text
 
@@ -306,3 +309,21 @@ def test_notes_edit_upload_and_path_safety(tmp_path):
     assert "Загружено заметок: 1" in up.text
     client.post("/kb/note", data={"path": "ВЕЕР/Макеты.md", "text": text, "delete": "1"})
     assert not (tmp_path / "kb" / "notes" / "ВЕЕР" / "Макеты.md").exists()
+
+
+def test_token_never_stays_in_address_or_access_log(tmp_path):
+    import logging
+
+    from app.__main__ import HideToken
+    client, _ = make_client(tmp_path, login=False)
+    r = client.get("/kb?f=1&token=secret", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/kb?f=1", "в адресной строке токена не остаётся"
+    assert "admin_token=secret" in r.headers["set-cookie"]
+    (tmp_path / "other").mkdir()
+    fresh, _ = make_client(tmp_path / "other", login=False)
+    assert fresh.post("/sandbox?token=secret", data={"question": "Сколько стоит экран?"}).status_code == 401
+    assert "Неверный токен" in fresh.get("/?token=guess").text
+    record = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d',
+                               ("127.0.0.1:1", "GET", "/?token=secret", "1.1", 303), None)
+    HideToken().filter(record)
+    assert "secret" not in record.getMessage() and "token=***" in record.getMessage()

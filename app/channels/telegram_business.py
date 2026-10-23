@@ -29,6 +29,7 @@ from aiogram.types import (BusinessConnection, BusinessMessagesDeleted, Callback
 from .. import db as D
 from ..services import Services
 from .flow import HOLDING_NOT_SENT, HOLDING_SENT, process_client_message
+from .observation import observe
 
 log = logging.getLogger(__name__)
 
@@ -82,11 +83,16 @@ async def on_business_connection(bc: BusinessConnection, bot: Bot, services: Ser
                    "подключил бота без права отвечать" if not can_reply else f"подключил бота, режим: {mode_name(conn.mode)}"))
     if not bc.is_enabled:
         text = "Бот отключён от вашего аккаунта."
+    elif conn.mode == "off":
+        text = ("Бот выключен: не отвечает клиентам и не сохраняет переписку. "
+                "Включить: /mode observe (наблюдение), /mode draft (черновики) или /mode auto (автоответ).")
+    elif conn.mode == "observe":
+        text = "Наблюдение включено. Сохраняю переписку и предлагаю факты в «Обучении». Клиентам не отвечаю."
     elif not can_reply:
         text = "Бот подключён, но без права отвечать. Разрешите ему отвечать: Настройки → Автоматизация чатов."
     else:
         text = (f"Бот подключён. Режим: {mode_name(conn.mode)}.\n"
-                "Сменить режим: /mode draft (черновики) или /mode auto (автоответ).\n\n"
+                "Сменить режим: /mode observe (наблюдение), /mode draft (черновики), /mode auto (автоответ).\n\n"
                 "Совет: в «Автоматизации чатов» исключите контакты — тогда бот не будет "
                 "отвечать друзьям и семье, только новым клиентам.")
     await safe_send(bot, bc.user_chat_id, text)
@@ -121,6 +127,12 @@ async def on_business_message(message: Message, bot: Bot, services: Services, bu
         return
     # С Bot API 10.0 бизнес-бот может отвечать другим ботам — не даём двум ботам переписываться бесконечно
     if message.from_user and message.from_user.is_bot:
+        return
+    if conn.mode == "off":
+        return  # выключен: ни ответа, ни паузы, ни записи
+    if conn.mode == "observe":
+        text = message.text or message.caption or f"[{media_kind(message) or 'нетекстовое сообщение'}]"
+        await observe(message, services, conn, text)
         return
     # Пишет сам менеджер (текст, фото, голосовое — что угодно): бот замолкает в этом чате
     if message.from_user and message.from_user.id == conn.owner_user_id:
@@ -165,16 +177,27 @@ async def on_business_message(message: Message, bot: Bot, services: Services, bu
     buffer.timers[key] = asyncio.create_task(answer_later(bot, services, buffer, key, delay))
 
 
-async def on_edited_business_message(message: Message, buffer: MessageBuffer) -> None:
+async def on_edited_business_message(message: Message, buffer: MessageBuffer, services: Services) -> None:
     """Клиент поправил сообщение, пока бот ждал паузы, — отвечаем на исправленный текст."""
+    conn = services.db.get_connection(message.business_connection_id or "")
+    if conn and conn.mode == "off":
+        return
+    if conn and conn.enabled and conn.approved and conn.mode == "observe":
+        if not message.sender_business_bot and not message.is_from_offline \
+                and not (message.from_user and message.from_user.is_bot):
+            await observe(message, services, conn,
+                          message.text or message.caption or f"[{media_kind(message) or 'нетекстовое сообщение'}]")
+        return
     key = (message.business_connection_id or "", message.chat.id)
     text = message.text or message.caption
     if key in buffer.parts and text:
         buffer.parts[key] = [(mid, text if mid == message.message_id else old) for mid, old in buffer.parts[key]]
 
 
-async def on_deleted_business_messages(event: BusinessMessagesDeleted, buffer: MessageBuffer) -> None:
+async def on_deleted_business_messages(event: BusinessMessagesDeleted, buffer: MessageBuffer, services: Services) -> None:
     """Клиент удалил сообщение, пока бот ждал паузы, — на удалённое не отвечаем."""
+    async with services.chat_lock(event.business_connection_id, event.chat.id):
+        services.db.delete_observations(event.business_connection_id, event.chat.id, event.message_ids)
     key = (event.business_connection_id, event.chat.id)
     if key in buffer.parts:
         buffer.parts[key] = [(mid, t) for mid, t in buffer.parts[key] if mid not in set(event.message_ids)]
@@ -209,6 +232,9 @@ def media_kind(message: Message) -> str | None:
 async def hand_media_to_manager(bot: Bot, services: Services, conn: D.Connection, chat_id: int, kind: str,
                                 client: str = "клиент") -> None:
     """Голосовое, фото без подписи, файл: бот их не разбирает — разговор забирает менеджер."""
+    current = services.db.get_connection(conn.id)
+    if not current or current.mode in D.SILENT_MODES:
+        return
     # Пауза — до первого await: альбом из пяти фото приходит пятью сообщениями сразу,
     # а «Уточню и вернусь» и карточка менеджеру нужны одни
     services.db.pause_chat(conn.id, chat_id, services.settings.manager_pause_minutes)
@@ -218,12 +244,16 @@ async def hand_media_to_manager(bot: Bot, services: Services, conn: D.Connection
                            answer=holding if auto else "", decision="escalate", reason="media",
                            confidence=0.0, status=D.ESCALATED, sources=[], latency_ms=0, mode=conn.mode,
                            kb_version=services.kb_version)
-    sent = auto and conn.can_reply and await send_to_client(bot, conn.id, chat_id, services.sign(holding))
+    sent = auto and conn.can_reply and await send_to_client(bot, services, conn.id, chat_id, services.sign(holding))
+    current = services.db.get_connection(conn.id)
+    if not current or current.mode in D.SILENT_MODES:
+        return
     services.event(f"{client}: {kind} — бот такие не разбирает, передал менеджеру")
     await safe_send(bot, conn.owner_chat_id,
                     f"{client} прислал(а) {kind} — бот такие не разбирает, ответьте сами.\n"
                     f"{HOLDING_SENT + ' ' if sent else ''}"
-                    f"Бот молчит в этом чате {services.settings.manager_pause_minutes} мин.")
+                    f"Бот молчит в этом чате {services.settings.manager_pause_minutes} мин.",
+                    services=services, connection_id=conn.id)
 
 
 async def answer_later(bot: Bot, services: Services, buffer: MessageBuffer, key: tuple[str, int],
@@ -257,9 +287,12 @@ async def answer_client(bot: Bot, services: Services, connection_id: str, chat_i
 async def _answer_client(bot: Bot, services: Services, connection_id: str, chat_id: int, text: str,
                          client: str = "") -> None:
     conn = services.db.get_connection(connection_id)
-    if not conn or not conn.enabled:
+    if not conn or not conn.enabled or not conn.approved or conn.mode in D.SILENT_MODES:
         return
     out = await process_client_message(services, conn, chat_id, text, client)
+    conn = services.db.get_connection(connection_id)
+    if not conn or not conn.enabled or not conn.approved or conn.mode in D.SILENT_MODES:
+        return
     outcome = ("бот ответил сам" if out.to_client and not out.to_manager
                else "клиенту «Уточню и вернусь», вопрос — менеджеру" if out.to_client
                else "черновик менеджеру" if out.with_buttons
@@ -268,21 +301,25 @@ async def _answer_client(bot: Bot, services: Services, connection_id: str, chat_
 
     sent = False
     if out.to_client:
-        sent = conn.can_reply and await send_to_client(bot, conn.id, chat_id, out.to_client)
+        sent = conn.can_reply and await send_to_client(bot, services, conn.id, chat_id, out.to_client)
+        current = services.db.get_connection(conn.id)
+        if not current or current.mode in D.SILENT_MODES:
+            return
         if not sent and out.dialog_id and not out.to_manager:
             # Автоответ не дошёл (нет прав, прошло 24 часа) — вопрос забирает менеджер
             services.db.set_dialog_status(out.dialog_id, D.ESCALATED)
             services.event(f"{services.chat_names.get(chat_id, chat_id)}: ответ не ушёл клиенту (нет связи "
                            "с Telegram или прошло 24 часа) — передан менеджеру")
             await safe_send(bot, conn.owner_chat_id,
-                            f"Не получилось отправить ответ клиенту {client}, ответьте сами.\n\nВопрос клиента:\n«{text}»")
+                            f"Не получилось отправить ответ клиенту {client}, ответьте сами.\n\nВопрос клиента:\n«{text}»",
+                            services=services, connection_id=conn.id)
     if out.notice and sent:
         services.event(f"{services.chat_names.get(chat_id, chat_id)}: клиент готов к заказу — сообщил менеджеру")
-        await safe_send(bot, conn.owner_chat_id, out.notice)
+        await safe_send(bot, conn.owner_chat_id, out.notice, services=services, connection_id=conn.id)
     if out.to_manager:
         card = out.to_manager if sent or not out.to_client else out.to_manager.replace(HOLDING_SENT, HOLDING_NOT_SENT)
         markup = draft_keyboard(out.dialog_id) if out.with_buttons else None
-        await safe_send(bot, conn.owner_chat_id, card, reply_markup=markup)
+        await safe_send(bot, conn.owner_chat_id, card, reply_markup=markup, services=services, connection_id=conn.id)
 
 
 # --- решения менеджера по черновикам ---
@@ -296,6 +333,10 @@ async def on_draft_decision(cb: CallbackQuery, bot: Bot, services: Services) -> 
     if not conn or cb.from_user.id != conn.owner_user_id:
         await cb.answer("Нет доступа.")
         return
+    if conn.mode in D.SILENT_MODES:
+        await cb.answer("Бот выключен: отправка черновиков отключена." if conn.mode == "off"
+                        else "Включено наблюдение: отправка черновиков отключена.")
+        return
 
     ok = True
     if action == "skip":
@@ -307,7 +348,7 @@ async def on_draft_decision(cb: CallbackQuery, bot: Bot, services: Services) -> 
         # Сначала закрываем черновик, потом шлём: второе нажатие, пока идёт отправка, ничего не сделает
         claimed = services.db.claim_dialog(dialog["id"], D.DRAFT_SENT)
         if claimed:
-            ok = await send_to_client(bot, conn.id, dialog["chat_id"], services.sign(dialog["answer"]))
+            ok = await send_to_client(bot, services, conn.id, dialog["chat_id"], services.sign(dialog["answer"]))
             note = "Отправлено клиенту." if ok else send_failure(conn)
             if not ok:  # вернуть черновик: менеджер сможет нажать ещё раз
                 services.db.set_dialog_status(dialog["id"], dialog["status"])
@@ -335,13 +376,17 @@ async def on_manager_edit(message: Message, bot: Bot, services: Services) -> Non
     conn = services.db.get_connection(dialog["connection_id"])
     if not conn or message.from_user.id != conn.owner_user_id:
         return
+    if conn.mode in D.SILENT_MODES:
+        await message.answer(("Бот выключен" if conn.mode == "off" else "Включено наблюдение")
+                             + ": ответьте клиенту в его чате, отправка через бота отключена.")
+        return
     if not conn.can_reply:
         await message.answer(send_failure(conn))
         return
     if not services.db.claim_dialog(dialog["id"], D.DRAFT_EDITED, answer=message.text):
         await message.answer("Этот черновик уже обработан.")
         return
-    if await send_to_client(bot, conn.id, dialog["chat_id"], message.text):
+    if await send_to_client(bot, services, conn.id, dialog["chat_id"], message.text):
         await message.answer("Ваш вариант отправлен клиенту.")
         await collect_quietly(services, "card", conn.id, dialog["chat_id"], dialog["id"], dialog["question"],
                               message.text)
@@ -358,6 +403,8 @@ async def on_start(message: Message, services: Services) -> None:
         "Подключите меня: Настройки → Автоматизация чатов → добавьте бота и разрешите отвечать. "
         "Контакты лучше исключить — друзьям и семье бот отвечать не будет.\n\n"
         "Команды:\n"
+        "/mode off — выключить: бот молчит и ничего не сохраняет\n"
+        "/mode observe — наблюдение: собираю переписку без ответов\n"
         "/mode draft — черновики: ответ сначала приходит вам\n"
         "/mode auto — автоответ: бот отвечает клиенту сам\n"
         "/status — статистика\n"
@@ -368,8 +415,8 @@ async def on_start(message: Message, services: Services) -> None:
 
 async def on_mode(message: Message, command: CommandObject, services: Services) -> None:
     mode = (command.args or "").strip().lower()
-    if mode not in {"draft", "auto"}:
-        await message.answer("Укажите режим: /mode draft или /mode auto")
+    if mode not in D.MODES:
+        await message.answer("Укажите режим: /mode off, /mode observe, /mode draft или /mode auto")
         return
     n = services.db.set_mode(mode, owner_user_id=message.from_user.id)
     if n:
@@ -410,12 +457,16 @@ async def maybe_send_summaries(bot: Bot, services: Services, now: dt.datetime | 
     start = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     sent = 0
     for conn in services.db.connections():
+        if not conn.approved or conn.mode in D.SILENT_MODES:
+            continue
         summary = build_summary(services, conn, start) if conn.enabled else None
         if summary:
-            await safe_send(bot, conn.owner_chat_id, summary[0], reply_markup=summary[1])
+            await safe_send(bot, conn.owner_chat_id, summary[0], reply_markup=summary[1],
+                            services=services, connection_id=conn.id)
             sent += 1
         if conn.enabled and (proposals := build_candidates_message(services, conn)):
-            await safe_send(bot, conn.owner_chat_id, proposals[0], reply_markup=proposals[1])
+            await safe_send(bot, conn.owner_chat_id, proposals[0], reply_markup=proposals[1],
+                            services=services, connection_id=conn.id)
     services.db.set_settings({"summary_sent": today})
     return sent
 
@@ -539,7 +590,8 @@ def send_failure(conn: D.Connection) -> str:
 
 
 def mode_name(mode: str) -> str:
-    return "автоответ" if mode == "auto" else "черновики для менеджера"
+    return {"off": "выключен — не отвечает и не сохраняет переписку", "observe": "наблюдение без ответов",
+            "auto": "автоответ", "draft": "черновики для менеджера"}.get(mode, mode)
 
 
 TELEGRAM_LIMIT = 4096  # длиннее Telegram не принимает
@@ -549,10 +601,16 @@ def fit(text: str) -> str:
     return text if len(text) <= TELEGRAM_LIMIT else text[:TELEGRAM_LIMIT - 1].rstrip() + "…"
 
 
-async def send_to_client(bot: Bot, connection_id: str, chat_id: int, text: str) -> bool:
-    try:
-        await with_retry(bot.send_message, chat_id, fit(text), business_connection_id=connection_id)
+async def send_to_client(bot: Bot, services: Services, connection_id: str, chat_id: int, text: str) -> bool:
+    async def send() -> bool:
+        conn = services.db.get_connection(connection_id)
+        if not conn or not conn.enabled or not conn.approved or not conn.can_reply or conn.mode in D.SILENT_MODES:
+            return False
+        await bot.send_message(chat_id, fit(text), business_connection_id=connection_id)
         return True
+
+    try:
+        return await with_retry(send)
     except TelegramAPIError as exc:
         log.warning("Не удалось отправить клиенту: %s", exc)
         return False
@@ -570,9 +628,17 @@ async def with_retry(send, *args, **kwargs):
         return await send(*args, **kwargs)
 
 
-async def safe_send(bot: Bot, chat_id: int, text: str, **kwargs) -> None:
+async def safe_send(bot: Bot, chat_id: int, text: str, *, services: Services | None = None,
+                    connection_id: str | None = None, **kwargs) -> None:
+    async def send():
+        if services and connection_id:
+            conn = services.db.get_connection(connection_id)
+            if not conn or not conn.enabled or not conn.approved or conn.mode in D.SILENT_MODES:
+                return
+        return await bot.send_message(chat_id, fit(text), **kwargs)
+
     try:
-        await with_retry(bot.send_message, chat_id, fit(text), **kwargs)
+        await with_retry(send)
     except TelegramForbiddenError:
         log.warning("Менеджер заблокировал бота — карточки и сводки до него не дойдут (чат %s)", chat_id)
     except TelegramAPIError as exc:

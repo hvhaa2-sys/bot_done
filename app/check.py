@@ -83,7 +83,7 @@ async def main() -> int:
     if settings.admin_token == "change-me":
         line(False, "Админка", "смените ADMIN_TOKEN в .env на свой")
     await services.llm.close()
-    print(f"\nАдминка после запуска: http://localhost:{settings.admin_port}/?token={settings.admin_token}")
+    print(f"\nАдминка после запуска: http://localhost:{settings.admin_port}/ — токен для входа в .env (ADMIN_TOKEN)")
     print("Запуск: .venv/bin/python -m app" if ok else "Сначала поправьте пункты с ✗.")
     return 0 if ok else 1
 

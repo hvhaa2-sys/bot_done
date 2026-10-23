@@ -42,6 +42,12 @@ def extract_amounts(text: str) -> list[int]:
     return amounts
 
 
+def amount_spans(text: str) -> list[tuple[int, int, int]]:
+    """Денежная сумма и её границы для проверки связанного с ней срока."""
+    return [(_value(m.group(1), m.group(2), m.group(3)), m.start(), m.end()) for m in _AMOUNT_RE.finditer(text)
+            if re.sub(r"\D", "", m.group(1))]
+
+
 def extract_numbers(text: str) -> list[int]:
     """Все числа в тексте, с учётом «тыс.», «млн» и «к»."""
     return [_value(m.group(1), m.group(2), m.group(3) or m.group(4)) for m in _NUMBER_RE.finditer(text)]

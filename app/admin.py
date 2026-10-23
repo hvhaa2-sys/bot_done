@@ -24,15 +24,17 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import db as D
+from . import onboarding
 from .channels.flow import human_reason
 from .core.assistant import SKIP
 from .core.conversation import Conversation
 from .core.knowledge import PriceRow, format_rub, parse_faq, parse_note, parse_prices, parse_stop_topics, prices_csv
 from .core.candidates import group as group_candidates
+from .core.candidate_review import NOTE_PREFIX
 from .core.learning import faq_entry, group_questions
 from .core.price_guard import unknown_amounts
 from .core.versions import SHOWN as SHOWN_CHANGES, Report
-from .services import DAY_NAMES, MODELS, Services, model_key, model_title
+from .services import DAY_NAMES, MODELS, Services, model_key, model_title, validate
 
 STATUS_NAMES = {
     D.SENT_AUTO: "Бот ответил сам",
@@ -108,10 +110,30 @@ button.small{padding:4px 10px;font-size:13px}button:disabled{opacity:.5;cursor:d
 .note{background:var(--accent-bg);border-radius:10px;padding:10px 14px;margin-bottom:16px}
 tr.flag td{background:var(--accent-bg)}details summary{cursor:pointer;color:var(--muted)}
 pre{white-space:pre-wrap;margin:0;font:inherit}
+.onboarding-banner,.onboarding-head{display:flex;justify-content:space-between;gap:16px;align-items:center}
+.onboarding-banner{border-bottom:1px solid var(--line);padding:0 0 18px;margin:0 0 20px}
+.onboarding-head{margin-bottom:24px}.onboarding-head h1{margin:0}.onboarding-head p{margin:4px 0 0}
+.onboarding-layout{display:grid;grid-template-columns:220px minmax(0,1fr);gap:28px;max-width:980px}
+.onboarding-steps{list-style:none;margin:0;padding:0}.onboarding-steps li{margin-bottom:8px}
+.onboarding-steps a{display:flex;align-items:center;gap:10px;text-decoration:none;color:var(--muted);padding:10px 0}
+.onboarding-steps .current a{color:var(--text);font-weight:600}.step-mark{display:grid;place-items:center;
+width:27px;height:27px;border:1px solid var(--line);border-radius:50%;font-size:12px;flex:none}
+.current .step-mark{border-color:var(--accent);color:var(--accent)}.step-mark.done{color:var(--ok);border-color:var(--ok)}
+.onboarding-panel{padding:26px}.onboarding-panel>p:first-child{margin-top:0}.onboarding-panel h2{font-size:23px}
+.onboarding-next{margin-top:20px}.onboarding-next:empty{display:none}
+.onboarding-choice{display:flex;gap:10px;align-items:baseline;font-weight:400}.onboarding-choice input{flex:none}
+.onboarding-choices{display:flex;gap:8px 20px;flex-wrap:wrap}.onboarding-case{display:grid;grid-template-columns:1fr 1.5fr;gap:12px}
+.onboarding-panel fieldset{border:0;border-top:1px solid var(--line);padding:12px 0 20px;margin:20px 0 0;min-width:0}
+.onboarding-panel legend{padding:0 10px 0 0;font-weight:600}.onboarding-panel h3{font-size:18px}
+.onboarding-result{padding:16px 0;border-top:1px solid var(--line)}.onboarding-result .bubble{margin:10px 0}
+.onboarding-results,.onboarding-readiness{border-top:1px solid var(--line);padding-top:18px;margin-top:24px}
+@media(max-width:680px){.onboarding-layout{grid-template-columns:1fr;gap:12px}.onboarding-steps{display:flex;
+gap:8px;overflow-x:auto;padding-bottom:8px}.onboarding-steps li{flex:0 0 auto;margin:0}.onboarding-steps a{font-size:13px}
+.onboarding-panel{padding:18px}.onboarding-case{grid-template-columns:1fr}.onboarding-banner{align-items:flex-start;flex-wrap:wrap}}
 """
 
 NAV = [("/", "Обзор"), ("/dialogs", "Диалоги"), ("/learn", "Обучение"), ("/kb", "База знаний"),
-       ("/exam", "Экзамен"), ("/settings", "Настройки")]
+       ("/exam", "Экзамен"), ("/settings", "Настройки"), ("/onboarding", "Внедрение")]
 
 
 def page(title: str, body: str, active: str = "/", refresh: int | None = None) -> HTMLResponse:
@@ -146,6 +168,7 @@ def note(msg: str) -> str:
 def create_app(services: Services) -> FastAPI:
     app = FastAPI(title="AI Sales Assistant admin", docs_url=None, redoc_url=None)
     exam: dict = {"running": False, "done": 0, "total": 0, "error": ""}
+    onboarding_lock = asyncio.Lock()
 
     failures: dict[str, list[float]] = {}
 
@@ -155,16 +178,14 @@ def create_app(services: Services) -> FastAPI:
         return len(recent) >= LOGIN_TRIES
 
     def auth(request: Request) -> None:
+        """Только cookie после входа. Токен в адресе страницы оседает в истории браузера и журналах,
+        поэтому ссылка с ?token= лишь входит и сразу уводит на адрес без него (`token_from_link`)."""
         ip = request.client.host if request.client else "?"
-        token = request.query_params.get("token") or request.cookies.get("admin_token")
         if locked(ip):
             raise HTTPException(429, "Слишком много неверных попыток. Подождите 10 минут.")
-        if not secrets.compare_digest(token or "", services.settings.admin_token):
-            # Считаем только токен из ссылки: старая cookie после смены ADMIN_TOKEN не должна
-            # запирать владельца, а просто «без входа» — не попытка подбора
-            if request.query_params.get("token"):
-                failures.setdefault(ip, []).append(time.time())
-            raise HTTPException(401, "Нужен токен: откройте /?token=ВАШ_ADMIN_TOKEN")
+        if not secrets.compare_digest(request.cookies.get("admin_token") or "", services.settings.admin_token):
+            # Старая cookie после смены ADMIN_TOKEN не попытка подбора: просто покажем форму входа
+            raise HTTPException(401, "Войдите: токен — строка ADMIN_TOKEN в файле .env")
 
     @app.exception_handler(StarletteHTTPException)
     async def login_on_401(request: Request, exc: StarletteHTTPException):
@@ -193,11 +214,23 @@ def create_app(services: Services) -> FastAPI:
         return response
 
     @app.middleware("http")
-    async def remember_token(request: Request, call_next):
-        response = await call_next(request)
+    async def token_from_link(request: Request, call_next):
+        """Старая ссылка вида /?token=…: вход и переход на тот же адрес без токена. Для POST токен
+        в адресе не принимаем — там всегда есть форма входа."""
         token = request.query_params.get("token")
-        if token and secrets.compare_digest(token, services.settings.admin_token):
-            response.set_cookie("admin_token", token, httponly=True, samesite="lax")
+        if token is None:
+            return await call_next(request)
+        rest = urlencode([(k, v) for k, v in request.query_params.multi_items() if k != "token"])
+        clean = request.url.path + (f"?{rest}" if rest else "")
+        ip = request.client.host if request.client else "?"
+        if request.method != "GET" or locked(ip):
+            return login_page("Слишком много неверных попыток. Подождите 10 минут." if locked(ip) else "",
+                              status=429 if locked(ip) else 401)
+        if not secrets.compare_digest(token, services.settings.admin_token):
+            failures.setdefault(ip, []).append(time.time())
+            return login_page("Неверный токен.")
+        response = RedirectResponse(clean, status_code=303)
+        response.set_cookie("admin_token", token, httponly=True, samesite="lax")
         return response
 
     @app.get("/health")
@@ -205,6 +238,94 @@ def create_app(services: Services) -> FastAPI:
         """Для мониторинга на сервере: без токена, без подробностей."""
         services.db.conn.execute("SELECT 1").fetchone()
         return Response('{"ok": true}', media_type="application/json")
+
+    # --- внедрение бизнеса ---
+    def onboarding_page(step: str = "", msg: str = "", form: dict | None = None) -> HTMLResponse:
+        return page("Внедрение в бизнес", onboarding.render(services, step, msg, form), "/onboarding")
+
+    @app.get("/onboarding", dependencies=[Depends(auth)])
+    async def onboarding_start(step: str = "") -> HTMLResponse:
+        return onboarding_page(step)
+
+    @app.post("/onboarding/channel", dependencies=[Depends(auth)])
+    async def onboarding_channel(business_name: str = Form(""), connection_id: str = Form("")) -> Response:
+        name = business_name.strip()
+        values = {"business_name": name, "connection_id": connection_id}
+        if not name or len(name) > 120:
+            return onboarding_page("channel", "Название бизнеса — от 1 до 120 символов.", values)
+        if connection_id and not any(c.id == connection_id and c.enabled and c.approved for c in services.db.connections()):
+            return onboarding_page("channel", "Подключение недоступно. Проверьте его на «Обзоре».", values)
+        previous = onboarding.load(services)
+        if any(previous.get(k) != v for k, v in values.items()):
+            values.update(policy_review="", knowledge_review="", report={})
+        onboarding.save(services, **values)
+        return RedirectResponse("/onboarding", status_code=303)
+
+    @app.post("/onboarding/source", dependencies=[Depends(auth)])
+    async def onboarding_source(source: str = Form("")) -> Response:
+        if source not in onboarding.SOURCES:
+            return onboarding_page("source", "Выберите документы, экспорт переписки или наблюдение.")
+        onboarding.save(services, source=source)
+        return RedirectResponse("/onboarding?step=source", status_code=303)
+
+    @app.post("/onboarding/policy", dependencies=[Depends(auth)])
+    async def onboarding_policy(target_mode: str = Form("draft"), stop_topics: str = Form(""),
+                                holding_message: str = Form("")) -> Response:
+        values = {"target_mode": target_mode, "stop_topics": stop_topics, "holding_message": holding_message}
+        _, errors = validate({"holding_message": holding_message})
+        if target_mode not in onboarding.MODES:
+            errors.append("Выберите режим запуска.")
+        if len(stop_topics) > 10000 or not parse_stop_topics(stop_topics):
+            errors.append("Укажите темы для менеджера, до 10 000 символов.")
+        if errors:
+            return onboarding_page("policy", "Не сохранено: " + " ".join(errors), values)
+        await services.update_settings({"holding_message": holding_message})
+        path = services.settings.kb_dir / "stop_topics.txt"
+        text = stop_topics.strip() + "\n"
+        if not path.exists() or path.read_text(encoding="utf-8") != text:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        onboarding.save(services, target_mode=target_mode)
+        onboarding.save(services, policy_review=onboarding.policy_context(services, onboarding.load(services)))
+        return RedirectResponse("/onboarding?step=knowledge", status_code=303)
+
+    @app.post("/onboarding/knowledge", dependencies=[Depends(auth)])
+    async def onboarding_knowledge(reviewed: bool = Form(False), context: str = Form("")) -> Response:
+        if not reviewed or services.draft_changed() or not (services.kb.prices or services.kb.faq):
+            return onboarding_page("knowledge", "Сначала проверьте и опубликуйте непустую базу, затем подтвердите сверку.")
+        if context != onboarding.knowledge_context(services):
+            return onboarding_page("knowledge", "Версия базы изменилась. Проверьте её ещё раз.")
+        onboarding.save(services, knowledge_review=context)
+        return RedirectResponse("/onboarding?step=check", status_code=303)
+
+    @app.post("/onboarding/check", dependencies=[Depends(auth)])
+    async def onboarding_check(request: Request) -> HTMLResponse:
+        form = await request.form()
+        try:
+            cases = onboarding.cases_from_form(form)
+        except ValueError as exc:
+            return onboarding_page("check", str(exc), {"cases": onboarding.case_values(form)})
+        state = onboarding.progress(services)
+        if not all(s.done for s in state.steps if s.key in ("policy", "knowledge")):
+            return onboarding_page("check", "Сначала задайте границы и подтвердите опубликованные знания.", {"cases": cases})
+        if onboarding_lock.locked():
+            raise HTTPException(409, "Проверка уже идёт. Дождитесь результата.")
+        async with onboarding_lock:
+            await onboarding.run_check(services, cases)
+        return onboarding_page("check")
+
+    @app.post("/onboarding/review", dependencies=[Depends(auth)])
+    async def onboarding_review(reviewed: bool = Form(False), context: str = Form(""),
+                                report_id: str = Form("")) -> HTMLResponse:
+        state = onboarding.progress(services)
+        if (not reviewed or not state.report_current or not state.report.get("passed")
+                or context != state.report.get("context") or not report_id or report_id != state.report.get("id")):
+            return onboarding_page("check", "Нужна успешная проверка текущей базы и сверка её результатов.")
+        onboarding.save(services, report={**state.report, "reviewed": True})
+        return onboarding_page("check", "Сверка сохранена. Режим подключения не изменился.")
+
+    def upload_result(msg: str, back: str) -> HTMLResponse:
+        return onboarding_page("source", msg) if back == "onboarding" else page("База знаний", kb_html(services, msg), "/kb")
 
     # --- обзор и тестовый чат ---
     @app.get("/", dependencies=[Depends(auth)])
@@ -232,7 +353,7 @@ def create_app(services: Services) -> FastAPI:
         elif reply.is_answer:
             verdict = '<span class="ok">Бот ответит сам</span>'
         else:
-            verdict = f'<span class="warn">Передаст менеджеру: {escape(human_reason(reply.reason))}</span>'
+            verdict = f'<span class="warn">Передаст менеджеру: {escape(human_reason(reply.reason))}</span>'  # nosemgrep: raw-html-format
         titles = {c.id: c.text for c in services.kb.chunks}
         sources = "".join(f"<li>{escape(titles.get(s, s)[:140])}</li>" for s in reply.sources[:4])
         shown = services.sign(reply.text) if reply.is_answer else reply.text
@@ -269,7 +390,7 @@ def create_app(services: Services) -> FastAPI:
 
     @app.post("/mode", dependencies=[Depends(auth)])
     async def set_mode(connection_id: str = Form(...), mode: str = Form(...)) -> RedirectResponse:
-        if mode in ("draft", "auto"):
+        if mode in D.MODES:
             services.db.set_mode(mode, connection_id=connection_id)
         return RedirectResponse("/", status_code=303)
 
@@ -339,11 +460,13 @@ def create_app(services: Services) -> FastAPI:
         return page("Обучение", learn_html(services, f"Добавлено в базу знаний. {published}", check), "/learn")
 
     @app.post("/candidates/approve", dependencies=[Depends(auth)])
-    async def candidates_approve(ids: str = Form(...), question: str = Form(...), answer: str = Form(...)) -> HTMLResponse:
-        id_list = [int(i) for i in ids.split(",") if i.isdigit()]
-        ok, msg = services.approve_candidates(id_list, question, answer)
+    async def candidates_approve(ids: str = Form(...), question: str = Form(...), answer: str = Form(...),
+                                 source_reviewed: bool = Form(False)) -> HTMLResponse:
+        parts = [i.strip() for i in ids.split(",")]
+        id_list = [int(i) for i in parts] if all(re.fullmatch(r"[0-9]+", i) for i in parts) else []
+        ok, msg = services.approve_candidates(id_list, question, answer, source_reviewed=source_reviewed)
         if not ok:
-            return page("Обучение", learn_html(services, msg), "/learn")
+            return page("Обучение", learn_html(services, msg, candidate_edit=(id_list, question, answer)), "/learn")
         check = await answer_check(services, question.strip(), "Факт добавлен")
         return page("Обучение", learn_html(services, f"Факт утверждён. {msg}", check), "/learn")
 
@@ -431,7 +554,7 @@ def create_app(services: Services) -> FastAPI:
         return page("База знаний", kb_html(services, f"Сохранено: {path}. {published}"), "/kb")
 
     @app.post("/kb/notes/upload", dependencies=[Depends(auth)])
-    async def notes_upload(files: list[UploadFile] = File(...)) -> HTMLResponse:
+    async def notes_upload(files: list[UploadFile] = File(...), back: str = Form("")) -> HTMLResponse:
         saved, bad = [], []
         for upload in files:
             file = note_path(services, upload.filename or "")
@@ -445,33 +568,39 @@ def create_app(services: Services) -> FastAPI:
         msg = (f"Загружено заметок: {len(saved)}. {services.kb_changed('Загружены заметки: ' + ', '.join(saved))}"
                if saved else "Ничего не загружено.") + \
               (f" Не подошли (нужны .md с разделами «## …»): {', '.join(bad)}." if bad else "")
-        return page("База знаний", kb_html(services, msg), "/kb")
+        return upload_result(msg, back)
 
     @app.post("/kb/upload", dependencies=[Depends(auth)])
     async def kb_upload(faq: UploadFile | None = File(None), prices: UploadFile | None = File(None),
-                        stop_topics: UploadFile | None = File(None)) -> HTMLResponse:
+                        stop_topics: UploadFile | None = File(None), back: str = Form("")) -> HTMLResponse:
         files = {"faq.md": (faq, parse_faq), "prices.csv": (prices, parse_prices),
                  "stop_topics.txt": (stop_topics, parse_stop_topics)}
-        saved = []
+        prepared = {}
         for name, (upload, parser) in files.items():
             if upload is None or not upload.filename:
                 continue
-            text = (await upload.read()).decode("utf-8-sig")
+            try:
+                text = (await upload.read()).decode("utf-8-sig")
+            except UnicodeDecodeError:
+                return upload_result(f"Файл {name}: нужна кодировка UTF-8.", back)
             if not parser(text):
-                return page("База знаний", kb_html(services, f"Файл {name}: не удалось разобрать, проверьте формат."), "/kb")
+                return upload_result(f"Файл {name}: не удалось разобрать, проверьте формат.", back)
+            prepared[name] = text
+        saved = []
+        for name, text in prepared.items():
             services.settings.kb_dir.mkdir(parents=True, exist_ok=True)
             (services.settings.kb_dir / name).write_text(text, encoding="utf-8")
             saved.append(name)
         msg = (f"Загружено: {', '.join(saved)}. {services.kb_changed('Загружены файлы: ' + ', '.join(saved))}"
                if saved else "Файлы не выбраны.")
-        return page("База знаний", kb_html(services, msg), "/kb")
+        return upload_result(msg, back)
 
     @app.post("/kb/publish", dependencies=[Depends(auth)])
-    async def kb_publish(force: str = Form("")) -> HTMLResponse:
+    async def kb_publish(force: str = Form(""), back: str = Form("")) -> HTMLResponse:
         version, report = services.publish("Публикация из админки", force=bool(force))
         msg = (f"Опубликована версия {version} ({report.summary()}) — бот уже отвечает по ней." if version
                else f"Не опубликовано: {report.reason()}.")
-        return page("База знаний", kb_html(services, msg), "/kb")
+        return onboarding_page("knowledge", msg) if back == "onboarding" else page("База знаний", kb_html(services, msg), "/kb")
 
     @app.post("/kb/rollback/{version_id}", dependencies=[Depends(auth)])
     async def kb_rollback(version_id: int) -> HTMLResponse:
@@ -486,7 +615,7 @@ def create_app(services: Services) -> FastAPI:
                         headers={"Content-Disposition": f"attachment; filename={name}"})
 
     @app.post("/import", dependencies=[Depends(auth)])
-    async def import_chats(files: list[UploadFile] = File(...), me: str = Form("")) -> HTMLResponse:
+    async def import_chats(files: list[UploadFile] = File(...), me: str = Form(""), back: str = Form("")) -> HTMLResponse:
         from tools.import_telegram import run_import
         with tempfile.TemporaryDirectory() as tmp:
             paths = []
@@ -500,7 +629,7 @@ def create_app(services: Services) -> FastAPI:
                 msg = f"Импорт готов: чатов {r['chats']}, пар «вопрос — ответ» {r['pairs']}."
             except (ValueError, KeyError, json.JSONDecodeError) as exc:
                 msg = f"Не получилось разобрать выгрузку: {exc}. Нужен экспорт Telegram Desktop в формате JSON."
-        return page("База знаний", kb_html(services, msg), "/kb")
+        return upload_result(msg, back)
 
     @app.get("/import/file/{name}", dependencies=[Depends(auth)])
     async def import_file(name: str) -> Response:
@@ -607,7 +736,7 @@ placeholder="Сколько стоит экран на фуд-корте в ВЕ
 <p class="row"><button>Спросить</button>
 <button class="light" formaction="/sandbox/reset" formnovalidate>Новый разговор</button></p></form>{result}</div>"""
 
-    return f"""<h1>Обзор</h1>{connect_guide_html(services)}{kpis}{before_after_html(services)}{growth_html(services)}<div class="cols">{sandbox}
+    return f"""<h1>Обзор</h1>{onboarding.banner(services)}{connect_guide_html(services)}{kpis}{before_after_html(services)}{growth_html(services)}<div class="cols">{sandbox}
 <div class="card"><h2>Состояние</h2>{status_html(services)}</div></div>{activity_html(services)}{connections_html(services)}"""
 
 
@@ -677,10 +806,16 @@ def status_html(services: Services) -> str:
         item(True, f"Бот @{escape(bot['username'])}", "запущен")
     conns = [c for c in services.db.connections() if c.approved]
     pending = sum(not c.approved for c in services.db.connections())
-    modes = ", ".join("автоответ" if c.mode == "auto" else "черновики" for c in conns)
+    mode_names = {"off": "выключен", "observe": "наблюдение", "auto": "автоответ", "draft": "черновики"}
+    modes = ", ".join(mode_names.get(c.mode, c.mode) for c in conns)
     item(bool(conns) and not pending, "Подключения",
          (f"{len(conns)}: {modes}" if conns else "менеджер ещё не подключил бота")
          + (f" · {pending} ждёт разрешения ниже" if pending else ""))
+    observed = services.db.observation_stats()
+    if observed["messages"] or any(c.mode == "observe" for c in conns):
+        item(True, "Наблюдение без ответов",
+             f'<a href="/dialogs?f=observe">Сообщений: {observed["messages"]} · чатов: {observed["chats"]}</a>'
+             f' · <a href="/learn">кандидатов в базу: {observed["candidates"]}</a>')
     calls, tokens = services.usage_today()
     limit = int(services.current()["daily_llm_limit"])
     rub = tokens / 1000 * PRICE_PER_1K.get(st.gigachat_model, 0.5)
@@ -746,7 +881,9 @@ def connections_html(services: Services) -> str:
 </td></tr>"""
         return f"""<tr><td>{who}</td><td>{'включено' if c.enabled else 'выключено'}</td>
 <td><form method="post" action="/mode" class="row"><input type="hidden" name="connection_id" value="{escape(c.id)}">
-<select name="mode" style="width:auto"><option value="draft" {'selected' if c.mode == 'draft' else ''}>Черновики</option>
+<select name="mode" style="width:auto"><option value="off" {'selected' if c.mode == 'off' else ''}>Выключен</option>
+<option value="observe" {'selected' if c.mode == 'observe' else ''}>Наблюдение</option>
+<option value="draft" {'selected' if c.mode == 'draft' else ''}>Черновики</option>
 <option value="auto" {'selected' if c.mode == 'auto' else ''}>Автоответ</option></select>
 <button class="small">Сохранить</button></form></td></tr>"""
     pending = sum(not c.approved for c in conns)
@@ -756,7 +893,8 @@ def connections_html(services: Services) -> str:
 <tr><th>Менеджер</th><th>Статус</th><th>Режим</th></tr>{"".join(row(c) for c in conns)}</table></div></div>"""
 
 
-def learn_html(services: Services, msg: str = "", check: str = "") -> str:
+def learn_html(services: Services, msg: str = "", check: str = "", *,
+               candidate_edit: tuple[list[int], str, str] | None = None) -> str:
     groups = group_questions(services.db.to_learn())
     intro = """<p class="muted">Здесь вопросы, на которые у бота не нашлось ответа, и ответы, отмеченные как ошибка.
 Похожие собраны вместе, частые — сверху. Напишите ответ один раз, и в следующий раз бот ответит сам.
@@ -781,7 +919,7 @@ def learn_html(services: Services, msg: str = "", check: str = "") -> str:
 <form method="post" action="/learn/hide"><input type="hidden" name="ids" value="{ids}">
 <button class="light small">Скрыть — это не вопрос для бота</button></form></div>""")
         body = "".join(cards)
-    return f"<h1>Чему научить бота</h1>{note(msg)}{check}{candidates_html(services)}{intro}{body}"
+    return f"<h1>Чему научить бота</h1>{note(msg)}{check}{candidates_html(services, candidate_edit)}{intro}{body}"
 
 
 async def answer_check(services: Services, question: str, done: str) -> str:
@@ -850,29 +988,39 @@ def versions_html(services: Services) -> str:
 <p class="hint">«Вернуть» отменяет и неопубликованные правки; они сохраняются в папке data/kb_versions.</p></details></div>"""
 
 
-SOURCE_NAMES = {"card": "ответ на карточку бота", "chat": "ответ в чате клиента"}
+SOURCE_NAMES = {"card": "ответ на карточку бота", "chat": "ответ в чате клиента", "observe": "наблюдение"}
 
 
-def candidates_html(services: Services) -> str:
+def candidates_html(services: Services, candidate_edit: tuple[list[int], str, str] | None = None) -> str:
     """Факты из ответов менеджера клиентам: утвердить, поправить или отклонить. До утверждения бот их не видит."""
-    groups = group_candidates(services.db.candidates())
+    groups = group_candidates(services.db.candidates(), services.kb)
     if not groups:
         return ""
     cards = []
     for items in groups[:30]:
         top = items[0]
+        question, answer = top["question"], top["answer"]
+        if candidate_edit and set(candidate_edit[0]) == {r["id"] for r in items}:
+            _, question, answer = candidate_edit
         ids = ",".join(str(r["id"]) for r in items)
         when = dt.datetime.fromtimestamp(top["created_at"]).strftime("%d.%m %H:%M")
-        warn = f'<p class="warn">{escape(top["note"])}</p>' if top["note"] else ""
+        warnings = services.candidate_warnings(items, question, answer)
+        # Сохранённая сверка относится к исходному извлечению. После правки показываем
+        # текущие сигналы, сохраняя прежние подсказки о прайсе и похожих фактах.
+        notes = list(dict.fromkeys([line for r in items for line in r["note"].splitlines()
+                                   if line and not line.startswith(NOTE_PREFIX)] + warnings))
+        warn = "".join(f'<p class="warn">{escape(n)}</p>' for n in notes)
+        reviewed = ('<label><input type="checkbox" name="source_reviewed" value="true"> '
+                    'Сверил с исходным ответом</label>') if warnings else ""
         sources = "".join(
             f"<li><b>Клиент:</b> {escape(r['client_question'])}<br><b>Вы ({SOURCE_NAMES.get(r['source'], r['source'])}):</b> "
-            f"{escape(r['manager_text'])}</li>" for r in items[:5])
-        cards.append(f"""<div class="card"><h2>«{escape(top['question'])}»</h2>
+            f"{escape(r['manager_text'])}</li>" for r in items)
+        cards.append(f"""<div class="card"><h2>«{escape(question)}»</h2>
 <p class="muted">{plural(len(items), "источник", "источника", "источников")} · последний {when}</p>{warn}
-<details><summary>Откуда взято</summary><ul class="muted">{sources}</ul></details>
+<details{' open' if warnings else ''}><summary>Откуда взято</summary><ul class="muted">{sources}</ul></details>
 <form method="post" action="/candidates/approve"><input type="hidden" name="ids" value="{ids}">
-<label>Вопрос</label><input type="text" name="question" value="{escape(top['question'])}">
-<label>Ответ для базы</label><textarea name="answer" rows="3">{escape(top['answer'])}</textarea>
+<label>Вопрос</label><input type="text" name="question" value="{escape(question)}">
+<label>Ответ для базы</label><textarea name="answer" rows="3">{escape(answer)}</textarea>{reviewed}
 <p class="row"><button>Утвердить</button></p></form>
 <form method="post" action="/candidates/reject"><input type="hidden" name="ids" value="{ids}">
 <button class="light small">Отклонить</button></form></div>""")
@@ -896,9 +1044,25 @@ def growth_html(services: Services) -> str:
 
 
 def dialogs_html(services: Services, f: str, q: str) -> str:
-    f = f if f in FILTERS else ""
+    f = f if f in FILTERS or f == "observe" else ""
     tabs = "".join(
         f'<a href="/dialogs?f={key}" class="{"on" if key == f else ""}">{name}</a>' for key, (name, _) in FILTERS.items())
+    tabs += f'<a href="/dialogs?f=observe" class="{"on" if f == "observe" else ""}">Наблюдение</a>'
+    if f == "observe":
+        rows = "".join(
+            f"<tr><td class='muted'>{dt.datetime.fromtimestamp(r['sent_at']).strftime('%d.%m %H:%M')}</td>"
+            f"<td>{r['chat_id']}</td><td>{'Менеджер' if r['role'] == 'manager' else 'Клиент'}</td>"
+            f"<td><pre>{escape(r['text'])}</pre></td></tr>"
+            for r in services.db.observations(query=q.strip()))
+        rows = rows or "<tr><td colspan=4 class='muted'>Пока нет сообщений</td></tr>"
+        return f"""<h1>Диалоги</h1><div class="tabs">{tabs}</div>
+<form method="get" action="/dialogs" class="row"><input type="hidden" name="f" value="observe">
+<input type="search" name="q" value="{escape(q)}" placeholder="Поиск по переписке" style="flex:1">
+<button class="light">Найти</button></form><div class="card">
+<p class="muted">Клиентам ничего не отправляется. Факты из ответов менеджера — в <a href="/learn">«Обучении»</a>.
+Телефоны, почты и номера карт скрыты. Голосовые и файлы сохраняются только как отметки.</p>
+<div class="scroll"><table><tr><th>Когда</th><th>Чат</th><th>Кто</th><th>Сообщение</th></tr>
+{rows}</table></div></div>"""
     back = escape("/dialogs?" + urlencode({"f": f, "q": q} if q else {"f": f}))
     rows = []
     for r in services.db.recent_dialogs(300, query=q.strip(), **FILTERS[f][1]):
@@ -1168,7 +1332,8 @@ def settings_html(services: Services, msg: str = "", form: dict | None = None) -
 <label for="model">Нейросеть</label><select id="model" name="model">{models}</select>{key_warn}
 <p class="hint">Lite отвечает быстрее, Pro точнее: на экзамене у Pro не было опасных ответов.</p>
 <label for="mode">Режим для новых подключений</label>
-<select id="mode" name="default_mode"><option value="draft" {"selected" if mode == "draft" else ""}>Черновики — ответ сначала видит менеджер</option>
+<select id="mode" name="default_mode"><option value="observe" {"selected" if mode == "observe" else ""}>Наблюдение — сбор переписки без ответов</option>
+<option value="draft" {"selected" if mode == "draft" else ""}>Черновики — ответ сначала видит менеджер</option>
 <option value="auto" {"selected" if mode == "auto" else ""}>Автоответ — бот отвечает клиенту сам</option></select>
 <p class="hint">У уже подключённых менеджеров режим меняется на странице «Обзор» или командой /mode в боте.</p></div>
 

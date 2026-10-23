@@ -45,7 +45,8 @@ def sandbox_app(tmp_path):
 
 
 def ask(client, question):
-    response = client.post("/sandbox?token=secret", data={"question": question})
+    client.cookies.set("admin_token", "secret")
+    response = client.post("/sandbox", data={"question": question})
     assert response.status_code == 200
     return response
 

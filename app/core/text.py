@@ -82,6 +82,9 @@ def fix_mixed_script(text: str) -> str:
 
 _TRANSLIT = [("shch", "щ"), ("sch", "щ"), ("zh", "ж"), ("kh", "х"), ("ts", "ц"), ("ch", "ч"), ("sh", "ш"),
              ("yu", "ю"), ("ya", "я"), ("yo", "ё"), ("ye", "е")] + list(zip("abvgdezijklmnoprstufhcyx", "абвгдезийклмнопрстуфхцых"))
+_TRANSLIT_WORDS = set("privet nuzhna nuzhno nuzhen reklama reklamu ekran ekrane ekranah ekrany skolko stoit "
+                       "stoimost tsena cena nedeli nedelyu mesyats mesyac rolik rolika sdelat".split())
+_LATIN_NAMES = set("ozon wildberries telegram youtube instagram whatsapp".split())
 
 
 def translit_word(word: str) -> str:
@@ -93,10 +96,23 @@ def translit_word(word: str) -> str:
 
 
 def from_translit(text: str) -> str:
-    """«skolko stoit ekran v veer» → «сколько стоит екран в веер»: только если в сообщении нет русских
-    букв и это не одно-два английских слова («screen?»)."""
-    if re.search(r"[а-яё]", text, re.IGNORECASE) or len(re.findall(r"[a-z]{2,}", text, re.IGNORECASE)) < 3:
+    """Русский транслит, включая смешанные сообщения с двумя узнаваемыми словами.
+    Английские названия и короткие фразы вроде «screen?» сами по себе не переводим."""
+    words = re.findall(r"[a-z]{2,}", text, re.IGNORECASE)
+    if len(words) < 3:
         return text
+    if re.search(r"[а-яё]", text, re.IGNORECASE):
+        if sum(word.lower() in _TRANSLIT_WORDS for word in words) < 2:
+            return text
+
+        def convert(match: re.Match) -> str:
+            word = match.group()
+            if word.lower() in _LATIN_NAMES or word.isupper():
+                return word
+            return translit_word(word)
+
+        return re.sub(r"\b[a-z]+\b", convert, text, flags=re.IGNORECASE) \
+            .replace("сколко", "сколько").replace("екран", "экран")
     out = text.lower()
     for latin, cyr in _TRANSLIT:
         out = out.replace(latin, cyr)

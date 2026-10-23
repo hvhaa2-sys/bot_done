@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from .config import ROOT, Settings
 from .core.assistant import GREETING_MESSAGE, HOLDING_MESSAGE, Assistant
 from .core import candidates, versions
+from .core.candidate_review import NOTE_PREFIX, review_candidate
 from .core.knowledge import KnowledgeBase, format_rub
 from .core.price_guard import unknown_amounts
 from .db import Database
@@ -103,8 +104,8 @@ def validate(values: dict[str, str]) -> tuple[dict[str, str], list[str]]:
             errors.append("Отметьте хотя бы один рабочий день.")
         elif key == "kb_publish" and raw not in ("auto", "manual"):
             errors.append("Публикация базы — «сразу после проверки» или «вручную».")
-        elif key == "default_mode" and raw not in ("draft", "auto"):
-            errors.append("Режим должен быть «Черновики» или «Автоответ».")
+        elif key == "default_mode" and raw not in ("observe", "draft", "auto"):
+            errors.append("Режим должен быть «Наблюдение», «Черновики» или «Автоответ».")
         elif field.kind is str and not (field.low <= len(raw) <= (field.high or 10_000)):
             errors.append("Текст не может быть пустым или длиннее 500 символов.")
         elif field.kind in (int, float):
@@ -184,7 +185,8 @@ class Services:
                          address=self.current()["address"])
 
     async def collect_candidates(self, *, source: str, connection_id: str | None, chat_id: int | None,
-                                 dialog_id: int | None, client_question: str, manager_text: str) -> int:
+                                 dialog_id: int | None, client_question: str, manager_text: str,
+                                 observation_id: int | None = None, source_message_ids: tuple[int, ...] = ()) -> int:
         """Ответ менеджера клиенту → кандидаты в базу знаний. До утверждения бот их не видит.
         Возвращает, сколько кандидатов добавлено."""
         if self.llm_limit_reached():  # дневной лимит модели — сохраняем пару как есть, менеджер разберёт
@@ -194,19 +196,35 @@ class Services:
         if tokens:
             self.db.add_usage(self.local_now().strftime("%Y-%m-%d"), tokens)
         for fact in facts:
+            notes = [candidates.review_note(self.kb, fact.question, fact.answer),
+                     *(NOTE_PREFIX + warning for warning in
+                       review_candidate(self.kb, fact.question, fact.answer, manager_text, client_question))]
             self.db.add_candidate(connection_id=connection_id, chat_id=chat_id, dialog_id=dialog_id, source=source,
                                   client_question=client_question, manager_text=manager_text,
                                   question=fact.question, answer=fact.answer,
-                                  note=candidates.review_note(self.kb, fact.question, fact.answer))
+                                  note="\n".join(n for n in notes if n),
+                                  observation_id=observation_id, source_message_ids=source_message_ids)
         if facts:
             self.event(f"Из ответа менеджера предложено фактов для базы: {len(facts)} — утвердите в «Обучении»")
         return len(facts)
 
-    def approve_candidates(self, ids: list[int], question: str, answer: str) -> tuple[bool, str]:
+    def candidate_warnings(self, rows, question: str, answer: str) -> list[str]:
+        """Сверить отредактированный факт со всеми выбранными исходниками, без модели."""
+        return list(dict.fromkeys(warning for row in rows
+                    for warning in review_candidate(self.kb, question, answer, row["manager_text"],
+                                                    row["client_question"])))
+
+    def approve_candidates(self, ids: list[int], question: str, answer: str, *,
+                           source_reviewed: bool = False) -> tuple[bool, str]:
         """Утвердить кандидата (группу похожих) — записать в заметку черновика и опубликовать по правилам
         версий. Возвращает (утверждено ли, фраза для менеджера). Цены — только из прайса: сумму из переписки
         бот назвать всё равно не сможет."""
         question, answer = question.strip(), answer.strip()
+        if not ids or any(type(i) is not int or i <= 0 for i in ids):
+            return False, "Выберите существующие новые кандидаты."
+        rows = [self.db.get_candidate(i) for i in dict.fromkeys(ids)]
+        if any(row is None or row["status"] != "new" for row in rows):
+            return False, "Набор кандидатов изменился: есть отсутствующие или уже рассмотренные. Обновите страницу."
         if not question or not answer:
             return False, "Нужны и вопрос, и ответ."
         draft = self.draft_kb()
@@ -214,6 +232,10 @@ class Services:
             sums = ", ".join(format_rub(a) for a in bad)
             return False, (f"В ответе сумма {sums}, которой нет в прайсе: бот не сможет её назвать. "
                            "Добавьте позицию в прайс («База знаний») или уберите сумму из ответа.")
+        if warnings := self.candidate_warnings(rows, question, answer):
+            if not source_reviewed:
+                return False, ("Нужна сверка с исходным ответом. " + " ".join(warnings) +
+                               " Исправьте факт или отметьте «Сверил с исходным ответом» после проверки.")
         path, venue = candidates.target_note(draft, question, answer)
         candidates.add_to_note(self.settings.kb_dir / "notes" / path, venue, question, answer)
         self.db.supersede_candidates(question)

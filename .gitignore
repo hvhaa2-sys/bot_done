@@ -12,6 +12,12 @@ __pycache__/
 eval/results_*.csv
 data/import/
 *.json
+!eval/simulation/clients.json
+!eval/simulation/manager.json
+!eval/simulation/difficult_clients.json
+!eval/simulation/difficult_learning.json
+!eval/simulation/heldout_clients.json
+eval/simulation/runs/
 !eval/retrieval_results/report.json
 !Итерации/04_18_ноября_Сравнение_поиска/Материалы/BM25_21-10-2026_report.json
 !Итерации/Опорная_сборка_2026-10-22/СБОРКА.json

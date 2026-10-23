@@ -53,6 +53,8 @@ class Outgoing:
 async def process_client_message(services: Services, conn: Connection, chat_id: int, text: str,
                                  client: str = "") -> Outgoing:
     """client — имя клиента для карточки менеджеру (в журнал не пишется)."""
+    if conn.mode in D.SILENT_MODES:
+        return Outgoing(0)
     # Клиент пишет слишком часто (спам, бот, попытка выжечь лимит модели) — замолкаем в этом чате на час
     hourly = int(services.current()["chat_hourly_limit"])
     if hourly and services.db.count_recent(conn.id, chat_id, 3600) >= hourly:

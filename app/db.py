@@ -78,6 +78,17 @@ CREATE TABLE IF NOT EXISTS pauses (
     until_ts REAL NOT NULL,
     PRIMARY KEY (connection_id, chat_id)
 );
+CREATE TABLE IF NOT EXISTS observed_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    connection_id TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    text TEXT NOT NULL,
+    sent_at REAL NOT NULL,
+    reply_to_message_id INTEGER,
+    UNIQUE (connection_id, chat_id, message_id)
+);
 """
 
 # Статусы диалога
@@ -88,6 +99,12 @@ DRAFT_EDITED = "draft_edited"    # менеджер отправил свою п
 DRAFT_REJECTED = "draft_rejected"
 ESCALATED = "escalated"          # передано менеджеру, клиенту ушло «уточню»
 SANDBOX = "sandbox"
+# Режимы подключения: off — бот молчит и ничего не сохраняет; observe — молчит, но сохраняет переписку;
+# draft — черновики менеджеру; auto — отвечает клиенту сам. В off и observe клиенту и менеджеру бот не пишет
+MODES = ("off", "observe", "draft", "auto")
+SILENT_MODES = frozenset({"off", "observe"})
+OBSERVE_PAIR_HOURS = 24      # наблюдение: ответ менеджера на вопрос без явного «ответить» — в пределах суток
+OBSERVE_PIECE_MINUTES = 30   # куски одного вопроса или ответа — не дальше получаса друг от друга
 HISTORY_MINUTES = 180  # дольше трёх часов — уже другой разговор              # вопрос из песочницы админки
 
 
@@ -129,6 +146,11 @@ class Database:
         conn_columns = {r["name"] for r in self.conn.execute("PRAGMA table_info(connections)")}
         if "approved" not in conn_columns:
             self.conn.execute("ALTER TABLE connections ADD COLUMN approved INTEGER NOT NULL DEFAULT 1")
+        candidate_columns = {r["name"] for r in self.conn.execute("PRAGMA table_info(candidates)")}
+        if "observation_id" not in candidate_columns:
+            self.conn.execute("ALTER TABLE candidates ADD COLUMN observation_id INTEGER")
+        if "source_message_ids" not in candidate_columns:
+            self.conn.execute("ALTER TABLE candidates ADD COLUMN source_message_ids TEXT NOT NULL DEFAULT '[]'")
         self.conn.commit()
 
     # --- подключения Telegram Business ---
@@ -161,8 +183,8 @@ class Database:
 
     def set_mode(self, mode: str, *, connection_id: str | None = None,
                  owner_user_id: int | None = None) -> int:
-        if mode not in {"draft", "auto"}:
-            raise ValueError("mode must be 'draft' or 'auto'")
+        if mode not in MODES:
+            raise ValueError(f"mode must be one of {MODES}")
         if connection_id:
             cur = self.conn.execute("UPDATE connections SET mode=? WHERE id=?", (mode, connection_id))
         else:
@@ -256,7 +278,8 @@ class Database:
         if query:
             where.append("(question LIKE ? OR answer LIKE ?)")
             args += [f"%{query}%", f"%{query}%"]
-        sql = "SELECT * FROM dialogs" + (" WHERE " + " AND ".join(where) if where else "")
+        # Bandit B608 — ложное срабатывание: в строку попадают только заготовленные условия и «?», значения идут параметрами
+        sql = "SELECT * FROM dialogs" + (" WHERE " + " AND ".join(where) if where else "")  # nosec — см. комментарий выше
         return self.conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*args, limit)).fetchall()
 
     def to_learn(self, limit: int = 500) -> list[sqlite3.Row]:
@@ -389,14 +412,102 @@ class Database:
 
     # --- база из переписки: кандидаты в факты ---
     def add_candidate(self, *, connection_id: str | None, chat_id: int | None, dialog_id: int | None, source: str,
-                      client_question: str, manager_text: str, question: str, answer: str, note: str = "") -> int:
+                      client_question: str, manager_text: str, question: str, answer: str, note: str = "",
+                      observation_id: int | None = None, source_message_ids: tuple[int, ...] = ()) -> int:
         cur = self.conn.execute(
             """INSERT INTO candidates (connection_id, chat_id, dialog_id, source, client_question, manager_text,
-               question, answer, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               question, answer, note, created_at, observation_id, source_message_ids)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (connection_id, chat_id, dialog_id, source, mask_pd(client_question), mask_pd(manager_text),
-             mask_pd(question), mask_pd(answer), note, time.time()))
+             mask_pd(question), mask_pd(answer), note, time.time(), observation_id, json.dumps(source_message_ids)))
         self.conn.commit()
         return int(cur.lastrowid)
+
+    # --- наблюдение: отдельно от ответов бота и их метрик ---
+    def observe_message(self, *, connection_id: str, chat_id: int, message_id: int, role: str,
+                        text: str, sent_at: float, reply_to_message_id: int | None = None) -> tuple[int, bool]:
+        if role not in ("client", "manager"):
+            raise ValueError("Unknown observation role")
+        text = mask_pd(text)
+        old = self.conn.execute("SELECT * FROM observed_messages WHERE connection_id=? AND chat_id=? AND message_id=?",
+                                (connection_id, chat_id, message_id)).fetchone()
+        if old and (old["text"], old["role"], old["reply_to_message_id"]) == (text, role, reply_to_message_id):
+            return old["id"], False
+        if old:
+            self.invalidate_observed_candidates([old["id"]])
+        self.conn.execute(
+            """INSERT INTO observed_messages (connection_id, chat_id, message_id, role, text, sent_at, reply_to_message_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(connection_id, chat_id, message_id)
+               DO UPDATE SET text=excluded.text, role=excluded.role, reply_to_message_id=excluded.reply_to_message_id""",
+            (connection_id, chat_id, message_id, role, text, sent_at, reply_to_message_id))
+        self.conn.commit()
+        row = self.conn.execute("SELECT id FROM observed_messages WHERE connection_id=? AND chat_id=? AND message_id=?",
+                                (connection_id, chat_id, message_id)).fetchone()
+        return row["id"], True
+
+    def observations(self, limit: int = 300, *, query: str = "") -> list[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM observed_messages WHERE text LIKE ? ORDER BY id DESC LIMIT ?",
+                                 (f"%{query}%", limit)).fetchall()
+
+    def observation_context(self, connection_id: str, chat_id: int, message_id: int):
+        """Последний блок вопросов и ответ менеджера, включая сообщения, отправленные кусками."""
+        rows = self.conn.execute(
+            """SELECT * FROM observed_messages WHERE connection_id=? AND chat_id=? AND message_id<=?
+               ORDER BY message_id DESC LIMIT 100""", (connection_id, chat_id, message_id)).fetchall()
+        if not rows or rows[0]["role"] != "manager":
+            return None
+        manager, client = [], []
+        i = 0
+        target = rows[0]["reply_to_message_id"]
+        while i < len(rows) and rows[i]["role"] == "manager":
+            reply_to = rows[i]["reply_to_message_id"]
+            if target and reply_to and reply_to != target:
+                break
+            if manager and manager[-1]["sent_at"] - rows[i]["sent_at"] > OBSERVE_PIECE_MINUTES * 60:
+                break  # вчерашний ответ — не кусок сегодняшнего
+            target = target or reply_to
+            manager.append(rows[i])
+            i += 1
+        if target:
+            client = [r for r in rows if r["message_id"] == target and r["role"] == "client"]
+        else:
+            while i < len(rows) and rows[i]["role"] == "client":
+                if client and client[-1]["sent_at"] - rows[i]["sent_at"] > OBSERVE_PIECE_MINUTES * 60:
+                    break  # «Здравствуйте» вчера и вопрос сегодня — разные блоки
+                client.append(rows[i])
+                i += 1
+        # Явный ответ на сообщение связываем при любой задержке; без него — ответ в пределах суток:
+        # живой менеджер отвечает и через полдня, и утром — такие пары самые ценные для базы
+        if not client or (not target and manager[-1]["sent_at"] - client[0]["sent_at"] > OBSERVE_PAIR_HOURS * 3600):
+            return None
+        sources = tuple(r["id"] for r in reversed(client + manager))
+        question = "\n".join(r["text"] for r in reversed(client))
+        answer = "\n".join(r["text"] for r in reversed(manager))
+        return manager[-1]["id"], question[-6000:], answer[-6000:], sources
+
+    def invalidate_observed_candidates(self, message_ids: list[int]) -> None:
+        changed = set(message_ids)
+        rows = self.conn.execute("SELECT id, source_message_ids FROM candidates WHERE source='observe' AND status='new'")
+        ids = [r["id"] for r in rows if changed.intersection(json.loads(r["source_message_ids"]))]
+        self.conn.executemany("UPDATE candidates SET status='superseded', decided_at=? WHERE id=?",
+                              [(time.time(), i) for i in ids])
+        self.conn.commit()
+
+    def delete_observations(self, connection_id: str, chat_id: int, message_ids: list[int]) -> None:
+        for message_id in message_ids:
+            row = self.conn.execute(
+                "SELECT id FROM observed_messages WHERE connection_id=? AND chat_id=? AND message_id=?",
+                (connection_id, chat_id, message_id)).fetchone()
+            if row:
+                self.invalidate_observed_candidates([row["id"]])
+                self.conn.execute("DELETE FROM observed_messages WHERE id=?", (row["id"],))
+        self.conn.commit()
+
+    def observation_stats(self) -> dict:
+        row = self.conn.execute("SELECT COUNT(*) AS messages, COUNT(DISTINCT connection_id || ':' || chat_id) AS chats, "
+                                "MAX(sent_at) AS last_at FROM observed_messages").fetchone()
+        n = self.conn.execute("SELECT COUNT(*) FROM candidates WHERE source='observe' AND status='new'").fetchone()[0]
+        return {**dict(row), "candidates": n}
 
     def candidates(self, status: str = "new", limit: int = 300) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM candidates WHERE status=? ORDER BY id DESC LIMIT ?",
@@ -412,10 +523,10 @@ class Database:
         if not ids:
             return 0
         if question is not None and answer is not None:
-            self.conn.execute(f"UPDATE candidates SET question=?, answer=? WHERE id IN ({marks}) AND status='new'",
+            self.conn.execute(f"UPDATE candidates SET question=?, answer=? WHERE id IN ({marks}) AND status='new'",  # nosec — только «?»
                               (question, answer, *ids))
         cur = self.conn.execute(
-            f"UPDATE candidates SET status=?, decided_at=? WHERE id IN ({marks}) AND status='new'",
+            f"UPDATE candidates SET status=?, decided_at=? WHERE id IN ({marks}) AND status='new'",  # nosec — только «?», см. выше
             (status, time.time(), *ids))
         self.conn.commit()
         return cur.rowcount

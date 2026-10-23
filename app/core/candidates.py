@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from .candidate_review import fact_scope
 from .knowledge import KnowledgeBase, venue_tokens
 from .pii import mask_pd
 from .price_guard import extract_amounts
@@ -24,6 +25,15 @@ EXTRACT_PROMPT = """Ты помогаешь собрать базу знаний
 
 Правила:
 - Бери только то, что написал менеджер. Ничего не добавляй и не пересчитывай.
+- Сохраняй смысл целиком: отрицания, обязанности, условия, исключения и последствия «иначе».
+  «Клиент предоставляет ролик» не заменяет «мы не изготавливаем ролик»: сохрани оба ограничения.
+  «Можно только если А И Б; иначе убрать» нельзя сокращать до «всегда убрать», терять А или Б,
+  менять И на ИЛИ. Условная ветка должна остаться условной, даже в отдельном предложении.
+- Сохраняй границы ТЦ, места и формата в паре вопрос/ответ. Разные правила разных ТЦ/форматов
+  выделяй отдельно; каждый факт не обязан повторять остальные независимые правила ответа.
+- Цитата клиента в ответе менеджера и предположение в вопросе не являются подтверждением.
+  При опровержении извлекай исправление менеджера, а не ложную цитату. Не выводи из
+  «ещё не проверяли» доступность, недоступность или постоянное правило.
 - Не бери личное и разовое: имена, телефоны, даты брони этого клиента, «место свободно», скидки
   этому клиенту, обещания «пришлю», «перезвоню», «уточню».
 - Вопрос пиши так, как его задал бы клиент, ответ — 1–3 предложения от лица менеджера.
@@ -38,6 +48,10 @@ MIN_ANSWER = 15
 _PERSONAL_RE = re.compile(r"скидк|бронь|брониру|забронир|свободн|занят|перезвон|пришлю|пришлём|уточню|договор"
                           r"|счёт|счет\b|оплатит|реквизит|ваш\w* заказ", re.IGNORECASE)
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+_SENTENCE_RE = re.compile(r"[^.!?\n]+[.!?]*")
+_PD_MARK_RE = re.compile(r"\[(?:телефон|почта|карта)\]")
+_GREETING_RE = re.compile(r"(?:здравствуйте|здрасьте|добрый (?:день|вечер)|доброе утро|привет\w*|спасибо(?: за вопрос)?)"
+                          r"\b[!,.\s]*", re.IGNORECASE)
 _STRING = r'"((?:[^"\\]|\\.)*)"'
 _PAIR_RE = re.compile(r'\{\s*"question"\s*:\s*' + _STRING + r'\s*,\s*"answer"\s*:\s*' + _STRING + r"\s*\}")
 SIMILARITY = 0.45
@@ -81,10 +95,22 @@ def keep(fact: Fact, manager_text: str) -> bool:
 
 
 def raw_facts(client_question: str, manager_text: str) -> list[Fact]:
-    """Без модели: пара «вопрос клиента → ответ менеджера» как есть, если она похожа на факт."""
+    """Без модели: пара «вопрос клиента → ответ менеджера», если она похожа на факт. Приветствия
+    и фразы клиента со своими контактами («Мой номер [телефон]») в базу не переносим."""
     client_question, manager_text = mask_pd(client_question), mask_pd(manager_text)
-    fact = Fact(" ".join(client_question.split()), " ".join(manager_text.split()))
-    return [fact] if len(manager_text) >= MIN_MANAGER_TEXT and keep(fact, manager_text) else []
+    fact = Fact(tidy(client_question, drop_contacts=True), tidy(manager_text))
+    return [fact] if len(fact.answer) >= MIN_MANAGER_TEXT and keep(fact, manager_text) else []
+
+
+def tidy(text: str, drop_contacts: bool = False) -> str:
+    """«Здравствуйте! Какой длины ролик? Мой номер [телефон]» → «Какой длины ролик?»."""
+    sentences = [s.strip() for s in _SENTENCE_RE.findall(text) if s.strip()]
+    if drop_contacts:
+        sentences = [s for s in sentences if not _PD_MARK_RE.search(s)]
+    out = " ".join(" ".join(sentences).split())
+    while (m := _GREETING_RE.match(out)) and m.end():
+        out = out[m.end():]
+    return out  # одно приветствие — пустая строка: такой пары в базу нет
 
 
 async def extract(llm, client_question: str, manager_text: str) -> tuple[list[Fact], int]:
@@ -131,12 +157,17 @@ def same_topic(a: set[str], b: set[str]) -> bool:
     return bool(a and b) and len(a & b) / min(len(a), len(b)) >= SIMILARITY
 
 
-def group(rows) -> list[list]:
+def group(rows, kb: KnowledgeBase | None = None) -> list[list]:
     """Похожие кандидаты вместе: менеджер видит «клиенты спрашивали 4 раза» и утверждает один раз."""
     groups: list[tuple[set[str], list]] = []
     for row in rows:
         tokens = set(tokenize(row["question"]))
         for gtokens, items in groups:
+            if kb is not None:
+                scope = fact_scope(kb, row["question"], row["answer"])
+                other = fact_scope(kb, items[0]["question"], items[0]["answer"])
+                if any(a and b and a != b for a, b in zip(scope, other)):
+                    continue
             if same_topic(tokens, gtokens):
                 items.append(row)
                 break

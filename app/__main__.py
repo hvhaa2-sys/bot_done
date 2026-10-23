@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import signal
 import socket
 import sys
@@ -16,6 +17,17 @@ from .config import Settings
 from .services import Services
 
 log = logging.getLogger("app")
+_TOKEN_IN_URL_RE = re.compile(r"([?&]token=)[^&\s\"]*")
+
+
+class HideToken(logging.Filter):
+    """Журнал запросов: старая ссылка /?token=… не должна оставить токен админки в логе."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(_TOKEN_IN_URL_RE.sub(r"\1***", a) if isinstance(a, str) else a for a in record.args)
+        record.msg = _TOKEN_IN_URL_RE.sub(r"\1***", str(record.msg))
+        return True
 
 
 async def run_bot(bot, dp, services: Services) -> None:
@@ -67,7 +79,8 @@ class AdminServer(uvicorn.Server):
 
 def port_busy(host: str, port: int) -> bool:
     with socket.socket() as s:
-        return s.connect_ex(("127.0.0.1" if host in ("0.0.0.0", "") else host, port)) == 0
+        # Bandit B104 — ложное срабатывание: это сравнение адреса из настроек, админка здесь никуда не привязывается
+        return s.connect_ex(("127.0.0.1" if host in ("0.0.0.0", "") else host, port)) == 0  # nosec — см. комментарий выше
 
 
 def _log_crash(task: asyncio.Task) -> None:
@@ -89,6 +102,7 @@ async def main() -> None:
 
     server = AdminServer(uvicorn.Config(create_app(services), host=settings.admin_host,
                                         port=settings.admin_port, log_level="info"))
+    logging.getLogger("uvicorn.access").addFilter(HideToken())
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda: setattr(server, "should_exit", True))
@@ -109,7 +123,7 @@ async def main() -> None:
     if settings.admin_token == "change-me":
         log.warning("ADMIN_TOKEN по умолчанию: задайте свой в .env, иначе любой сайт, открытый в браузере, "
                     "может слать запросы в админку")
-    log.info("Админка: http://localhost:%d/?token=%s", settings.admin_port, settings.admin_token)
+    log.info("Админка: http://localhost:%d/ — вход по токену из строки ADMIN_TOKEN в .env", settings.admin_port)
     try:
         await server.serve()  # работает до Ctrl+C
     finally:

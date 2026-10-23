@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 
 from ..llm.base import LLMProvider
 from .conversation import MAX_CLARIFICATIONS, Conversation
+from .answer_grounding import budget_issues, price_period_issues, property_issues
+from .client_intent import active_request
 from .knowledge import KnowledgeBase, SearchHit, _format_words, format_rub, parse_budget
 from .price_guard import (drop_bracket_totals, computed_totals, drop_numbers, extract_amounts, row_multipliers,
                           ungrounded_numbers,
@@ -88,6 +90,10 @@ SYSTEM_PROMPT = """Ты — помощник менеджера по прода�
 - Цены в разных ТЦ разные. Называй цену вместе с ТЦ и местом из той же строки контекста. \
 Если клиент не указал ТЦ, а подходящие позиции есть в нескольких ТЦ, коротко перечисли \
 варианты с ТЦ или спроси, какой ТЦ интересует.
+- Свойство одного экрана не подтверждает свойства другого: звук, ориентация, длительность и разрешение \
+должны относиться к указанному ТЦ, формату и месту. Если для нужного экрана сведений нет, не угадывай.
+- Период цены бери из той же строки прайса: месячная цена не становится двухнедельной. \
+Если тарифа на запрошенный срок нет, назови известный тариф с его настоящим периодом или передай вопрос.
 - Печать, монтаж и другие суммы из примечаний оплачиваются отдельно от размещения, \
 если в строке прямо не написано «включено». Сезонные наценки и коэффициенты относятся \
 только к тем позициям, у которых они написаны. Сезонную цену называй, только если она записана \
@@ -156,11 +162,12 @@ class Assistant:
         last_question — прошлое сообщение клиента в любом статусе (в истории только то, что ушло клиенту)."""
         started = time.perf_counter()
         full = question.strip()
+        request = active_request(full)
         # Стоп-тема в конце длинного склеенного сообщения не должна потеряться при обрезке
         topic = self.kb.matched_stop_topic(full) or self.kb.matched_stop_topic(from_translit(full))
-        if _AVAILABILITY_RE.search(from_translit(full)):
+        if _AVAILABILITY_RE.search(from_translit(request)):
             topic = topic or "занятость"
-        question = clip(full, MAX_QUESTION_CHARS)
+        question = clip(request, MAX_QUESTION_CHARS)
         history = [(clip(q, MAX_HISTORY_CHARS), clip(a, MAX_HISTORY_CHARS)) for q, a in history or []]
         memory = conversation is not None or bool(history) or bool(last_question)
         state = conversation if conversation is not None else Conversation.replay(self.kb, [
@@ -168,7 +175,8 @@ class Assistant:
         if last_question and (not history or last_question != history[-1][0]) and conversation is None:
             state.observe(self.kb, clip(last_question, MAX_HISTORY_CHARS))
         state.observe(self.kb, question)
-        query = state.query(question) if memory else from_translit(question)
+        scoped_budget = state.placement_budget is not None or state.preparation_budget is not None
+        query = state.query(question) if memory or scoped_budget else from_translit(question)
         if state.changed:
             history = []  # Ответ про старый ТЦ не подтверждает цены и условия нового.
         reply = await self._answer(question, history, allow_llm, topic, state, query)
@@ -245,7 +253,7 @@ class Assistant:
         except Exception as exc:  # сеть, лимиты, ключ
             return Reply(ESCALATE, self.holding_message, 0.0, f"{R_LLM_ERROR}:{type(exc).__name__}", sources,
                          llm_called=True, tokens=tokens)
-        reply = self._decide(raw, query, history, context, sources, hits)
+        reply = self._decide(raw, query, history, context, sources, hits, state)
         if reply.decision == ESCALATE and (fix := retry_hint(reply.reason, reply.text, self.holding_message, query)):
             # Проверка нашла конкретную ошибку — одна попытка исправить: модель получает, что не так,
             # новый ответ проходит те же проверки. Не вышло — к менеджеру с первым черновиком
@@ -253,7 +261,7 @@ class Assistant:
                 messages += [{"role": "assistant", "content": raw}, {"role": "user", "content": fix}]
                 raw2 = await self.llm.complete(system, messages)
                 tokens += self._spent(system, question, raw2)
-                second = self._decide(raw2, query, history, context, sources, hits)
+                second = self._decide(raw2, query, history, context, sources, hits, state)
                 unsure = reply.reason.startswith(R_MODEL_UNSURE)
                 if second.decision == ANSWER and not (unsure and _NO_DATA_RE.search(second.text)):
                     reply = second
@@ -283,7 +291,7 @@ class Assistant:
         return getattr(self.llm, "last_tokens", 0) or (len(system) + len(question) + len(raw or "")) // 3
 
     def _decide(self, raw: str, question: str, history: list[tuple[str, str]], context: str,
-                sources: list[str], hits: list[SearchHit] | None = None) -> Reply:
+                sources: list[str], hits: list[SearchHit] | None = None, state: Conversation | None = None) -> Reply:
         """Что делать с ответом модели: отправить, передать менеджеру или отбросить."""
         text, confidence, needs_manager = parse_model_output(raw)
         # Подпись из контекста («Условия и доплаты: возможна промо-стойка») клиенту не нужна
@@ -341,10 +349,17 @@ class Assistant:
             return Reply(ESCALATE, text, confidence, f"{R_VENUE}:{wrong}", sources, raw=raw)
         if hits and (wrong := self.kb.wrong_tier_amounts(text, hits, question)):
             return Reply(ESCALATE, text, confidence, f"{R_PERIOD}:{wrong}", sources, raw=raw)
+        if hits and (wrong := price_period_issues(self.kb, text, hits, question)):
+            return Reply(ESCALATE, text, confidence, f"{R_PERIOD}:{wrong}", sources, raw=raw)
+        if hits and state and (wrong := budget_issues(self.kb, text, hits, total=state.budget,
+                                                    placement=state.placement_budget, preparation=state.preparation_budget)):
+            return Reply(ESCALATE, text, confidence, f"{R_TERMS}:{wrong}", sources, raw=raw)
         if needs_manager:
             return Reply(ESCALATE, text, confidence, R_MODEL_UNSURE, sources, raw=raw)
         # «Есть ли звук на экранах?» — «Звук присутствует», хотя в базе про звук ни слова: обещание без опоры
         if missing := self.kb.ungrounded_focus(question, text, known):
+            return Reply(ESCALATE, text, confidence, f"{R_UNGROUNDED}:{missing}", sources, raw=raw)
+        if hits and (missing := property_issues(self.kb, text, hits, question)):
             return Reply(ESCALATE, text, confidence, f"{R_UNGROUNDED}:{missing}", sources, raw=raw)
         if confidence < self.confidence_threshold:
             return Reply(ESCALATE, text, confidence, R_LOW_CONFIDENCE, sources, raw=raw)
@@ -446,10 +461,15 @@ _RETRY_HINTS = {
     R_PRICE_MISMATCH: "В ответе есть число {detail}, которого нет в строках контекста. Назови цены только так, "
                       "как они записаны в строках «Прайс», без пересчёта, итогов и сумм за несколько месяцев.",
     R_VENUE: "Сумма {detail} взята из строки другого торгового центра. Называй цену из строки того ТЦ, о котором спрашивают.",
-    R_PERIOD: "Сумма {detail} — цена для другого срока размещения. Возьми строку, срок которой подходит к вопросу клиента.",
+    R_PERIOD: "Сумма {detail} связана с другой строкой или периодом. Сохрани ТЦ, формат и единицу цены из одной строки. "
+              "Не выдавай месячную цену за двухнедельную. Если нужного тарифа нет, назови известную цену с её "
+              "настоящим периодом или поставь needs_manager = true.",
+    R_UNGROUNDED: "Свойства {detail} не подтверждены для этой площадки и формата. Не переноси сведения другого "
+                  "экрана и не угадывай. Если без них нельзя ответить на вопрос, поставь needs_manager = true.",
     R_TERMS: "Неверно об условиях ({detail}): если в строке «с НДС, уже в цене» — НДС не добавляется, если «без НДС» — "
              "не пиши, что он включён; печать, монтаж и производство входят в цену, только если так написано в строке, "
-             "иначе назови их отдельно.",
+             "иначе назови их отдельно. Для бюджета проверяй общий предел и отдельные пределы размещения/подготовки: "
+             "дорогой вариант нельзя называть подходящим. Назови цены по отдельности или передай вопрос, итог не считай.",
     R_FOREIGN: "В ответе есть слова латиницей ({detail}). Пиши только по-русски.",
 }
 

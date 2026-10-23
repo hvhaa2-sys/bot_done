@@ -25,6 +25,7 @@ def review_client(tmp_path):
                        llm_provider="mock", admin_token="secret")
     services = Services(settings)
     with TestClient(create_app(services)) as client:
+        client.cookies.set("admin_token", "secret")
         yield client, services
     services.db.conn.close()
 
@@ -184,12 +185,13 @@ def test_missing_and_unflagged_dialogs_cannot_be_reviewed(review_client):
     dialog_id = add_dialog(services, flagged=False)
     for target in (dialog_id, dialog_id + 1):
         assert not services.db.review_dialog(target, **facts_review())
-        response = client.post(f"/dialogs/{target}/review?token=secret", data=facts_review())
+        response = client.post(f"/dialogs/{target}/review", data=facts_review())
         assert response.status_code == 404
 
 
 def test_review_and_csv_require_authentication(review_client):
     client, services = review_client
+    client.cookies.clear()
     dialog_id = add_dialog(services)
     response = client.post(f"/dialogs/{dialog_id}/review", data=facts_review())
     assert response.status_code == 401
@@ -201,7 +203,7 @@ def test_review_and_csv_require_authentication(review_client):
 def test_review_route_validates_and_preserves_original_decision(review_client):
     client, services = review_client
     dialog_id = add_dialog(services)
-    response = client.post(f"/dialogs/{dialog_id}/review?token=secret", data=facts_review(must_contain="40000"))
+    response = client.post(f"/dialogs/{dialog_id}/review", data=facts_review(must_contain="40000"))
     assert response.status_code == 200
     assert services.db.get_dialog(dialog_id)["reviewed"] == 0
     response = client.post(f"/dialogs/{dialog_id}/review", data={
@@ -216,7 +218,7 @@ def test_review_route_handles_deep_negations_without_server_error(review_client)
     client, services = review_client
     dialog_id = add_dialog(services)
     checks = "30000;" + "!" * 993 + "x"
-    response = client.post(f"/dialogs/{dialog_id}/review?token=secret", data=facts_review(
+    response = client.post(f"/dialogs/{dialog_id}/review", data=facts_review(
         must_contain=checks), follow_redirects=False)
     assert response.status_code in (200, 303)
 
@@ -225,7 +227,7 @@ def test_review_fields_render_as_text(review_client):
     client, services = review_client
     dialog_id = add_dialog(services)
     payload = 'Экран стоит 30 000 ₽. </textarea><script>alert("x")</script>'
-    response = client.post(f"/dialogs/{dialog_id}/review?token=secret", data=facts_review(
+    response = client.post(f"/dialogs/{dialog_id}/review", data=facts_review(
         corrected_answer=payload), follow_redirects=False)
     assert response.status_code == 303
     response = client.get(f"/dialogs/{dialog_id}/review")
