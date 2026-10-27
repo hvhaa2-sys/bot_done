@@ -47,6 +47,8 @@ STATUS_NAMES = {
     D.SANDBOX: "Тестовый чат",
     D.WATCH: "Наблюдение",
 }
+# Цвет решения в «Диалогах»: зелёный — бот или менеджер ответили клиенту, янтарный — вопрос ждёт менеджера
+PILL_TONE = {D.SENT_AUTO: "ok", D.DRAFT_SENT: "ok", D.DRAFT_EDITED: "ok", D.ESCALATED: "warn", D.DRAFT_PENDING: "warn"}
 MODE_TITLES = {"off": "выключен", "observe": "наблюдение", "draft": "черновики", "auto": "автоответ"}
 
 # Фильтры журнала: ключ в адресе → (подпись, условия выборки)
@@ -68,56 +70,110 @@ PRICE_PER_1K = {"GigaChat": 0.065, "GigaChat-Pro": 0.5, "GigaChat-Max": 0.65}
 LOGIN_TRIES, LOGIN_WINDOW = 5, 600  # не больше 5 неверных токенов за 10 минут с одного адреса
 
 CSS = """
-:root{--bg:#f4f1ea;--card:#fbfaf6;--text:#12161f;--muted:#5f6370;--line:#ddd8cc;--accent:#c2410c;
---accent-bg:#fde9df;--ok:#15803d;--warn:#b45309;--ink:#12161f;--on-ink:#f4f1ea}
-@media (prefers-color-scheme:dark){:root{--bg:#12161f;--card:#1c2230;--text:#f4f1ea;--muted:#b9bfcc;
---line:#2a3142;--accent:#ff6a3d;--accent-bg:#3a2419;--ok:#4ade80;--warn:#fbbf24;--ink:#f4f1ea;--on-ink:#12161f}}
+:root{--bg:#f5f2eb;--card:#fffdf9;--text:#14171f;--muted:#5d6270;--line:#e3ded3;--line-strong:#cbc4b5;
+--accent:#c2410c;--accent-bg:#fdebe1;--ok:#15803d;--ok-bg:#e5f3e9;--warn:#a2470b;--warn-bg:#fcefdc;
+--ink:#14171f;--on-ink:#f5f2eb;--radius:12px;--radius-sm:8px;--ease:cubic-bezier(.2,.7,.3,1)}
+@media (prefers-color-scheme:dark){:root{--bg:#111419;--card:#191e28;--text:#eef0f4;--muted:#a9b0be;--line:#2a3140;
+--line-strong:#3b4354;--accent:#ff7a45;--accent-bg:#3a2218;--ok:#4ade80;--ok-bg:#15301f;--warn:#fbbf24;--warn-bg:#382c11;
+--ink:#eef0f4;--on-ink:#111419}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-header{border-bottom:1px solid var(--line);background:var(--card)}
-.bar{max-width:1080px;margin:0 auto;padding:12px 16px;display:flex;gap:6px 18px;flex-wrap:wrap;align-items:center}
-.brand{font-weight:700;margin-right:auto}
-nav a{color:var(--muted);text-decoration:none;padding:6px 2px;border-bottom:2px solid transparent}
-nav a.on{color:var(--text);border-color:var(--accent)}
-nav{display:flex;gap:16px;flex-wrap:wrap}
-main{max-width:1080px;margin:0 auto;padding:20px 16px 48px}
-h1{font-size:26px;margin:0 0 16px}h2{font-size:18px;margin:0 0 12px}
-a{color:var(--accent)}
-.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px}
-.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:16px}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+a{color:var(--accent);text-underline-offset:2px}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+.skip{position:absolute;left:-999px;top:8px;background:var(--ink);color:var(--on-ink);padding:8px 12px;border-radius:8px;z-index:30}
+.skip:focus{left:8px}
+/* шапка: одна строка меню, на телефоне листается вбок; «Выйти» отдельно от разделов */
+header{position:sticky;top:0;z-index:20;background:var(--card);border-bottom:1px solid var(--line)}
+.bar{max-width:1120px;margin:0 auto;padding:0 16px;display:grid;grid-template-columns:auto 1fr auto;
+grid-template-areas:"brand nav out";align-items:center;column-gap:20px}
+.brand{grid-area:brand;font-weight:700;color:var(--text);text-decoration:none;white-space:nowrap;padding:14px 0}
+.logout{grid-area:out;color:var(--muted);text-decoration:none;font-size:14px;padding:8px 4px;white-space:nowrap}
+.logout:hover{color:var(--text)}
+nav{grid-area:nav;display:flex;gap:2px;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+nav::-webkit-scrollbar{display:none}
+nav a{flex:none;color:var(--muted);text-decoration:none;padding:16px 10px 14px;border-bottom:2px solid transparent;
+font-size:14.5px;transition:color .15s var(--ease),border-color .15s var(--ease)}
+nav a:hover{color:var(--text)}nav a.on{color:var(--text);border-color:var(--accent);font-weight:600}
+@media(max-width:1080px){.bar{grid-template-columns:1fr auto;grid-template-areas:"brand out" "nav nav";padding:0 12px}
+.brand{padding:12px 4px 4px}nav{margin:0 -12px;padding:0 8px}nav a{padding:10px 10px 12px}}
+main{max-width:1120px;margin:0 auto;padding:24px 16px 56px}
+h1{font-size:24px;line-height:1.25;margin:0 0 18px;letter-spacing:-.01em}h2{font-size:17px;margin:0 0 12px}
+h3{font-size:15px;margin:16px 0 8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:20px;margin-bottom:16px}
+.card>:last-child{margin-bottom:0}.card>p:first-child,.card>h2:first-child{margin-top:0}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
 .kpis .card{margin:0;padding:14px 16px}
-.kpi{font-size:30px;font-weight:700;line-height:1.1}.muted{color:var(--muted);font-size:13px}
-.cols{display:grid;grid-template-columns:1.5fr 1fr;gap:16px}@media(max-width:820px){.cols{grid-template-columns:1fr}}
-table{width:100%;border-collapse:collapse;font-size:14px}
-td,th{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line);vertical-align:top}
-th{font-weight:600;color:var(--muted);font-size:13px}.scroll{overflow-x:auto}
-textarea,input[type=text],input[type=number],input[type=search],input[type=time],select{width:100%;padding:10px 12px;
-border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--text);font:inherit}
-textarea.code{font:13px/1.5 ui-monospace,Menlo,monospace}
-label{display:block;margin:14px 0 6px;font-weight:600}.hint{color:var(--muted);font-size:13px;margin-top:4px}
-button,.btn{background:var(--ink);color:var(--on-ink);border:0;border-radius:10px;padding:10px 18px;font:inherit;
-cursor:pointer;text-decoration:none;display:inline-block}
-button.light,.btn.light{background:transparent;color:var(--text);border:1px solid var(--line)}
-button.small{padding:4px 10px;font-size:13px}button:disabled{opacity:.5;cursor:default}
+.kpi{font-size:28px;font-weight:700;line-height:1.15;margin-top:4px;font-variant-numeric:tabular-nums}
+.muted{color:var(--muted);font-size:13px}
+.cols{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:16px;align-items:start}
+@media(max-width:860px){.cols{grid-template-columns:1fr}}
+/* таблицы */
+table{width:100%;border-collapse:collapse;font-size:14px;font-variant-numeric:tabular-nums}
+td,th{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-weight:600;color:var(--muted);font-size:12.5px}tr:last-child td{border-bottom:0}
+tbody tr:hover td,table tr:hover td{background:color-mix(in srgb,var(--bg) 60%,transparent)}
+.scroll{overflow-x:auto}
+@media(max-width:640px){.table-cards tr:first-child{display:none}.table-cards tr{display:block;padding:12px 0;
+border-bottom:1px solid var(--line)}.table-cards td{display:block;border:0;padding:2px 0}
+.table-cards td:empty{display:none}.table-cards td[data-label]::before{content:attr(data-label);display:block;font-size:12px;color:var(--muted)}
+.table-cards tr:hover td{background:none}}
+/* поля и кнопки: не ниже 40–44 px, видимый фокус */
+textarea,input[type=text],input[type=password],input[type=email],input[type=number],input[type=search],
+input[type=time],input[type=date],input[type=url],select{width:100%;min-height:42px;padding:10px 12px;
+border:1px solid var(--line-strong);border-radius:var(--radius-sm);background:var(--card);color:var(--text);font:inherit;
+transition:border-color .15s var(--ease),box-shadow .15s var(--ease)}
+textarea:focus,input:focus,select:focus{outline:none;border-color:var(--accent);
+box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent)}
+::placeholder{color:var(--muted);opacity:.8}
+textarea.code{font:13px/1.55 ui-monospace,Menlo,monospace}
+input[type=file]{font:inherit;font-size:14px;color:var(--muted);max-width:100%}
+input[type=file]::file-selector-button{font:inherit;font-size:14px;margin-right:10px;padding:8px 14px;min-height:40px;
+border:1px solid var(--line-strong);border-radius:var(--radius-sm);background:transparent;color:var(--text);cursor:pointer}
+label{display:block;margin:16px 0 6px;font-weight:600}.hint{color:var(--muted);font-size:13px;margin-top:6px}
+button,.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:42px;padding:9px 18px;
+background:var(--ink);color:var(--on-ink);border:1px solid var(--ink);border-radius:var(--radius-sm);font:inherit;
+font-weight:500;cursor:pointer;text-decoration:none;transition:background-color .15s var(--ease),
+border-color .15s var(--ease),opacity .15s var(--ease),transform .1s var(--ease)}
+button:hover,.btn:hover{opacity:.88}button:active,.btn:active{transform:scale(.98)}
+button.light,.btn.light{background:transparent;color:var(--text);border-color:var(--line-strong)}
+button.light:hover,.btn.light:hover{opacity:1;background:var(--bg)}
+button.small{min-height:34px;padding:5px 12px;font-size:13.5px}
+button:disabled{opacity:.45;cursor:not-allowed;transform:none}
+@media(pointer:coarse){button.small{min-height:40px}}
+@media(max-width:640px){textarea,input,select{font-size:16px}main{padding:18px 12px 48px}.card{padding:16px}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-.days{display:flex;gap:6px;flex-wrap:wrap}.days label{margin:0;font-weight:400;border:1px solid var(--line);border-radius:8px;padding:6px 10px;cursor:pointer}.days input{margin-right:4px}
+.days{display:flex;gap:6px;flex-wrap:wrap}.days label{margin:0;font-weight:400;border:1px solid var(--line-strong);
+border-radius:var(--radius-sm);padding:8px 12px;cursor:pointer;min-height:40px}.days input{margin-right:6px}
 .time{display:flex;gap:10px;align-items:center}.time input{width:130px}
 .ok{color:var(--ok)}.warn{color:var(--warn)}
-.pill{display:inline-block;padding:2px 9px;border-radius:99px;border:1px solid var(--line);font-size:12px;white-space:nowrap}
-.tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
-.tabs a{padding:5px 12px;border-radius:99px;border:1px solid var(--line);text-decoration:none;color:var(--text);font-size:14px}
-.tabs a.on{background:var(--ink);color:var(--on-ink);border-color:var(--ink)}
-.status{list-style:none;margin:0;padding:0}.status li{display:flex;gap:10px;padding:9px 0;border-bottom:1px solid var(--line)}
+.pill{display:inline-block;padding:2px 10px;border-radius:99px;border:1px solid var(--line);font-size:12.5px;
+white-space:nowrap;background:var(--bg)}
+.pill.ok{background:var(--ok-bg);border-color:transparent;color:var(--ok)}
+.pill.warn{background:var(--warn-bg);border-color:transparent;color:var(--warn)}
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.tabs a{display:inline-flex;align-items:center;min-height:36px;padding:6px 14px;border-radius:99px;
+border:1px solid var(--line-strong);text-decoration:none;color:var(--text);font-size:14px;
+transition:background-color .15s var(--ease)}
+.tabs a:hover{background:var(--card)}.tabs a.on{background:var(--ink);color:var(--on-ink);border-color:var(--ink)}
+@media(max-width:640px){.tabs{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;margin:0 -12px 14px;padding:0 12px}
+.tabs a{flex:none}}
+[id]{scroll-margin-top:104px}
+.status{list-style:none;margin:0;padding:0}.status li{display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--line)}
 .status li:last-child{border:0}.dot{width:9px;height:9px;border-radius:50%;margin-top:7px;flex:none}
 .dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}
-.bubble{background:var(--bg);border:1px solid var(--line);border-radius:14px 14px 14px 4px;padding:12px 14px;white-space:pre-wrap}
-.note{background:var(--accent-bg);border-radius:10px;padding:10px 14px;margin-bottom:16px}
-tr.flag td{background:var(--accent-bg)}details summary{cursor:pointer;color:var(--muted)}
-pre{white-space:pre-wrap;margin:0;font:inherit}
-.chat{display:flex;flex-direction:column;gap:10px}.chat .msg{max-width:85%}.chat .msg.me{align-self:flex-end}
-.chat .msg.me .bubble{background:var(--accent-bg);border-radius:14px 14px 4px 14px}
-.chats a{display:block;padding:8px 10px;border-radius:10px;text-decoration:none;color:var(--text)}
-.chats a.on{background:var(--bg);font-weight:600}
+.bubble{background:var(--bg);border:1px solid var(--line);border-radius:14px 14px 14px 4px;padding:11px 14px;
+white-space:pre-wrap;overflow-wrap:anywhere}
+.note{background:var(--accent-bg);border-radius:var(--radius-sm);padding:12px 16px;margin-bottom:16px}
+tr.flag td{background:var(--accent-bg)}details summary{cursor:pointer;color:var(--muted);padding:4px 0}
+pre{white-space:pre-wrap;margin:0;font:inherit;overflow-wrap:anywhere}
+.chat{display:flex;flex-direction:column;gap:12px}.chat .msg{max-width:85%}.chat .msg.me{align-self:flex-end}
+.chat .msg .muted{margin-bottom:4px}.chat .msg.me .muted{text-align:right}
+.chat .msg.me .bubble{background:var(--accent-bg);border-color:transparent;border-radius:14px 14px 4px 14px}
+.chats a{display:block;padding:10px 12px;border-radius:var(--radius-sm);text-decoration:none;color:var(--text)}
+.chats a:hover{background:var(--bg)}.chats a.on{background:var(--bg);font-weight:600}
+.login{max-width:400px;margin:0 auto;padding-top:14vh}.login h1{font-size:20px}
 .onboarding-banner,.onboarding-head{display:flex;justify-content:space-between;gap:16px;align-items:center}
 .onboarding-banner{border-bottom:1px solid var(--line);padding:0 0 18px;margin:0 0 20px}
 .onboarding-head{margin-bottom:24px}.onboarding-head h1{margin:0}.onboarding-head p{margin:4px 0 0}
@@ -145,12 +201,15 @@ NAV = [("/", "Обзор"), ("/dialogs", "Диалоги"), ("/observe", "Наб
 
 
 def page(title: str, body: str, active: str = "/", refresh: int | None = None) -> HTMLResponse:
-    nav = "".join(f'<a href="{href}" class="{"on" if href == active else ""}">{name}</a>' for href, name in NAV)
+    current = ' class="on" aria-current="page"'
+    nav = "".join(f'<a href="{href}"{current if href == active else ""}>{name}</a>' for href, name in NAV)
     meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
     return HTMLResponse(f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">{meta}<title>{escape(title)}</title>
-<style>{CSS}</style></head><body><header><div class="bar"><span class="brand">ИИ-помощник менеджера</span>
-<nav>{nav}<a href="/logout" class="muted">Выйти</a></nav></div></header><main>{body}</main></body></html>""")
+<style>{CSS}</style></head><body><a class="skip" href="#main">К содержимому</a><header><div class="bar">
+<a class="brand" href="/">ИИ-помощник менеджера</a><nav aria-label="Разделы">{nav}</nav>
+<a class="logout" href="/logout">Выйти</a></div></header><main id="main">{body}</main>
+<script>document.querySelector("nav .on")?.scrollIntoView({{inline:"center",block:"nearest"}})</script></body></html>""")
 
 
 def plural(n: int, one: str, few: str, many: str) -> str:
@@ -172,7 +231,7 @@ def login_page(msg: str = "", status: int = 401, with_password: bool = False) ->
 .venv/bin/python -m app.password</p>"""
     return HTMLResponse(f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Вход</title><style>{CSS}</style></head>
-<body><main style="max-width:420px;padding-top:12vh"><div class="card"><h1>ИИ-помощник менеджера</h1>
+<body><main class="login"><div class="card"><h1>ИИ-помощник менеджера</h1>
 {note(msg)}<form method="post" action="/login">{fields}<p><button>Войти</button></p></form></div></main>
 </body></html>""", status_code=status)
 
@@ -877,8 +936,9 @@ placeholder="Сколько стоит экран на фуд-корте в ВЕ
 <p class="row"><button>Спросить</button>
 <button class="light" formaction="/sandbox/reset" formnovalidate>Новый разговор</button></p></form>{result}</div>"""
 
-    return f"""<h1>Обзор</h1>{onboarding.banner(services)}{connect_guide_html(services)}{kpis}{before_after_html(services)}{growth_html(services)}<div class="cols">{sandbox}
-<div class="card"><h2>Состояние</h2>{status_html(services)}</div></div>{activity_html(services)}{connections_html(services)}"""
+    return f"""<h1>Обзор</h1>{onboarding.banner(services)}{connect_guide_html(services)}{kpis}<div class="cols">{sandbox}
+<div class="card"><h2>Состояние</h2>{status_html(services)}</div></div>{before_after_html(services)}{growth_html(services)}
+{activity_html(services)}{connections_html(services)}"""
 
 
 def connect_guide_html(services: Services) -> str:
@@ -1221,8 +1281,8 @@ def dialogs_html(services: Services, f: str, q: str) -> str:
         rows.append(
             f"<tr class='{'flag' if flagged else ''}'><td class='muted'>"
             f"{dt.datetime.fromtimestamp(r['created_at']).strftime('%d.%m %H:%M')}</td>"
-            f"<td>{escape(r['question'])}</td><td>{escape(r['answer'])}</td>"
-            f"<td><span class='pill'>{escape(STATUS_NAMES.get(r['status'], r['status']))}</span>"
+            f"<td data-label='Вопрос'>{escape(r['question'])}</td><td data-label='Ответ'>{escape(r['answer'])}</td>"
+            f"<td><span class='pill {PILL_TONE.get(r['status'], '')}'>{escape(STATUS_NAMES.get(r['status'], r['status']))}</span>"
             f"<div class='muted'>{reason}</div></td>"
             f"<td>{review_link(r)}<form method='post' action='/dialogs/{r['id']}/flag'>"
             f"<input type='hidden' name='flagged' value='{0 if flagged else 1}'>"
@@ -1238,7 +1298,7 @@ def dialogs_html(services: Services, f: str, q: str) -> str:
 <input type="search" name="q" value="{escape(q)}" placeholder="Поиск по вопросам и ответам" style="flex:1">
 <button class="light">Найти</button></form>{export}
 <div class="card"><p class="muted">Нажмите «Ошибка», если бот ответил неверно или зря передал вопрос.
-После разбора пример можно добавить в экзамен.</p><div class="scroll"><table>
+После разбора пример можно добавить в экзамен.</p><div class="scroll"><table class="table-cards">
 <tr><th>Когда</th><th>Вопрос</th><th>Ответ</th><th>Решение</th><th></th></tr>{table}</table></div></div>"""
 
 
@@ -1315,15 +1375,17 @@ def kb_html(services: Services, msg: str = "") -> str:
 {f'<details><summary>Самые частые вопросы</summary><table>{top}</table></details>' if top else ''}""" if st.get("repeated_share") is not None else ""
     else:
         imported = ""
-    import_card = f"""<div class="card"><h2>Импорт переписки из Telegram</h2>
+    import_card = f"""<div class="card" id="import"><h2>Импорт переписки из Telegram</h2>
 <p class="muted">Telegram Desktop → Настройки → Продвинутые → Экспорт данных → «Личные чаты», формат JSON.
 Бот найдёт частые вопросы и ответы менеджера, посчитает, сколько клиенты ждали ответа, и скроет телефоны, почты и карты.</p>
 <form method="post" action="/import" enctype="multipart/form-data" class="row">
 <input type="file" name="files" accept=".json" multiple required>
 <input type="text" name="me" placeholder="Имя менеджера в Telegram (если выгружали отдельные чаты)" style="flex:1;min-width:240px">
 <button>Импортировать</button></form>{imported}</div>"""
-    return f"""<h1>База знаний</h1>{note(msg)}{versions_html(services)}
-<div class="card"><h2>Прайс · {plural(len(kb.prices), "позиция", "позиции", "позиций")}</h2>
+    jump = ('<div class="tabs"><a href="#prices">Прайс</a><a href="#notes">Заметки</a><a href="#faq">Частые вопросы</a>'
+            '<a href="#stops">Стоп-темы</a><a href="#import">Импорт</a></div>')
+    return f"""<h1>База знаний</h1>{note(msg)}{jump}{versions_html(services)}
+<div class="card" id="prices"><h2>Прайс · {plural(len(kb.prices), "позиция", "позиции", "позиций")}</h2>
 <p class="muted">Бот называет только эти цены. Нажмите на формат, чтобы поменять цену, или правьте весь прайс в Excel:
 скачайте файл и загрузите обратно.</p>
 <div class="row" style="margin-bottom:12px"><a class="btn" href="/kb/price/new">Добавить позицию</a>
@@ -1335,13 +1397,13 @@ def kb_html(services: Services, msg: str = "") -> str:
 <tr><th>Формат</th><th>Место</th><th>Срок</th><th>Цена</th><th>Примечание</th></tr>{prices}</table></div></div>
 
 {notes_card(services)}
-<div class="card"><h2>Частые вопросы · {len(parse_faq(raw_text("faq.md")))}</h2>
+<div class="card" id="faq"><h2>Частые вопросы · {len(parse_faq(raw_text("faq.md")))}</h2>
 <p class="muted">Каждый вопрос начинается с «## », ответ — следующими строками. Цены сюда не пишите, они берутся из прайса.</p>
 <form method="post" action="/kb/save"><input type="hidden" name="name" value="faq.md">
 <textarea name="text" rows="16" class="code">{raw("faq.md")}</textarea>
 <p class="row"><button>Сохранить</button><a href="/kb/file/faq.md">скачать faq.md</a></p></form></div>
 
-<div class="card"><h2>Стоп-темы · {len(kb.stop_topics)}</h2>
+<div class="card" id="stops"><h2>Стоп-темы · {len(kb.stop_topics)}</h2>
 <p class="muted">По одному слову или началу слова на строку. Вопрос с таким словом бот сразу передаёт менеджеру.
 Строки с «#» — комментарии.</p>
 <form method="post" action="/kb/save"><input type="hidden" name="name" value="stop_topics.txt">
@@ -1387,7 +1449,7 @@ def notes_card(services: Services) -> str:
         for f in files)
     table = (f"<div class='scroll' style='max-height:360px'><table><tr><th>Заметка</th><th>Разделов</th></tr>{rows}</table></div>"
              if rows else "<p class='muted'>Заметок пока нет.</p>")
-    return f"""<div class="card"><h2>Заметки · {len(files)}</h2>
+    return f"""<div class="card" id="notes"><h2>Заметки · {len(files)}</h2>
 <p class="muted">Условия, требования к макетам, трафик, правила ТЦ — по файлу на тему. Каждый раздел начинается с «## »
 и находится ботом отдельно. Папку <code>data/kb/notes</code> можно открыть как хранилище Obsidian.</p>
 <div class="row" style="margin-bottom:12px"><a class="btn" href="/kb/note">Новая заметка</a>

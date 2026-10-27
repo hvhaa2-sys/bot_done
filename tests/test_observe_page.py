@@ -20,7 +20,7 @@ def test_observe_section_shows_chats_conversation_and_reply_time(bot_env):
     client = TestClient(create_app(e.services))
     client.get("/?token=test-observe")
     page = client.get("/observe").text
-    assert 'href="/observe" class="on">Наблюдение' in page, "отдельный пункт меню"
+    assert 'href="/observe" class="on" aria-current="page">Наблюдение' in page, "отдельный пункт меню"
     assert "Идёт наблюдение" in page and "Клиентам ничего не отправляется" in page
     assert "Чаты · 2" in page
     chat = client.get(f"/observe?conn={CONN}&chat={CLIENT}").text
@@ -37,7 +37,7 @@ def test_dialogs_no_longer_mix_in_observation(bot_env):
     client = TestClient(create_app(e.services))
     client.get("/?token=test-observe")
     dialogs = client.get("/dialogs").text
-    assert "Сколько стоит экран?" not in dialogs and ">Наблюдение</a>" not in dialogs.split("<main>")[1]
+    assert "Сколько стоит экран?" not in dialogs and ">Наблюдение</a>" not in dialogs.split('<main id="main">')[1]
     assert client.get("/dialogs?f=observe", follow_redirects=False).headers["location"] == "/observe"
 
 
