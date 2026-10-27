@@ -11,6 +11,7 @@ __pycache__/
 *.sqlite3-*
 eval/results_*.csv
 data/import/
+data/watch/
 *.json
 !eval/retrieval_results/report.json
 !Итерации/04_18_ноября_Сравнение_поиска/Материалы/BM25_21-10-2026_report.json

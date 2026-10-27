@@ -127,8 +127,9 @@ async def on_business_message(message: Message, bot: Bot, services: Services, bu
     if message.from_user and message.from_user.id == conn.owner_user_id:
         if conn.mode == D.WATCH:
             # Наблюдение: бот и так молчит — паузу не ставим, а фиксируем, через сколько менеджер ответил
-            waited = services.db.watch_reply(conn.id, chat_id, message.text or message.caption
-                                             or f"[{media_kind(message) or 'сообщение'}]", message.date.timestamp())
+            said = message.text or message.caption or f"[{media_kind(message) or 'сообщение'}]"
+            services.log_watch_message(conn.id, chat_id, "manager", said, message.date.timestamp())
+            waited = services.db.watch_reply(conn.id, chat_id, said, message.date.timestamp())
             if waited is not None:
                 services.event(f"{chat}: наблюдение — менеджер ответил через {wait_text(waited / 60)}")
         # Пауза считается от времени сообщения: после простоя (сон ноутбука, перезапуск) старые
@@ -150,6 +151,7 @@ async def on_business_message(message: Message, bot: Bot, services: Services, bu
         # Время — из сообщения: после простоя бота пачка старых сообщений не сдвигает замер
         kind = media_kind(message)
         if text or kind:
+            services.log_watch_message(conn.id, chat_id, "client", text or f"[{kind}]", message.date.timestamp())
             services.db.watch_question(conn.id, chat_id, text or f"[{kind}]", message.date.timestamp(),
                                        services.kb_version)
             services.event(f"{chat}: «{short(text or kind, 60)}» — наблюдение, бот молчит")

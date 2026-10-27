@@ -7,6 +7,7 @@
 Запуск:
     python -m tools.import_telegram result.json
     python -m tools.import_telegram chat1.json chat2.json --me "Анна"
+    python -m tools.import_telegram data/watch/messages.jsonl   # переписка, которую бот записал в режиме наблюдения
 
 Что получится в data/import/:
 - pairs.csv          — пары «вопрос клиента — ответ менеджера» (телефоны и почты скрыты);
@@ -75,6 +76,10 @@ def load_chats(paths: list[Path]) -> tuple[list[dict], str | None]:
     """Вернуть список чатов и from_id владельца аккаунта (если известен из полного экспорта)."""
     chats, owner = [], None
     for path in paths:
+        if path.suffix == ".jsonl":  # переписка из режима наблюдения: строка на сообщение
+            chats += watch_chats(path)
+            owner = "manager"
+            continue
         data = json.loads(path.read_text(encoding="utf-8"))
         if "chats" in data:  # полный экспорт аккаунта
             uid = data.get("personal_information", {}).get("user_id")
@@ -83,6 +88,22 @@ def load_chats(paths: list[Path]) -> tuple[list[dict], str | None]:
         elif "messages" in data:  # экспорт одного чата
             chats.append(data)
     return chats, owner
+
+
+def watch_chats(path: Path) -> list[dict]:
+    """Файл наблюдения (data/watch/messages.jsonl) → чаты в формате выгрузки Telegram Desktop. Имён в файле нет:
+    чаты называются «чат 1», «чат 2», автор — клиент или менеджер."""
+    chats: dict[tuple[str, int], list[dict]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        m = json.loads(line)
+        manager = m["from"] == "manager"
+        chats.setdefault((m.get("conn", ""), m["chat"]), []).append(
+            {"type": "message", "date": m["date"], "text": m["text"],
+             "from": "Менеджер" if manager else "Клиент", "from_id": "manager" if manager else f"client{m['chat']}"})
+    return [{"name": f"чат {i}", "type": "personal_chat", "messages": msgs}
+            for i, msgs in enumerate(chats.values(), 1)]
 
 
 def detect_owner(chats: list[dict], me: str | None, owner: str | None) -> set[str]:
