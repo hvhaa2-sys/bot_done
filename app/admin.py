@@ -16,7 +16,7 @@ import tempfile
 import time
 from pathlib import Path
 from html import escape, unescape as html_unescape
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exception_handlers import http_exception_handler
@@ -72,10 +72,10 @@ LOGIN_TRIES, LOGIN_WINDOW = 5, 600  # не больше 5 неверных то�
 CSS = """
 :root{--bg:#f5f2eb;--card:#fffdf9;--text:#14171f;--muted:#5d6270;--line:#e3ded3;--line-strong:#cbc4b5;
 --accent:#c2410c;--accent-bg:#fdebe1;--ok:#15803d;--ok-bg:#e5f3e9;--warn:#a2470b;--warn-bg:#fcefdc;
---ink:#14171f;--on-ink:#f5f2eb;--radius:12px;--radius-sm:8px;--ease:cubic-bezier(.2,.7,.3,1)}
+--ink:#14171f;--on-ink:#f5f2eb;--on-accent:#fff;--radius:12px;--radius-sm:8px;--ease:cubic-bezier(.2,.7,.3,1)}
 @media (prefers-color-scheme:dark){:root{--bg:#111419;--card:#191e28;--text:#eef0f4;--muted:#a9b0be;--line:#2a3140;
 --line-strong:#3b4354;--accent:#ff7a45;--accent-bg:#3a2218;--ok:#4ade80;--ok-bg:#15301f;--warn:#fbbf24;--warn-bg:#382c11;
---ink:#eef0f4;--on-ink:#111419}}
+--ink:#eef0f4;--on-ink:#111419;--on-accent:#1b0f08}}
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
@@ -83,21 +83,38 @@ a{color:var(--accent);text-underline-offset:2px}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
 .skip{position:absolute;left:-999px;top:8px;background:var(--ink);color:var(--on-ink);padding:8px 12px;border-radius:8px;z-index:30}
 .skip:focus{left:8px}
-/* шапка: одна строка меню, на телефоне листается вбок; «Выйти» отдельно от разделов */
-header{position:sticky;top:0;z-index:20;background:var(--card);border-bottom:1px solid var(--line)}
-.bar{max-width:1120px;margin:0 auto;padding:0 16px;display:grid;grid-template-columns:auto 1fr auto;
-grid-template-areas:"brand nav out";align-items:center;column-gap:20px}
-.brand{grid-area:brand;font-weight:700;color:var(--text);text-decoration:none;white-space:nowrap;padding:14px 0}
-.logout{grid-area:out;color:var(--muted);text-decoration:none;font-size:14px;padding:8px 4px;white-space:nowrap}
-.logout:hover{color:var(--text)}
-nav{grid-area:nav;display:flex;gap:2px;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}
-nav::-webkit-scrollbar{display:none}
-nav a{flex:none;color:var(--muted);text-decoration:none;padding:16px 10px 14px;border-bottom:2px solid transparent;
-font-size:14.5px;transition:color .15s var(--ease),border-color .15s var(--ease)}
-nav a:hover{color:var(--text)}nav a.on{color:var(--text);border-color:var(--accent);font-weight:600}
-@media(max-width:1080px){.bar{grid-template-columns:1fr auto;grid-template-areas:"brand out" "nav nav";padding:0 12px}
-.brand{padding:12px 4px 4px}nav{margin:0 -12px;padding:0 8px}nav a{padding:10px 10px 12px}}
-main{max-width:1120px;margin:0 auto;padding:24px 16px 56px}
+/* меню слева: разделы с иконками и счётчиками того, что ждёт вас; на телефоне — строка сверху, листается вбок */
+.shell{display:grid;grid-template-columns:236px minmax(0,1fr);min-height:100vh;min-height:100dvh}
+.side{position:sticky;top:0;height:100vh;height:100dvh;overflow-y:auto;display:flex;flex-direction:column;gap:2px;
+padding:16px 12px;background:var(--card);border-right:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:10px;padding:4px 10px 14px;font-weight:700;font-size:14.5px;line-height:1.25;
+color:var(--text);text-decoration:none}
+.logo{display:grid;place-items:center;width:28px;height:28px;flex:none;border-radius:8px;background:var(--accent);
+color:var(--on-accent);font-size:13px;font-weight:700}
+nav{display:flex;flex-direction:column;gap:2px}
+nav .grp{padding:16px 10px 6px;font-size:11.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+nav a,.logout{display:flex;align-items:center;gap:10px;min-height:40px;padding:8px 10px;border-radius:var(--radius-sm);
+color:var(--text);text-decoration:none;font-size:14.5px;transition:background-color .15s var(--ease),color .15s var(--ease)}
+nav a::before,.logout::before{content:"";width:18px;height:18px;flex:none;background:currentColor;opacity:.7;
+-webkit-mask:var(--icon) center/contain no-repeat;mask:var(--icon) center/contain no-repeat}
+nav a:hover,.logout:hover{background:var(--bg)}
+nav a.on{background:var(--accent-bg);color:var(--accent);font-weight:600}nav a.on::before{opacity:1}
+nav .n{margin-left:auto;min-width:22px;padding:1px 7px;border-radius:99px;background:var(--warn-bg);color:var(--warn);
+font-size:12px;font-weight:600;text-align:center;font-variant-numeric:tabular-nums}
+.logout{margin-top:auto;color:var(--muted)}
+main{width:100%;max-width:1160px;margin:0 auto;padding:28px 32px 56px;min-width:0}
+main.wide{max-width:none}
+@media(max-width:860px){.shell{display:block}
+.side{z-index:20;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center;gap:0;padding:0 12px;border-right:0;
+border-bottom:1px solid var(--line)}
+.brand{flex:1;padding:12px 4px 6px}.logout{order:1;margin:0;min-height:36px;padding:6px 4px;font-size:14px}
+.logout::before{display:none}
+nav{order:2;flex-direction:row;width:calc(100% + 24px);margin:0 -12px;padding:0 8px;overflow-x:auto;scrollbar-width:none;
+-webkit-overflow-scrolling:touch}nav::-webkit-scrollbar{display:none}nav .grp{display:none}
+nav a{flex:none;min-height:0;padding:10px 10px 12px;border-radius:0;border-bottom:2px solid transparent}
+nav a::before{display:none}nav a:hover{background:none}
+nav a.on{background:none;color:var(--text);border-color:var(--accent)}
+main{padding:20px 16px 48px}}
 h1{font-size:24px;line-height:1.25;margin:0 0 18px;letter-spacing:-.01em}h2{font-size:17px;margin:0 0 12px}
 h3{font-size:15px;margin:16px 0 8px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:20px;margin-bottom:16px}
@@ -159,7 +176,7 @@ transition:background-color .15s var(--ease)}
 .tabs a:hover{background:var(--card)}.tabs a.on{background:var(--ink);color:var(--on-ink);border-color:var(--ink)}
 @media(max-width:640px){.tabs{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;margin:0 -12px 14px;padding:0 12px}
 .tabs a{flex:none}}
-[id]{scroll-margin-top:104px}
+[id]{scroll-margin-top:20px}@media(max-width:860px){[id]{scroll-margin-top:110px}}
 .status{list-style:none;margin:0;padding:0}.status li{display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--line)}
 .status li:last-child{border:0}.dot{width:9px;height:9px;border-radius:50%;margin-top:7px;flex:none}
 .dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}
@@ -194,22 +211,129 @@ width:27px;height:27px;border:1px solid var(--line);border-radius:50%;font-size:
 @media(max-width:680px){.onboarding-layout{grid-template-columns:1fr;gap:12px}.onboarding-steps{display:flex;
 gap:8px;overflow-x:auto;padding-bottom:8px}.onboarding-steps li{flex:0 0 auto;margin:0}.onboarding-steps a{font-size:13px}
 .onboarding-panel{padding:18px}.onboarding-case{grid-template-columns:1fr}.onboarding-banner{align-items:flex-start;flex-wrap:wrap}}
+/* «Диалоги» и «Наблюдение» как ящик поддержки: слева разговоры, справа переписка; на телефоне — по очереди */
+.toolbar{display:flex;gap:12px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin-bottom:14px}
+.toolbar .tabs{margin:0}.toolbar form{display:flex;gap:8px;flex:1 1 280px;max-width:440px}
+.tabs .c{opacity:.65;margin-left:6px;font-variant-numeric:tabular-nums}
+.inbox{display:grid;grid-template-columns:minmax(260px,330px) minmax(0,1fr);height:max(520px,calc(100vh - 190px));
+height:max(520px,calc(100dvh - 190px));background:var(--card);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+.list{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line)}
+.list-head{padding:12px 16px;border-bottom:1px solid var(--line);font-weight:600}
+.items{position:relative;flex:1;overflow-y:auto}
+.item{display:grid;grid-template-columns:36px minmax(0,1fr) auto;column-gap:10px;row-gap:1px;padding:12px 16px;
+border-bottom:1px solid var(--line);color:var(--text);text-decoration:none}
+.item:hover{background:var(--bg)}.item.on{background:var(--accent-bg)}
+.av{grid-row:span 3;display:grid;place-items:center;width:36px;height:36px;border-radius:50%;font-size:12.5px;font-weight:650;
+background:color-mix(in srgb,var(--hue) 24%,var(--card));color:var(--text)}
+.item .nm{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item .tm{font-size:12px;color:var(--muted);white-space:nowrap;padding-top:2px}
+.item .pv{grid-column:2/4;font-size:13.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item .st{grid-column:2/4;display:flex;gap:6px;flex-wrap:wrap;margin-top:5px}
+.thread{display:flex;flex-direction:column;min-width:0;min-height:0}
+.thread-head{display:flex;align-items:center;flex-wrap:wrap;gap:4px 12px;padding:12px 20px;border-bottom:1px solid var(--line)}
+.thread-head h2{margin:0;font-size:16px}
+.thread-body{flex:1;overflow-y:auto;padding:20px 24px;background:var(--bg)}
+.thread .bubble{background:var(--card)}
+.thread-foot{padding:10px 20px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
+.thread .chat{gap:24px}.turn{display:flex;flex-direction:column;gap:8px}
+.chat .msg.me .bubble.draft{background:transparent;border:1px dashed var(--line-strong)}
+.turn.flag .msg.me .bubble{box-shadow:0 0 0 2px var(--warn)}
+.why{align-self:flex-end;max-width:85%;display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;justify-content:flex-end;
+font-size:13px;color:var(--muted);text-align:right}
+.why form{margin:0}
+.empty{padding:48px 24px;color:var(--muted);text-align:center}
+.back{display:none;font-size:14px}
+@media(max-width:860px){.inbox{grid-template-columns:1fr;height:auto}.list{border-right:0}
+.items,.thread-body{overflow:visible}.inbox.open .list,.inbox:not(.open) .thread{display:none}
+.back{display:inline-flex}.thread-body{padding:16px}.thread-head{padding:12px 16px}}
+/* «Обзор»: неделя графиком против прошлой и три показателя с мини-графиками */
+.week{display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:32px}
+.big{display:flex;align-items:center;flex-wrap:wrap;gap:10px;font-size:32px;font-weight:700;line-height:1.1;margin:4px 0 2px;
+font-variant-numeric:tabular-nums}
+.delta{padding:2px 8px;border-radius:6px;background:var(--bg);color:var(--muted);font-size:13px;font-weight:600}
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--muted)}
+.legend i{display:inline-block;width:18px;margin-right:6px;vertical-align:middle;border-top:2.4px solid var(--accent)}
+.legend i.prev{border-top:2px dashed var(--muted);opacity:.7}
+.chart{display:block;width:100%;height:auto;margin-top:14px}
+.chart .grid{stroke:var(--line);stroke-width:1}
+.chart .prev{fill:none;stroke:var(--muted);stroke-width:1.6;stroke-dasharray:5 5;opacity:.55}
+.chart .area{fill:var(--accent);opacity:.1}
+.chart .line{fill:none;stroke:var(--accent);stroke-width:2.4;stroke-linejoin:round;stroke-linecap:round}
+.chart circle{fill:var(--accent);stroke:var(--card);stroke-width:2}
+.days7{display:grid;grid-template-columns:repeat(7,1fr);text-align:center;font-size:12.5px;color:var(--muted);margin-top:6px}
+.days7 b{display:block;color:var(--text);font-size:14px;font-variant-numeric:tabular-nums}
+.stat{display:grid;grid-template-columns:1fr auto;align-items:end;column-gap:12px;padding:14px 0;border-bottom:1px solid var(--line)}
+.stat:first-child{padding-top:0}.stat:last-child{border-bottom:0}
+.stat .lbl{grid-column:1/3;font-size:13px;color:var(--muted)}
+.stat .val{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums}.stat .hint{grid-column:1/3;margin:2px 0 0}
+.spark{width:88px;height:26px;fill:none;stroke:var(--accent);stroke-width:1.6;stroke-linejoin:round;stroke-linecap:round}
+.todo{list-style:none;margin:0;padding:0}
+.todo li{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px 0;
+border-bottom:1px solid var(--line)}
+.todo li:last-child{border-bottom:0}
+.todo a{display:flex;gap:8px;min-width:0;color:var(--text);text-decoration:none}.todo a:hover b{text-decoration:underline}
+.todo b{flex:none;white-space:nowrap}
+.todo .q{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:860px){.week{grid-template-columns:1fr;gap:20px}}
 """
 
 NAV = [("/", "Обзор"), ("/dialogs", "Диалоги"), ("/observe", "Наблюдение"), ("/learn", "Обучение"), ("/kb", "База знаний"),
        ("/exam", "Экзамен"), ("/settings", "Настройки"), ("/onboarding", "Внедрение")]
+NAV_GROUPS = {"/dialogs": "Разговоры", "/learn": "Бот"}  # подпись группы в меню перед этим пунктом
+# Иконки меню: контур 16×16, рисуется маской цветом текста — одна и та же в светлой и тёмной теме
+NAV_ICONS = {
+    "/": '<path d="M2.5 7.2 8 2.6l5.5 4.6v6.3h-11z"/>',
+    "/dialogs": '<path d="M2.5 3h11v8H7.2L4.5 13.5V11h-2z"/>',
+    "/observe": '<path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/>',
+    "/learn": '<path d="M8 3 1.5 6 8 9l6.5-3zM4 7.3v3.2c1.1.9 2.5 1.4 4 1.4s2.9-.5 4-1.4V7.3"/>',
+    "/kb": '<path d="M3 3.5A1.5 1.5 0 0 1 4.5 2H13v10H4.5A1.5 1.5 0 0 0 3 13.5zM3 13.5A1.5 1.5 0 0 0 4.5 15H13v-3"/>',
+    "/exam": '<path d="M2.5 2.5h11v11h-11zM5.2 8.2l1.9 1.9 3.8-4.2"/>',
+    "/settings": '<circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v2M8 12.4v2M1.6 8h2M12.4 8h2M3.5 3.5l1.4 1.4M11.1 11.1l1.4 1.4'
+                 'M3.5 12.5l1.4-1.4M11.1 4.9l1.4-1.4"/>',
+    "/onboarding": '<path d="M3.5 14V2.5M3.5 3h8l-1.6 2.8 1.6 2.8h-8"/>',
+    "/logout": '<path d="M6.5 2.5h-4v11h4M10.5 5l3 3-3 3M13.5 8H6"/>',
+}
 
 
-def page(title: str, body: str, active: str = "/", refresh: int | None = None) -> HTMLResponse:
+def _icon_rule(href: str, paths: str) -> str:
+    selector = ".logout" if href == "/logout" else f'nav a[href="{href}"]'
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="#000" stroke-width="1.4" '
+           f'stroke-linecap="round" stroke-linejoin="round">{paths}</svg>')
+    return f'{selector}{{--icon:url("data:image/svg+xml,{quote(svg)}")}}'
+
+
+CSS += "".join(_icon_rule(href, paths) for href, paths in NAV_ICONS.items())
+
+
+def render_page(title: str, body: str, active: str = "/", refresh: int | None = None, *,
+                wide: bool = False, badges: dict[str, int] | None = None) -> HTMLResponse:
+    """Страница админки: меню слева, справа раздел. wide — для ящиков «Диалогов» и «Наблюдения» во всю ширину."""
     current = ' class="on" aria-current="page"'
-    nav = "".join(f'<a href="{href}"{current if href == active else ""}>{name}</a>' for href, name in NAV)
+    links = []
+    for href, name in NAV:
+        if href in NAV_GROUPS:
+            links.append(f'<span class="grp">{NAV_GROUPS[href]}</span>')
+        count = (badges or {}).get(href)
+        badge = f'<span class="n" title="ждут вас">{count}</span>' if count else ""
+        links.append(f'<a href="{href}"{current if href == active else ""}>{name}{badge}</a>')
     meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
     return HTMLResponse(f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">{meta}<title>{escape(title)}</title>
-<style>{CSS}</style></head><body><a class="skip" href="#main">К содержимому</a><header><div class="bar">
-<a class="brand" href="/">ИИ-помощник менеджера</a><nav aria-label="Разделы">{nav}</nav>
-<a class="logout" href="/logout">Выйти</a></div></header><main id="main">{body}</main>
-<script>document.querySelector("nav .on")?.scrollIntoView({{inline:"center",block:"nearest"}})</script></body></html>""")
+<style>{CSS}</style></head><body><a class="skip" href="#main">К содержимому</a><div class="shell"><aside class="side">
+<a class="brand" href="/"><span class="logo" aria-hidden="true">ИИ</span>Помощник менеджера</a>
+<nav aria-label="Разделы">{"".join(links)}</nav><a class="logout" href="/logout">Выйти</a></aside>
+<main id="main"{' class="wide"' if wide else ""}>{body}</main></div>
+<script>document.querySelector("nav .on")?.scrollIntoView({{inline:"center",block:"nearest"}});
+document.querySelectorAll(".thread-body").forEach(e => e.scrollTop = e.scrollHeight);
+const picked = document.querySelector(".items .on");
+if (picked) picked.parentElement.scrollTop = picked.offsetTop - 60;</script></body></html>""")
+
+
+def nav_badges(services: Services) -> dict[str, int]:
+    """Счётчики в меню: черновики ждут решения, вопросы без ответа и факты из переписки ждут проверки."""
+    drafts = sum(r["status"] == D.DRAFT_PENDING for r in services.db.attention(limit=100))
+    learn = len(group_questions(services.db.to_learn())) + len(services.db.candidates())
+    return {"/dialogs": drafts, "/learn": learn}
 
 
 def plural(n: int, one: str, few: str, many: str) -> str:
@@ -244,6 +368,10 @@ def create_app(services: Services) -> FastAPI:
     app = FastAPI(title="AI Sales Assistant admin", docs_url=None, redoc_url=None)
     exam: dict = {"running": False, "done": 0, "total": 0, "error": ""}
     onboarding_lock = asyncio.Lock()
+
+    def page(title: str, body: str, active: str = "/", refresh: int | None = None, *,
+             wide: bool = False) -> HTMLResponse:
+        return render_page(title, body, active, refresh, wide=wide, badges=nav_badges(services))
 
     failures: dict[str, list[float]] = {}
 
@@ -484,14 +612,14 @@ def create_app(services: Services) -> FastAPI:
 
     # --- журнал ---
     @app.get("/dialogs", dependencies=[Depends(auth)])
-    async def dialogs(f: str = "", q: str = "") -> Response:
+    async def dialogs(f: str = "", q: str = "", conn: str = "", chat: str = "") -> Response:
         if f in ("observe", "watch"):  # раньше наблюдение жило вкладками «Диалогов»
             return RedirectResponse("/observe" + (f"?{urlencode({'q': q})}" if q else ""), status_code=303)
-        return page("Диалоги", dialogs_html(services, f, q), "/dialogs")
+        return page("Диалоги", dialogs_html(services, f, q, conn, chat), "/dialogs", wide=True)
 
     @app.get("/observe", dependencies=[Depends(auth)])
     async def observe_page(conn: str = "", chat: str = "", q: str = "") -> HTMLResponse:
-        return page("Наблюдение", observe_html(services, conn, chat, q), "/observe")
+        return page("Наблюдение", observe_html(services, conn, chat, q), "/observe", wide=True)
 
     @app.post("/dialogs/{dialog_id}/flag", dependencies=[Depends(auth)])
     async def flag(dialog_id: int, flagged: int = Form(...), back: str = Form("/dialogs")) -> RedirectResponse:
@@ -738,19 +866,19 @@ def create_app(services: Services) -> FastAPI:
         """Черновик базы и «как было до бота» из переписки наблюдения — тем же импортом, что и выгрузка Telegram."""
         from tools.import_telegram import run_import
         if not services.watch_log.exists():
-            return page("Наблюдение", observe_html(services, msg="Переписки из наблюдения пока нет."), "/observe")
+            return page("Наблюдение", observe_html(services, msg="Переписки из наблюдения пока нет."), "/observe", wide=True)
         try:
             r = await asyncio.to_thread(run_import, [services.watch_log], None, import_dir(services))
             msg = f"Черновик собран из наблюдения: чатов {r['chats']}, пар «вопрос — ответ» {r['pairs']}."
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
             msg = f"Не получилось разобрать переписку наблюдения: {exc}"
-        return page("Наблюдение", observe_html(services, msg=msg), "/observe")
+        return page("Наблюдение", observe_html(services, msg=msg), "/observe", wide=True)
 
     @app.post("/watch/clear", dependencies=[Depends(auth)])
     async def watch_clear() -> HTMLResponse:
         services.watch_log.unlink(missing_ok=True)
         return page("Наблюдение", observe_html(services, msg="Файл переписки удалён. Журнал сообщений на этой странице остался."),
-                    "/observe")
+                    "/observe", wide=True)
 
     @app.get("/import/file/{name}", dependencies=[Depends(auth)])
     async def import_file(name: str) -> Response:
@@ -840,8 +968,9 @@ def observe_html(services: Services, conn_id: str = "", chat_id: str = "", q: st
 <div class="card"><div class="muted">Чатов</div><div class="kpi">{stats['chats']}</div></div>
 <div class="card"><div class="muted">Обычно вы отвечаете через</div><div class="kpi">{minutes_text(median) if median is not None else "—"}</div></div>
 <div class="card"><div class="muted">Кандидатов в базу</div><div class="kpi"><a href="/learn">{stats['candidates']}</a></div></div></div>"""
-    search = f"""<form method="get" action="/observe" class="row" style="margin-bottom:16px">
-<input type="search" name="q" value="{escape(q)}" placeholder="Поиск по переписке" style="flex:1"><button class="light">Найти</button></form>"""
+    search = f"""<div class="toolbar"><form method="get" action="/observe" role="search">
+<input type="search" name="q" value="{escape(q)}" placeholder="Поиск по переписке" aria-label="Поиск по переписке">
+<button class="light">Найти</button></form></div>"""
 
     def name(chat: int) -> str:
         return services.chat_names.get(chat) or f"Чат {chat}"
@@ -849,12 +978,15 @@ def observe_html(services: Services, conn_id: str = "", chat_id: str = "", q: st
     def when(ts: float) -> str:
         return dt.datetime.fromtimestamp(ts).strftime("%d.%m %H:%M")
 
+    def link(c) -> str:
+        return "/observe?" + urlencode({"conn": c["connection_id"], "chat": c["chat_id"]})
+
     chats = services.db.observed_chats()
     if q.strip():
         found = services.db.observations(query=q.strip())
         rows = "".join(
             f"<tr><td class='muted' style='white-space:nowrap'>{when(r['sent_at'])}</td>"
-            f"<td><a href='/observe?{urlencode({'conn': r['connection_id'], 'chat': r['chat_id']})}'>{escape(name(r['chat_id']))}</a></td>"
+            f"<td><a href='{escape(link(r))}'>{escape(name(r['chat_id']))}</a></td>"
             f"<td>{'Вы' if r['role'] == 'manager' else 'Клиент'}</td><td><pre>{escape(r['text'])}</pre></td></tr>" for r in found)
         body = (f"<div class='card'><h2>Найдено: {len(found)}</h2><div class='scroll'><table>"
                 f"<tr><th>Когда</th><th>Чат</th><th>Кто</th><th>Сообщение</th></tr>{rows}</table></div></div>"
@@ -862,11 +994,13 @@ def observe_html(services: Services, conn_id: str = "", chat_id: str = "", q: st
     elif not chats:
         body = '<div class="card muted">Сообщений пока нет. Они появятся, когда клиенты напишут в чаты, где подключён бот.</div>'
     else:
-        picked = next((c for c in chats if c["connection_id"] == conn_id and str(c["chat_id"]) == chat_id), chats[0])
-        links = "".join(
-            f"<a href='/observe?{urlencode({'conn': c['connection_id'], 'chat': c['chat_id']})}' "
-            f"class='{'on' if c is picked else ''}'>{escape(name(c['chat_id']))}"
-            f"<div class='muted'>{plural(c['n'], 'сообщение', 'сообщения', 'сообщений')} · {when(c['last_at'])}</div></a>"
+        chosen = next((c for c in chats if c["connection_id"] == conn_id and str(c["chat_id"]) == chat_id), None)
+        picked = chosen or chats[0]
+        items = "".join(
+            f"<a class='item{' on' if c is picked else ''}' href='{escape(link(c))}'>"
+            f"{avatar(name(c['chat_id']), str(c['chat_id']))}<span class='nm'>{escape(name(c['chat_id']))}</span>"
+            f"<span class='tm'>{short_time(c['last_at'])}</span>"
+            f"<span class='pv'>{plural(c['n'], 'сообщение', 'сообщения', 'сообщений')}</span></a>"
             for c in chats)
         messages, waiting, lines = services.db.observed_chat(picked["connection_id"], picked["chat_id"]), None, []
         for m in messages:
@@ -878,9 +1012,12 @@ def observe_html(services: Services, conn_id: str = "", chat_id: str = "", q: st
                 note_text, waiting = f" · ответ через {minutes_text((m['sent_at'] - waiting) / 60)}", None
             lines.append(f"<div class='msg{' me' if mine else ''}'><div class='muted'>{'Вы' if mine else 'Клиент'} · "
                          f"{when(m['sent_at'])}{note_text}</div><div class='bubble'>{escape(m['text'])}</div></div>")
-        body = f"""<div class="cols"><div class="card"><h2>{escape(name(picked['chat_id']))}</h2>
-<div class="chat">{''.join(lines)}</div></div>
-<div class="card"><h2>Чаты · {len(chats)}</h2><div class="chats">{links}</div></div></div>"""
+        body = f"""<div class="inbox{' open' if chosen else ''}">
+<div class="list"><div class="list-head">Чаты · {len(chats)}</div><div class="items">{items}</div></div>
+<div class="thread"><div class="thread-head"><a class="back" href="/observe">← Все чаты</a>
+<h2>{escape(name(picked['chat_id']))}</h2>
+<span class="muted">{plural(picked['n'], 'сообщение', 'сообщения', 'сообщений')}</span></div>
+<div class="thread-body"><div class="chat">{''.join(lines)}</div></div></div></div>"""
     file_card = watch_log_html(services)
     return f"""<h1>Наблюдение</h1>{note(msg)}<div class="card">{state}
 <p class="hint">Телефоны, почты и номера карт скрыты. Голосовые и файлы сохраняются только как отметки.
@@ -921,14 +1058,100 @@ def last_exam(services: Services) -> dict | None:
     return json.loads(raw) if raw else None
 
 
-def dashboard_html(services: Services, question: str = "", result: str = "") -> str:
-    s = services.db.stats()
-    kpis = f"""<div class="kpis">
-<div class="card"><div class="muted">Вопросов от клиентов</div><div class="kpi">{s['real']}</div></div>
-<div class="card"><div class="muted">Бот ответил сам</div><div class="kpi">{s['auto_share']:.0%}</div></div>
-<div class="card"><div class="muted">Передано менеджеру</div><div class="kpi">{s['escalated_share']:.0%}</div></div>
-<div class="card"><div class="muted">Отмечено ошибок</div><div class="kpi">{s['flagged']}</div></div></div>"""
+WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 
+
+def chart_svg(week: list[int], before: list[int]) -> str:
+    """Обращения по дням: эта неделя линией с заливкой, прошлая — пунктиром. Точки стоят по центрам семи колонок,
+    поэтому подписи дней под графиком (сетка из 7 колонок) совпадают с ними при любой ширине."""
+    w, top, base = 700, 12, 136
+    peak = max(week + before + [1])
+
+    def points(values: list[int]) -> list[tuple[float, float]]:
+        return [((i + .5) * w / 7, base - v / peak * (base - top)) for i, v in enumerate(values)]
+
+    now, prev = points(week), points(before)
+    line = " ".join(f"{x:.1f},{y:.1f}" for x, y in now)
+    area = f"M{now[0][0]:.1f} {base} L{line.replace(' ', ' L')} L{now[-1][0]:.1f} {base}Z"
+    grid = "".join(f'<line class="grid" x1="0" x2="{w}" y1="{y}" y2="{y}"/>' for y in (top, (top + base) / 2, base))
+    label = ", ".join(f"{WEEKDAYS[i]} {v}" for i, v in enumerate(week))
+    return (f'<svg class="chart" viewBox="0 0 {w} 146" role="img" aria-label="Обращения за 7 дней по дням: {label}">'
+            f'{grid}<polyline class="prev" points="{" ".join(f"{x:.1f},{y:.1f}" for x, y in prev)}"/>'
+            f'<path class="area" d="{area}"/><polyline class="line" points="{line}"/>'
+            f'<circle cx="{now[-1][0]:.1f}" cy="{now[-1][1]:.1f}" r="4.5"/></svg>')
+
+
+def spark_svg(values: list[float]) -> str:
+    """Мини-график показателя по дням недели: только форма, без осей."""
+    lo, hi, w, h = min(values), max(values), 88, 26
+    span = (hi - lo) or 1
+    pts = " ".join(f"{2 + i * (w - 4) / (len(values) - 1):.1f},{h - 3 - (v - lo) / span * (h - 6):.1f}"
+                   for i, v in enumerate(values))
+    return f'<svg class="spark" viewBox="0 0 {w} {h}" aria-hidden="true"><polyline points="{pts}"/></svg>'
+
+
+def week_html(services: Services) -> str:
+    """Главное на «Обзоре»: сколько обращений за неделю против прошлой и как с ними справился бот."""
+    days = services.db.daily(14)
+    before, week = days[:7], days[7:]
+    total, was = sum(d["questions"] for d in week), sum(d["questions"] for d in before)
+    if was and total != was:
+        delta = f'<span class="delta">{f"{(total - was) / was:+.0%}".replace("-", "−")} к прошлой неделе</span>'
+    else:
+        delta = '<span class="delta">как на прошлой неделе</span>' if was else ""
+    labels = "".join(f"<span><b>{d['questions']}</b>{'сегодня' if i == 6 else WEEKDAYS[d['day'].weekday()]}</span>"
+                     for i, d in enumerate(week))
+    bot, auto = sum(d["bot"] for d in week), sum(d["auto"] for d in week)
+    escalated = sum(d["escalated"] for d in week)
+    speed = [d["latency_ms"] for d in week if d["latency_ms"]]
+    quiet = "" if bot else '<p class="muted hint">бот за неделю не отвечал клиентам</p>'
+    stats = [("Бот ответил сам", f"{auto / bot:.0%}" if bot else "—",
+              spark_svg([d["auto"] / d["bot"] if d["bot"] else 0 for d in week]), quiet),
+             ("Передано менеджеру", str(escalated), spark_svg([d["escalated"] for d in week]), "")]
+    if speed:
+        stats.append(("Бот отвечает за", f"{sum(speed) / len(speed) / 1000:.1f} с".replace(".", ","),
+                      spark_svg([d["latency_ms"] / 1000 for d in week]), ""))
+    else:
+        waits = services.watch_stats() or {}
+        median = waits.get("median_wait_min")
+        stats.append(("Вы отвечаете клиенту через", minutes_text(median) if median is not None else "—", "",
+                      '<p class="muted hint">по наблюдению</p>' if median is not None else ""))
+    side = "".join(f'<div class="stat"><div class="lbl">{name}</div><div class="val">{value}</div>{spark}{hint}</div>'
+                   for name, value, spark, hint in stats)
+    s = services.db.stats()
+    return f"""<div class="card"><div class="week"><div>
+<div class="muted">Обращения клиентов за 7 дней</div><div class="big">{total}{delta}</div>
+<div class="legend"><span><i></i>эта неделя</span><span><i class="prev"></i>прошлая · {was}</span></div>
+{chart_svg([d["questions"] for d in week], [d["questions"] for d in before])}<div class="days7">{labels}</div></div>
+<div>{side}</div></div>
+<p class="muted" style="margin:16px 0 0">За всё время: {plural(s['real'], 'вопрос', 'вопроса', 'вопросов')} клиентов ·
+бот ответил сам {s['auto_share']:.0%} · передано менеджеру {s['escalated_share']:.0%} · отмечено ошибок {s['flagged']}</p></div>"""
+
+
+def attention_html(services: Services) -> str:
+    """Что ждёт человека: новые подключения, черновики, свежие передачи менеджеру и неразобранные ошибки."""
+    rows = []
+    for c in services.db.connections():
+        if not c.approved:
+            who = escape(services.owner_names.get(c.owner_user_id, f"id {c.owner_user_id}"))
+            rows.append(f'<li><span class="pill warn">Подключение</span><a href="#connections"><b>{who}</b>'
+                        f'<span class="q">ждёт разрешения</span></a><span></span></li>')
+    for r in services.db.attention():
+        if r["flagged"] and not r["reviewed"]:
+            tag, href = "Ошибка", f"/dialogs/{r['id']}/review"
+        else:
+            tag = "Черновик" if r["status"] == D.DRAFT_PENDING else "Менеджеру"
+            href = chat_link(r["connection_id"], r["chat_id"])
+        rows.append(f'<li><span class="pill warn">{tag}</span><a href="{escape(href)}">'
+                    f'<b>{escape(chat_title(services, r["connection_id"], r["chat_id"]))}</b>'
+                    f'<span class="q">{escape(r["question"])}</span></a>'
+                    f'<span class="muted">{short_time(r["created_at"])}</span></li>')
+    body = (f'<ul class="todo">{"".join(rows)}</ul>' if rows else
+            '<p class="muted">Ничего не ждёт: черновиков без решения и передач за сутки нет.</p>')
+    return f'<div class="card"><h2>Требуют внимания</h2>{body}</div>'
+
+
+def dashboard_html(services: Services, question: str = "", result: str = "") -> str:
     sandbox = f"""<div class="card"><h2>Проверить бота</h2>
 <p class="muted">Напишите вопрос как клиент — бот ответит здесь, клиенту ничего не уйдёт.</p>
 <form method="post" action="/sandbox"><textarea name="question" rows="2" required
@@ -936,7 +1159,8 @@ placeholder="Сколько стоит экран на фуд-корте в ВЕ
 <p class="row"><button>Спросить</button>
 <button class="light" formaction="/sandbox/reset" formnovalidate>Новый разговор</button></p></form>{result}</div>"""
 
-    return f"""<h1>Обзор</h1>{onboarding.banner(services)}{connect_guide_html(services)}{kpis}<div class="cols">{sandbox}
+    return f"""<h1>Обзор</h1>{onboarding.banner(services)}{connect_guide_html(services)}{week_html(services)}
+<div class="cols"><div>{attention_html(services)}{sandbox}</div>
 <div class="card"><h2>Состояние</h2>{status_html(services)}</div></div>{before_after_html(services)}{growth_html(services)}
 {activity_html(services)}{connections_html(services)}"""
 
@@ -1112,7 +1336,7 @@ def connections_html(services: Services) -> str:
     hint = ("<p class='muted'>Кто-то подключил бота к своему аккаунту. Разрешайте только своим менеджерам: "
             "каждое подключение тратит лимит модели.</p>" if pending else "")
     title = "Подключения" if any(c.id.startswith("max:") for c in conns) else "Подключения Telegram"
-    return f"""<div class="card"><h2>{title}</h2>{hint}<div class="scroll"><table>
+    return f"""<div class="card" id="connections"><h2>{title}</h2>{hint}<div class="scroll"><table>
 <tr><th>Менеджер</th><th>Статус</th><th>Режим</th></tr>{"".join(row(c) for c in conns)}</table></div></div>"""
 
 
@@ -1266,40 +1490,104 @@ def growth_html(services: Services) -> str:
 <table><tr><th>Неделя с</th><th>Вопросов</th><th>Бот ответил сам</th><th>Утверждено фактов</th></tr>{rows}</table></div>"""
 
 
-def dialogs_html(services: Services, f: str, q: str) -> str:
-    f = f if f in FILTERS else ""
+AVATAR_HUES = ("#c2410c", "#2563eb", "#15803d", "#7c3aed", "#0e7490", "#b45309")
+
+
+def chat_title(services: Services, connection_id: str | None, chat_id: int | None) -> str:
+    """Имя чата в списках: тестовый чат админки, имя клиента из Telegram или номер чата."""
+    if (connection_id or "").startswith("sandbox:"):
+        return "Тестовый чат"
+    return services.chat_names.get(chat_id) or f"Чат {chat_id}"
+
+
+def avatar(name: str, key: str) -> str:
+    """Кружок с буквами имени; цвет у чата постоянный, чтобы его было легко найти глазами."""
+    letters = "".join(w[0] for w in re.findall(r"[^\W\d_]+", name)[:2]).upper() or "#"
+    hue = AVATAR_HUES[sum(map(ord, key)) % len(AVATAR_HUES)]
+    return f'<span class="av" style="--hue:{hue}" aria-hidden="true">{escape(letters)}</span>'
+
+
+def short_time(ts: float) -> str:
+    """12:04 — сегодня, 27.10 — раньше, как в мессенджере."""
+    moment = dt.datetime.fromtimestamp(ts)
+    return moment.strftime("%H:%M") if moment.date() == dt.date.today() else moment.strftime("%d.%m")
+
+
+def chat_link(connection_id: str | None, chat_id: int | None, f: str = "", q: str = "") -> str:
+    params = {"f": f, "q": q, "conn": connection_id or "", "chat": chat_id or 0}
+    return "/dialogs?" + urlencode({k: v for k, v in params.items() if v != ""})
+
+
+def status_pill(status: str) -> str:
+    return f'<span class="pill {PILL_TONE.get(status, "")}">{escape(STATUS_NAMES.get(status, status))}</span>'
+
+
+def turn_html(r, back: str, titles: dict[str, str]) -> str:
+    """Вопрос клиента и что с ним сделал бот: ответ или черновик, на что опирался или почему передал, кнопка «Ошибка»."""
+    flagged, status = bool(r["flagged"]), r["status"]
+    when = dt.datetime.fromtimestamp(r["created_at"]).strftime("%d.%m %H:%M")
+    draft = " draft" if status in (D.DRAFT_PENDING, D.DRAFT_REJECTED) else ""
+    text = f"<div class='bubble{draft}'>{escape(r['answer'])}</div>" if r["answer"] else ""
+    if r["decision"] == "answer":
+        sources = json.loads(r["sources"] or "[]")
+        source = " ".join(titles.get(sources[0], sources[0]).split()) if sources else ""
+        why = f"Опора: {escape(source[:90])}{'…' if len(source) > 90 else ''}" if source else ""
+    else:
+        why = escape(human_reason(r["reason"])) if r["reason"] else ""
+    flag_form = (f"<form method='post' action='/dialogs/{r['id']}/flag'>"
+                 f"<input type='hidden' name='flagged' value='{0 if flagged else 1}'>"
+                 f"<input type='hidden' name='back' value='{escape(back)}'>"
+                 f"<button class='small {'' if flagged else 'light'}'>{'Снять' if flagged else 'Ошибка'}</button></form>")
+    return (f"<div class='turn{' flag' if flagged else ''}'>"
+            f"<div class='msg'><div class='muted'>Клиент · {when}</div><div class='bubble'>{escape(r['question'])}</div></div>"
+            f"<div class='msg me'><div class='muted'>Бот · {status_pill(status)}</div>{text}</div>"
+            f"<div class='why'>{f'<span>{why}</span>' if why else ''}{review_link(r)}{flag_form}</div></div>")
+
+
+def dialogs_html(services: Services, f: str, q: str, conn: str = "", chat: str = "") -> str:
+    """«Диалоги» как ящик поддержки: слева разговоры по чатам, справа переписка выбранного с решениями бота."""
+    f, q = (f if f in FILTERS else ""), q.strip()
     tabs = "".join(
-        f'<a href="/dialogs?f={key}" class="{"on" if key == f else ""}">{name}</a>' for key, (name, _) in FILTERS.items())
-    back = escape("/dialogs?" + urlencode({"f": f, "q": q} if q else {"f": f}))
-    rows = []
-    for r in services.db.recent_dialogs(300, query=q.strip(), **FILTERS[f][1]):
-        flagged = bool(r["flagged"])
-        reason = escape(human_reason(r["reason"])) if r["reason"] else ""
-        if r["status"] == D.WATCH:
-            reason = (f"менеджер ответил через {minutes_text(r['reply_after_s'] / 60)}" if r["reply_after_s"] is not None
-                      else "менеджер ещё не ответил")
-        rows.append(
-            f"<tr class='{'flag' if flagged else ''}'><td class='muted'>"
-            f"{dt.datetime.fromtimestamp(r['created_at']).strftime('%d.%m %H:%M')}</td>"
-            f"<td data-label='Вопрос'>{escape(r['question'])}</td><td data-label='Ответ'>{escape(r['answer'])}</td>"
-            f"<td><span class='pill {PILL_TONE.get(r['status'], '')}'>{escape(STATUS_NAMES.get(r['status'], r['status']))}</span>"
-            f"<div class='muted'>{reason}</div></td>"
-            f"<td>{review_link(r)}<form method='post' action='/dialogs/{r['id']}/flag'>"
-            f"<input type='hidden' name='flagged' value='{0 if flagged else 1}'>"
-            f"<input type='hidden' name='back' value='{back}'>"
-            f"<button class='small {'' if flagged else 'light'}'>{'Снять' if flagged else 'Ошибка'}</button>"
-            f"</form></td></tr>")
-    table = "".join(rows) or "<tr><td colspan=5 class='muted'>Пока пусто</td></tr>"
+        f'<a href="/dialogs?f={key}" class="{"on" if key == f else ""}">{name}'
+        f'<span class="c">{services.db.count_dialogs(**cond)}</span></a>' for key, (name, cond) in FILTERS.items())
+    search = f"""<form method="get" action="/dialogs" role="search"><input type="hidden" name="f" value="{f}">
+<input type="search" name="q" value="{escape(q)}" placeholder="Поиск по вопросам и ответам" aria-label="Поиск по вопросам и ответам">
+<button class="light">Найти</button></form>"""
+    head = f'<h1>Диалоги</h1><div class="toolbar"><div class="tabs">{tabs}</div>{search}</div>'
+    chats: dict[tuple[str, int], list] = {}
+    for r in services.db.recent_dialogs(500, query=q, **FILTERS[f][1]):
+        chats.setdefault((r["connection_id"] or "", r["chat_id"] or 0), []).append(r)
+    if not chats:
+        empty = ("Ничего не нашлось." if q else
+                 "Здесь появятся разговоры, в которых участвует бот. Проверить его можно на «Обзоре».")
+        return f'{head}<div class="card empty">{empty}</div>'
+    chosen = next((k for k in chats if k[0] == conn and str(k[1]) == chat), None)
+    picked = chosen or next(iter(chats))
+    items = []
+    for key, rows in chats.items():
+        last, name = rows[0], chat_title(services, *key)
+        mark = '<span class="pill warn">ошибка</span>' if any(r["flagged"] for r in rows) else ""
+        items.append(
+            f'<a class="item{" on" if key == picked else ""}" href="{escape(chat_link(*key, f, q))}">'
+            f'{avatar(name, f"{key[0]}:{key[1]}")}<span class="nm">{escape(name)}</span>'
+            f'<span class="tm">{short_time(last["created_at"])}</span><span class="pv">{escape(last["question"])}</span>'
+            f'<span class="st">{status_pill(last["status"])}{mark}</span></a>')
+    turns = services.db.chat_dialogs(*picked, FILTERS[""][1]["statuses"])
+    titles = {c.id: c.text for c in services.kb.chunks}
+    back = chat_link(*picked, f, q)
+    channel = ("тестовый чат админки" if picked[0].startswith("sandbox:")
+               else "MAX" if picked[0].startswith("max:") else "Telegram")
+    to_list = "/dialogs" + (f"?{urlencode({k: v for k, v in (('f', f), ('q', q)) if v})}" if f or q else "")
     export = ('<p><a class="btn light" href="/dialogs/flagged.csv">Скачать для экзамена (CSV)</a> '
-              '<span class="muted">только проверенные примеры</span></p>'
-              if f == "flagged" and rows else "")
-    return f"""<h1>Диалоги</h1><div class="tabs">{tabs}</div>
-<form method="get" action="/dialogs" class="row" style="margin-bottom:12px"><input type="hidden" name="f" value="{f}">
-<input type="search" name="q" value="{escape(q)}" placeholder="Поиск по вопросам и ответам" style="flex:1">
-<button class="light">Найти</button></form>{export}
-<div class="card"><p class="muted">Нажмите «Ошибка», если бот ответил неверно или зря передал вопрос.
-После разбора пример можно добавить в экзамен.</p><div class="scroll"><table class="table-cards">
-<tr><th>Когда</th><th>Вопрос</th><th>Ответ</th><th>Решение</th><th></th></tr>{table}</table></div></div>"""
+              '<span class="muted">только проверенные примеры</span></p>' if f == "flagged" else "")
+    return f"""{head}{export}<div class="inbox{" open" if chosen else ""}">
+<div class="list"><div class="list-head">Разговоры · {len(chats)}</div><div class="items">{"".join(items)}</div></div>
+<div class="thread"><div class="thread-head"><a class="back" href="{escape(to_list)}">← Все разговоры</a>
+<h2>{escape(chat_title(services, *picked))}</h2>
+<span class="muted">{channel} · {plural(len(turns), "вопрос", "вопроса", "вопросов")}</span></div>
+<div class="thread-body"><div class="chat">{"".join(turn_html(r, back, titles) for r in turns)}</div></div>
+<div class="thread-foot">«Ошибка» — если бот ответил неверно или зря передал вопрос. После разбора пример попадёт в экзамен.</div>
+</div></div>"""
 
 
 def flagged_csv_text(services: Services) -> str:
@@ -1315,7 +1603,7 @@ def review_link(dialog) -> str:
     if not dialog["flagged"]:
         return ""
     label = "Разбор сохранён" if dialog["reviewed"] else "Разобрать"
-    return f'<p style="margin:0 0 6px"><a href="/dialogs/{dialog["id"]}/review">{label}</a></p>'
+    return f'<a href="/dialogs/{dialog["id"]}/review">{label}</a>'
 
 
 def dialog_review_html(dialog, back: str, msg: str = "", values: dict[str, str] | None = None) -> str:

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import sqlite3
 import time
@@ -319,8 +320,9 @@ class Database:
         self.conn.commit()
         return cur.rowcount == 1
 
-    def recent_dialogs(self, limit: int = 100, *, statuses: tuple[str, ...] = (),
-                       flagged: bool = False, reviewed: bool = False, query: str = "") -> list[sqlite3.Row]:
+    @staticmethod
+    def _dialog_filter(statuses: tuple[str, ...] = (), flagged: bool = False, reviewed: bool = False,
+                       query: str = "") -> tuple[str, list]:
         where, args = [], []
         if statuses:
             where.append(f"status IN ({','.join('?' * len(statuses))})")
@@ -332,9 +334,60 @@ class Database:
         if query:
             where.append("(question LIKE ? OR answer LIKE ?)")
             args += [f"%{query}%", f"%{query}%"]
+        return (" WHERE " + " AND ".join(where) if where else ""), args
+
+    def recent_dialogs(self, limit: int = 100, *, statuses: tuple[str, ...] = (),
+                       flagged: bool = False, reviewed: bool = False, query: str = "") -> list[sqlite3.Row]:
+        where, args = self._dialog_filter(statuses, flagged, reviewed, query)
         # Bandit B608 — ложное срабатывание: в строку попадают только заготовленные условия и «?», значения идут параметрами
-        sql = "SELECT * FROM dialogs" + (" WHERE " + " AND ".join(where) if where else "")  # nosec — см. комментарий выше
+        sql = "SELECT * FROM dialogs" + where  # nosec — см. комментарий выше
         return self.conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*args, limit)).fetchall()
+
+    def count_dialogs(self, *, statuses: tuple[str, ...] = (), flagged: bool = False) -> int:
+        """Сколько строк журнала в папке «Диалогов» — счётчик на вкладке."""
+        where, args = self._dialog_filter(statuses, flagged)
+        return self.conn.execute("SELECT COUNT(*) FROM dialogs" + where, args).fetchone()[0]  # nosec — как в recent_dialogs
+
+    def chat_dialogs(self, connection_id: str, chat_id: int, statuses: tuple[str, ...],
+                     limit: int = 100) -> list[sqlite3.Row]:
+        """Последние вопросы и ответы бота в одном чате по порядку — переписка в «Диалогах»."""
+        marks = ",".join("?" * len(statuses))
+        rows = self.conn.execute(
+            f"""SELECT * FROM dialogs WHERE IFNULL(connection_id, '')=? AND IFNULL(chat_id, 0)=?
+                AND status IN ({marks}) ORDER BY id DESC LIMIT ?""",  # nosec — в строке только «?»
+            (connection_id, chat_id, *statuses, limit)).fetchall()
+        return rows[::-1]
+
+    def attention(self, limit: int = 6, hours: int = 24) -> list[sqlite3.Row]:
+        """Что ждёт человека: черновики без решения за неделю, передачи менеджеру за сутки
+        и отмеченные, но не разобранные ошибки. Тестовый чат не в счёт."""
+        now = time.time()
+        return self.conn.execute(
+            """SELECT * FROM dialogs WHERE status != ? AND ((status = ? AND created_at >= ?)
+                 OR (status = ? AND created_at >= ?) OR (flagged = 1 AND reviewed = 0))
+               ORDER BY id DESC LIMIT ?""",
+            (SANDBOX, DRAFT_PENDING, now - 7 * 86400, ESCALATED, now - hours * 3600, limit)).fetchall()
+
+    def daily(self, days: int = 14) -> list[dict]:
+        """По дням, старые первыми: обращения клиентов (без тестового чата), сколько из них видел бот
+        (без наблюдения), сколько он закрыл сам, сколько передал менеджеру и как быстро отвечал."""
+        first = dt.date.today() - dt.timedelta(days=days - 1)
+        rows = self.conn.execute(
+            """SELECT date(created_at, 'unixepoch', 'localtime') AS day, COUNT(*) AS questions,
+                      SUM(status != ?) AS bot, SUM(status = ?) AS auto,
+                      SUM(decision = 'escalate' AND status != ?) AS escalated,
+                      AVG(CASE WHEN decision = 'answer' AND status != ? THEN latency_ms END) AS latency_ms
+               FROM dialogs WHERE created_at >= ? AND status != ? GROUP BY day""",
+            (WATCH, SENT_AUTO, WATCH, WATCH, time.mktime(first.timetuple()), SANDBOX)).fetchall()
+        by_day = {r["day"]: r for r in rows}
+        out = []
+        for i in range(days):
+            day = first + dt.timedelta(days=i)
+            r = by_day.get(day.isoformat())
+            out.append({"day": day, "questions": r["questions"] if r else 0, "bot": (r["bot"] or 0) if r else 0,
+                        "auto": (r["auto"] or 0) if r else 0, "escalated": (r["escalated"] or 0) if r else 0,
+                        "latency_ms": (r["latency_ms"] or 0) if r else 0})
+        return out
 
     def to_learn(self, limit: int = 500) -> list[sqlite3.Row]:
         """Вопросы, на которые у бота не нашлось ответа или он ответил неверно (отметка «Ошибка»).
