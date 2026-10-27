@@ -153,6 +153,7 @@ class Services:
         self.assistant = self._make_assistant()
         # Заполняется при запуске бота: {ok, username, business} или {ok: False, error}
         self.bot_status: dict | None = None
+        self.max_status: dict | None = None  # то же для MAX: {ok, username, name} или {ok: False, error}
         self._chat_locks: dict[tuple[str, int], asyncio.Lock] = {}
         # Лента «что делает бот» для админки и имена чатов (только в памяти, в базу не пишутся)
         self.events: deque[tuple[str, str]] = deque(maxlen=80)

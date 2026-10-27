@@ -66,12 +66,40 @@ async def check_telegram(settings: Settings) -> bool:
     return ok
 
 
+async def check_max(settings: Settings) -> bool:
+    """MAX — второй канал и необязателен: без токена просто пропускаем."""
+    if not settings.max_bot_token:
+        line(None, "MAX", "MAX_BOT_TOKEN не задан — второй канал выключен")
+        return True
+    from .channels.max_api import MaxApi, MaxError
+
+    api = MaxApi(settings.max_bot_token, settings.max_api_url)
+    try:
+        me = await api.me()
+        hooks = (await api.request("GET", "/subscriptions")).get("subscriptions") or []
+    except MaxError as exc:
+        line(False, "MAX", "токен не принят — скопируйте его заново на dev.max.ru" if exc.status == 401 else str(exc))
+        return False
+    except Exception as exc:  # noqa: BLE001
+        line(False, "MAX", f"нет связи ({type(exc).__name__}) — проверьте интернет")
+        return False
+    finally:
+        await api.close()
+    line(True, "Бот MAX", me.get("username") or me.get("first_name") or str(me.get("user_id")))
+    if hooks:
+        # Бот получает события долгим опросом; подписка-вебхук, скорее всего, перехватит их
+        line(False, "Вебхук MAX", f"у бота есть подписка {hooks[0].get('url')} — удалите её (DELETE /subscriptions)")
+        return False
+    return True
+
+
 async def main() -> int:
     settings = Settings.load()
     services = Services(settings)
     print("Проверка перед запуском\n")
     ok = await check_model(services)
     ok = await check_telegram(settings) and ok
+    ok = await check_max(settings) and ok
     conns = services.db.connections()
     if conns:
         modes = ", ".join("автоответ" if c.mode == "auto" else "черновики" for c in conns)

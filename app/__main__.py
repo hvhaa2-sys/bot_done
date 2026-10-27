@@ -1,4 +1,4 @@
-"""Запуск: python -m app — админка и (если задан токен) Telegram-бот в одном процессе."""
+"""Запуск: python -m app — админка и (если заданы токены) боты Telegram и MAX в одном процессе."""
 from __future__ import annotations
 
 import asyncio
@@ -105,6 +105,15 @@ async def main() -> None:
         tasks.append(polling)
     else:
         log.warning("TELEGRAM_BOT_TOKEN не задан — работает только админка и тестовый чат")
+    max_api = None
+    if settings.max_bot_token:
+        from .channels.max_api import MaxApi
+        from .channels.max_bot import run_max
+
+        max_api = MaxApi(settings.max_bot_token, settings.max_api_url)
+        max_task = asyncio.create_task(run_max(max_api, services))
+        max_task.add_done_callback(_log_crash)
+        tasks.append(max_task)
 
     if settings.admin_token == "change-me":
         log.warning("ADMIN_TOKEN по умолчанию: задайте свой в .env, иначе любой сайт, открытый в браузере, "
@@ -123,6 +132,8 @@ async def main() -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
         if bot:
             await bot.session.close()
+        if max_api:
+            await max_api.close()
         await services.llm.close()
         log.info("Остановлено")
 

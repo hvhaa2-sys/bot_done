@@ -410,6 +410,8 @@ async def maybe_send_summaries(bot: Bot, services: Services, now: dt.datetime | 
     start = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     sent = 0
     for conn in services.db.connections():
+        if conn.id.startswith("max:"):
+            continue  # менеджерам MAX сводку шлёт их адаптер (max_bot.py)
         summary = build_summary(services, conn, start) if conn.enabled else None
         if summary:
             await safe_send(bot, conn.owner_chat_id, summary[0], reply_markup=summary[1])
