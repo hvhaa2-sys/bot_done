@@ -32,6 +32,7 @@ from .core.candidates import group as group_candidates
 from .core.learning import faq_entry, group_questions
 from .core.price_guard import unknown_amounts
 from .core.versions import SHOWN as SHOWN_CHANGES, Report
+from .password import verify_password
 from .services import DAY_NAMES, MODELS, Services, model_key, model_title
 
 STATUS_NAMES = {
@@ -132,13 +133,21 @@ def plural(n: int, one: str, few: str, many: str) -> str:
     return f"{n} {form}"
 
 
-def login_page(msg: str = "", status: int = 401) -> HTMLResponse:
+def login_page(msg: str = "", status: int = 401, with_password: bool = False) -> HTMLResponse:
+    if with_password:
+        fields = """<label for="l">Логин</label>
+<input id="l" type="text" name="login" autocomplete="username" required autofocus>
+<label for="p">Пароль</label><input id="p" type="password" name="password" autocomplete="current-password" required>
+<p class="hint">Сменить: .venv/bin/python -m app.password</p>"""
+    else:
+        fields = """<label for="t">Токен админки</label>
+<input id="t" type="text" name="token" autocomplete="current-password" required autofocus>
+<p class="hint">Он записан в файле .env в строке ADMIN_TOKEN. Вместо токена можно задать логин и пароль:
+.venv/bin/python -m app.password</p>"""
     return HTMLResponse(f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Вход</title><style>{CSS}</style></head>
 <body><main style="max-width:420px;padding-top:12vh"><div class="card"><h1>ИИ-помощник менеджера</h1>
-{note(msg)}<form method="post" action="/login"><label for="t">Токен админки</label>
-<input id="t" type="text" name="token" autocomplete="current-password" required autofocus>
-<p class="hint">Он записан в файле .env в строке ADMIN_TOKEN.</p><p><button>Войти</button></p></form></div></main>
+{note(msg)}<form method="post" action="/login">{fields}<p><button>Войти</button></p></form></div></main>
 </body></html>""", status_code=status)
 
 
@@ -169,24 +178,35 @@ def create_app(services: Services) -> FastAPI:
                 failures.setdefault(ip, []).append(time.time())
             raise HTTPException(401, "Нужен токен: откройте /?token=ВАШ_ADMIN_TOKEN")
 
+    with_password = bool(services.settings.admin_login and services.settings.admin_password_hash)
+
     @app.exception_handler(StarletteHTTPException)
     async def login_on_401(request: Request, exc: StarletteHTTPException):
         if exc.status_code == 401:
-            return login_page()
+            return login_page(with_password=with_password)
         if exc.status_code == 429:
-            return login_page(exc.detail, status=429)
+            return login_page(exc.detail, status=429, with_password=with_password)
         return await http_exception_handler(request, exc)
 
     @app.post("/login")
-    async def login(request: Request, token: str = Form("")) -> Response:
-        ip = request.client.host if request.client else "?"
+    async def do_login(request: Request, token: str = Form(""), login: str = Form(""),
+                       password: str = Form("")) -> Response:
+        ip, st = (request.client.host if request.client else "?"), services.settings
         if locked(ip):
-            return login_page("Слишком много неверных попыток. Подождите 10 минут.", status=429)
-        if not secrets.compare_digest(token.strip(), services.settings.admin_token):
+            return login_page("Слишком много неверных попыток. Подождите 10 минут.", status=429,
+                              with_password=with_password)
+        if with_password and not token:
+            # Сначала проверяем пароль, потом логин: на неверный логин уходит то же время, что и на пароль
+            ok = verify_password(password, st.admin_password_hash) & secrets.compare_digest(login.strip(), st.admin_login)
+            error = "Неверный логин или пароль."
+        else:
+            ok, error = secrets.compare_digest(token.strip(), st.admin_token), "Неверный токен."
+        if not ok:
             failures.setdefault(ip, []).append(time.time())
-            return login_page("Неверный токен.")
+            return login_page(error, with_password=with_password)
+        # Сессия — та же cookie, что и при входе по токену: проверка доступа не меняется
         response = RedirectResponse("/", status_code=303)
-        response.set_cookie("admin_token", token.strip(), httponly=True, samesite="lax")
+        response.set_cookie("admin_token", st.admin_token, httponly=True, samesite="lax")
         return response
 
     @app.get("/logout")
