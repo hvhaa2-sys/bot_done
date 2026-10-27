@@ -1,0 +1,148 @@
+"""Режим наблюдения: бот молчит, записывает обращения клиентов и через сколько ответил менеджер."""
+import asyncio
+import shutil
+import time
+from dataclasses import replace
+
+import pytest
+from aiogram import Bot
+from aiogram.types import Update
+from fastapi.testclient import TestClient
+
+from app import db as D
+from app.admin import create_app
+from app.channels.telegram_business import build_dispatcher, build_summary
+from app.config import ROOT, Settings
+from app.services import Services
+
+OWNER, CLIENT, CONN = 100, 555, "bc-watch"
+NOW = int(time.time())
+
+
+@pytest.fixture
+def env(tmp_path):
+    shutil.copytree(ROOT / "tests" / "fixtures" / "kb", tmp_path / "kb")
+    settings = replace(Settings.load(), db_path=tmp_path / "t.db", kb_dir=tmp_path / "kb", llm_provider="mock",
+                       admin_token="secret", exam_files="")
+    services = Services(settings)
+    asyncio.run(services.update_settings({"merge_seconds": "0"}))
+    dp, bot = build_dispatcher(services), Bot("42:TEST")
+    sent, calls = [], []
+
+    async def send_message(chat_id, text, **kwargs):
+        sent.append({"chat_id": chat_id, "text": text, **kwargs})
+
+    async def fake_request(bot, method, timeout=None):  # message.answer и прочие вызовы API
+        calls.append(method)
+        return True
+    bot.send_message = send_message  # type: ignore[method-assign]
+    bot.session.make_request = fake_request  # type: ignore[method-assign]
+    feed(dp, bot, {"business_connection": {
+        "id": CONN, "user": {"id": OWNER, "is_bot": False, "first_name": "Manager"}, "user_chat_id": OWNER,
+        "date": NOW, "is_enabled": True, "rights": {"can_reply": True}}})
+    services.db.set_mode(D.WATCH, connection_id=CONN)
+    sent.clear()
+    return services, dp, bot, sent, calls
+
+
+def feed(dp, bot, payload):
+    asyncio.run(dp.feed_update(bot, Update.model_validate({"update_id": 1, **payload}, context={"bot": bot})))
+
+
+def chat_message(text, *, from_id=CLIENT, date=NOW, mid=1, **extra):
+    return {"business_message": {
+        "message_id": mid, "date": date, "business_connection_id": CONN,
+        "chat": {"id": CLIENT, "type": "private", "first_name": "Client"},
+        "from": {"id": from_id, "is_bot": False, "first_name": "X"}, **({"text": text} if text else {}), **extra}}
+
+
+def test_mode_command_switches_to_watch(env):
+    services, dp, bot, _, calls = env
+    services.db.set_mode("draft", connection_id=CONN)
+    feed(dp, bot, {"message": {"message_id": 5, "date": NOW, "text": "/mode watch", "chat": {"id": OWNER, "type": "private"},
+                               "from": {"id": OWNER, "is_bot": False, "first_name": "Manager"}}})
+    assert services.db.get_connection(CONN).mode == D.WATCH
+    assert "Режим: наблюдение" in calls[-1].text and "не пишет клиентам" in calls[-1].text
+
+
+def test_client_question_is_logged_silently_without_model(env, monkeypatch):
+    services, dp, bot, sent, _ = env
+
+    async def no_model(*args, **kwargs):
+        raise AssertionError("в наблюдении модель не вызывается")
+    monkeypatch.setattr(services, "answer", no_model)
+    feed(dp, bot, chat_message("Сколько стоит экран в атриуме?", date=NOW - 900))
+    feed(dp, bot, chat_message("И на фуд-корте?", date=NOW - 600, mid=2))
+    assert sent == [], "ни клиенту, ни менеджеру ничего не уходит"
+    rows = services.db.recent_dialogs(5)
+    assert len(rows) == 1, "два сообщения до ответа менеджера — одно обращение"
+    assert rows[0]["status"] == D.WATCH and rows[0]["question"] == "Сколько стоит экран в атриуме?\nИ на фуд-корте?"
+    assert rows[0]["created_at"] == NOW - 900, "время — из сообщения, а не когда бот его прочитал"
+
+
+def test_manager_reply_closes_request_with_wait_time_and_no_pause(env):
+    services, dp, bot, sent, _ = env
+    feed(dp, bot, chat_message("Сколько стоит экран в атриуме?", date=NOW - 900))
+    feed(dp, bot, chat_message("Добрый день! Экран в атриуме — 30 000 ₽ в месяц.", from_id=OWNER, mid=2))
+    feed(dp, bot, chat_message("Ролик до 15 секунд.", from_id=OWNER, mid=3))
+    row = services.db.recent_dialogs(1)[0]
+    assert row["reply_after_s"] == 900 and row["answer"].endswith("30 000 ₽ в месяц.\nРолик до 15 секунд.")
+    assert not services.db.is_paused(CONN, CLIENT), "в наблюдении бот и так молчит — пауза не нужна"
+    assert any("30 000" in c["answer"] for c in services.db.candidates()), "ответ менеджера — предложение в базу"
+    feed(dp, bot, chat_message("А радио?", date=NOW + 60, mid=4))
+    assert len(services.db.recent_dialogs(5)) == 2, "после ответа менеджера — новое обращение"
+    assert sent == []
+
+
+def test_manager_writes_first_and_media_requests(env):
+    services, dp, bot, sent, _ = env
+    feed(dp, bot, chat_message("Здравствуйте, напоминаю про макет", from_id=OWNER, date=NOW - 1200))
+    assert services.db.recent_dialogs(5) == [], "менеджер написал первым — ожидания нет"
+    feed(dp, bot, chat_message(None, date=NOW - 300, voice={"file_id": "v", "file_unique_id": "v", "duration": 3}))
+    row = services.db.recent_dialogs(1)[0]
+    assert row["question"] == "[голосовое сообщение]" and sent == []
+    feed(dp, bot, chat_message(None, from_id=OWNER, mid=2, photo=[{"file_id": "p", "file_unique_id": "p",
+                                                                    "width": 1, "height": 1}]))
+    row = services.db.recent_dialogs(1)[0]
+    assert row["reply_after_s"] == 300 and row["answer"] == "[фото]"
+
+
+def test_watch_stays_out_of_bot_stats_and_feeds_baseline(env):
+    services, dp, bot, _, _ = env
+    for i, wait in enumerate((120, 600, 7200)):
+        feed(dp, bot, chat_message(f"Вопрос {i}?", date=NOW - 10000 + i * 10, mid=i * 2 + 1))
+        feed(dp, bot, chat_message("Ответ", from_id=OWNER, date=NOW - 10000 + i * 10 + wait, mid=i * 2 + 2))
+    feed(dp, bot, chat_message("Без ответа?", date=NOW, mid=99))
+    stats = services.db.stats()
+    assert stats["real"] == 0 and stats["auto_share"] == 0.0, "наблюдение — не ответы бота"
+    watch = services.watch_stats()
+    assert watch["answered"] == 3 and watch["unanswered"] == 1 and watch["median_wait_min"] == 10.0
+    assert watch["over_1_hour"] == round(1 / 3, 3)
+
+
+def test_evening_summary_reports_observation(env):
+    services, dp, bot, _, _ = env
+    feed(dp, bot, chat_message("Сколько стоит экран в атриуме?", date=NOW - 1800))
+    feed(dp, bot, chat_message("30 000 ₽ в месяц.", from_id=OWNER, mid=2, date=NOW - 600))
+    text, markup = build_summary(services, services.db.get_connection(CONN), NOW - 86400)
+    assert "Наблюдение за день: обращений клиентов — 1, вы ответили на 1, обычно через 20 мин" in text
+    assert "Итоги дня" not in text and markup is None
+
+
+def test_admin_shows_watch_and_offers_mode_only_for_telegram(env):
+    services, dp, bot, _, _ = env
+    feed(dp, bot, chat_message("Сколько стоит экран в атриуме?", date=NOW - 1800))
+    feed(dp, bot, chat_message("30 000 ₽ в месяц.", from_id=OWNER, mid=2, date=NOW - 600))
+    services.db.upsert_connection("max:7", 7, 70, True, True, "draft")
+    client = TestClient(create_app(services))
+    home = client.get("/?token=secret").text
+    assert "Было → стало" in home and "20 мин" in home and "медиана за наблюдение" in home
+    assert home.count("value='watch'") == 1, "наблюдение предлагается только подключению Telegram"
+    client.post("/mode", data={"connection_id": "max:7", "mode": "watch"})
+    assert services.db.get_connection("max:7").mode == "draft", "в MAX без бота клиенту никто не ответит"
+    client.post("/mode", data={"connection_id": CONN, "mode": "auto"})
+    assert services.db.get_connection(CONN).mode == "auto"
+    journal = client.get("/dialogs?f=watch").text
+    assert "Наблюдение" in journal and "менеджер ответил через 20 мин" in journal
+    client.post("/settings", data={"default_mode": "watch"})
+    assert services.current()["default_mode"] == "watch"

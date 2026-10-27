@@ -102,7 +102,7 @@ async def main() -> int:
     ok = await check_max(settings) and ok
     conns = services.db.connections()
     if conns:
-        modes = ", ".join("автоответ" if c.mode == "auto" else "черновики" for c in conns)
+        modes = ", ".join({"auto": "автоответ", "watch": "наблюдение"}.get(c.mode, "черновики") for c in conns)
         line(True, "Подключения", f"{len(conns)} ({modes})")
     else:
         line(None, "Подключения", "пока нет — после запуска добавьте бота: Настройки → Автоматизация чатов")

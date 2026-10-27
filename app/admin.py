@@ -42,7 +42,9 @@ STATUS_NAMES = {
     D.DRAFT_REJECTED: "Черновик пропущен",
     D.ESCALATED: "Передано менеджеру",
     D.SANDBOX: "Тестовый чат",
+    D.WATCH: "Наблюдение",
 }
+MODE_TITLES = {"draft": "черновики", "auto": "автоответ", D.WATCH: "наблюдение"}
 
 # Фильтры журнала: ключ в адресе → (подпись, условия выборки)
 FILTERS = {
@@ -50,6 +52,7 @@ FILTERS = {
     "auto": ("Ответил сам", {"statuses": (D.SENT_AUTO,)}),
     "manager": ("Передано менеджеру", {"statuses": (D.ESCALATED,)}),
     "drafts": ("Черновики", {"statuses": (D.DRAFT_PENDING, D.DRAFT_SENT, D.DRAFT_EDITED, D.DRAFT_REJECTED)}),
+    "watch": ("Наблюдение", {"statuses": (D.WATCH,)}),
     "flagged": ("Ошибки", {"flagged": True}),
     "sandbox": ("Тестовый чат", {"statuses": (D.SANDBOX,)}),
 }
@@ -269,7 +272,8 @@ def create_app(services: Services) -> FastAPI:
 
     @app.post("/mode", dependencies=[Depends(auth)])
     async def set_mode(connection_id: str = Form(...), mode: str = Form(...)) -> RedirectResponse:
-        if mode in ("draft", "auto"):
+        # В MAX клиенты пишут боту напрямую: если он молчит, им никто не ответит — наблюдения там нет
+        if mode in ("draft", "auto") or (mode == D.WATCH and not connection_id.startswith("max:")):
             services.db.set_mode(mode, connection_id=connection_id)
         return RedirectResponse("/", status_code=303)
 
@@ -630,9 +634,13 @@ def connect_guide_html(services: Services) -> str:
 
 def before_after_html(services: Services) -> str:
     """Главная цифра для пилота: сколько клиент ждал ответа до бота и сколько ждёт с ботом."""
-    st = import_stats(services)
+    # Наблюдение — живой замер на том же боте; выгрузка переписки — если наблюдения ещё не было
+    watch = services.watch_stats()
+    st = watch if watch and watch.get("median_wait_min") is not None else import_stats(services)
     if not st or st.get("median_wait_min") is None:
         return ""
+    source = (f"медиана за наблюдение {st.get('period', '')}, обращений с ответом — {st['answered']}"
+              if st.get("source") == "watch" else f"медиана по переписке {st.get('period', '')}")
     exam = last_exam(services)
     bot = (f"{exam['summary'].get('latency_answer_avg_ms', 0) / 1000:.1f} с".replace(".", ",")
            if exam else "пару секунд")
@@ -642,7 +650,7 @@ def before_after_html(services: Services) -> str:
                 if st.get("repeated_share") is not None else "")
     return f"""<div class="card"><h2>Было → стало</h2><div class="kpis" style="margin:0">
 <div><div class="muted">Клиент ждал ответа менеджера</div><div class="kpi">{minutes_text(st['median_wait_min'])}</div>
-<div class='muted'>медиана по переписке {escape(st.get('period', ''))}</div></div>
+<div class='muted'>{escape(source)}</div></div>
 <div><div class="muted">Бот отвечает за</div><div class="kpi ok">{bot}</div><div class='muted'>по последнему экзамену</div></div>
 <div><div class="muted">Дольше часа ждали</div><div class="kpi">{st['over_1_hour']:.0%}</div>{off}{repeated}</div>
 </div></div>"""
@@ -687,7 +695,7 @@ def status_html(services: Services) -> str:
                  else "запущен; менеджеру — написать боту /manager")
     conns = [c for c in services.db.connections() if c.approved]
     pending = sum(not c.approved for c in services.db.connections())
-    modes = ", ".join("автоответ" if c.mode == "auto" else "черновики" for c in conns)
+    modes = ", ".join(MODE_TITLES.get(c.mode, c.mode) for c in conns)
     item(bool(conns) and not pending, "Подключения",
          (f"{len(conns)}: {modes}" if conns else "менеджер ещё не подключил бота")
          + (f" · {pending} ждёт разрешения ниже" if pending else ""))
@@ -742,6 +750,13 @@ def activity_html(services: Services) -> str:
 <p class="muted">Обновите страницу, чтобы увидеть новые события. Полный журнал — в «Диалогах».</p></div>"""
 
 
+def watch_option(c) -> str:
+    """Наблюдение — только для Telegram: в MAX клиентам, кроме бота, никто не ответит."""
+    if c.id.startswith("max:"):
+        return ""
+    return f"<option value='watch' {'selected' if c.mode == D.WATCH else ''}>Наблюдение</option>"
+
+
 def connections_html(services: Services) -> str:
     conns = services.db.connections()
     if not conns:
@@ -759,7 +774,7 @@ def connections_html(services: Services) -> str:
         return f"""<tr><td>{who}</td><td>{'включено' if c.enabled else 'выключено'}</td>
 <td><form method="post" action="/mode" class="row"><input type="hidden" name="connection_id" value="{escape(c.id)}">
 <select name="mode" style="width:auto"><option value="draft" {'selected' if c.mode == 'draft' else ''}>Черновики</option>
-<option value="auto" {'selected' if c.mode == 'auto' else ''}>Автоответ</option></select>
+<option value="auto" {'selected' if c.mode == 'auto' else ''}>Автоответ</option>{watch_option(c)}</select>
 <button class="small">Сохранить</button></form></td></tr>"""
     pending = sum(not c.approved for c in conns)
     hint = ("<p class='muted'>Кто-то подключил бота к своему аккаунту. Разрешайте только своим менеджерам: "
@@ -917,6 +932,9 @@ def dialogs_html(services: Services, f: str, q: str) -> str:
     for r in services.db.recent_dialogs(300, query=q.strip(), **FILTERS[f][1]):
         flagged = bool(r["flagged"])
         reason = escape(human_reason(r["reason"])) if r["reason"] else ""
+        if r["status"] == D.WATCH:
+            reason = (f"менеджер ответил через {minutes_text(r['reply_after_s'] / 60)}" if r["reply_after_s"] is not None
+                      else "менеджер ещё не ответил")
         rows.append(
             f"<tr class='{'flag' if flagged else ''}'><td class='muted'>"
             f"{dt.datetime.fromtimestamp(r['created_at']).strftime('%d.%m %H:%M')}</td>"
@@ -1182,7 +1200,8 @@ def settings_html(services: Services, msg: str = "", form: dict | None = None) -
 <p class="hint">Lite отвечает быстрее, Pro точнее: на экзамене у Pro не было опасных ответов.</p>
 <label for="mode">Режим для новых подключений</label>
 <select id="mode" name="default_mode"><option value="draft" {"selected" if mode == "draft" else ""}>Черновики — ответ сначала видит менеджер</option>
-<option value="auto" {"selected" if mode == "auto" else ""}>Автоответ — бот отвечает клиенту сам</option></select>
+<option value="auto" {"selected" if mode == "auto" else ""}>Автоответ — бот отвечает клиенту сам</option>
+<option value="watch" {"selected" if mode == "watch" else ""}>Наблюдение — бот молчит, считает время ответа менеджера</option></select>
 <p class="hint">У уже подключённых менеджеров режим меняется на странице «Обзор» или командой /mode в боте.</p></div>
 
 <div class="card"><h2>Изменения базы знаний</h2>
