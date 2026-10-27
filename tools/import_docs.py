@@ -10,7 +10,8 @@
 
 Дальше факты из текстов переносятся руками (или в сессии с Claude) в data/kb: цены — в prices.csv,
 остальное — заметками в notes/. Сам текст боту не отдаётся: в документах бывают пароли, внутренние
-данные, устаревшие цены и черновики.
+данные, устаревшие цены и черновики. Листы, слайды, таблицы и страницы с паролями и доступами на диск
+не пишутся вовсе — только пометка: иначе копия паролей жила бы в data/import и в резервных копиях data/.
 
 Нужно: pdftotext (brew install poppler) для PDF; python-docx, openpyxl, python-pptx для Office —
 pip install python-docx openpyxl python-pptx. Чего нет — те файлы пропускаются с подсказкой.
@@ -34,6 +35,28 @@ _SENSITIVE = {
     "почты": re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b"),
     "паспорт/ИНН/счета": re.compile(r"паспорт|\bИНН\b|р/с|расч[её]тн\w* сч[её]т|\bБИК\b", re.IGNORECASE),
 }
+
+
+_SECRETS = _SENSITIVE["пароли/доступы"]
+WITHHELD = "[раздел не сохранён: в нём пароли или доступы — смотрите оригинал, в базу их не переносите]"
+
+
+def without_secrets(text: str) -> tuple[str, int]:
+    """Текст без разделов (лист, слайд, таблица, страница PDF), где есть пароли или доступы, и сколько их убрано.
+    Убираем раздел целиком, а не строку: пароль обычно стоит в столбце под заголовком «Пароль», и в строке
+    с самим паролем этого слова нет."""
+    removed = 0
+
+    def clean(section: str) -> str:
+        nonlocal removed
+        if not _SECRETS.search(section):
+            return section
+        removed += 1
+        head = section.splitlines()[0] if section.startswith("=== ") else ""
+        return "\n".join(filter(None, [head, WITHHELD])) + ("\n" if section.endswith("\n") else "")
+
+    pages = ["".join(clean(part) for part in re.split(r"(?m)^(?==== )", page)) for page in text.split("\f")]
+    return "\f".join(pages), removed
 
 
 def from_pdf(path: Path) -> tuple[str, str]:
@@ -116,9 +139,13 @@ def run_import(paths: list[Path], out: Path) -> list[dict]:
             text, info = "", f"нет библиотеки {exc.name}: pip install python-docx openpyxl python-pptx"
         except Exception as exc:  # noqa: BLE001 — битый файл не должен ронять весь импорт
             text, info = "", f"ошибка: {type(exc).__name__}: {exc}"[:200]
+        found = sensitive(text)  # по исходному тексту: отчёт должен сказать, что пароли в документе были
+        text, removed = without_secrets(text)
+        if removed:
+            info = "; ".join(filter(None, [info, f"разделов с паролями/доступами не сохранено: {removed}"]))
         dest = out / f"{path.stem}{path.suffix}.txt"
         dest.write_text(text, encoding="utf-8")
-        rows.append({"file": str(path), "chars": len(text), "info": info, "sensitive": ", ".join(sensitive(text))})
+        rows.append({"file": str(path), "chars": len(text), "info": info, "sensitive": ", ".join(found)})
     with (out / "index.csv").open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["file", "chars", "info", "sensitive"])
         writer.writeheader()
@@ -136,7 +163,8 @@ def main(argv: list[str] | None = None) -> None:
     for r in rows:
         found = r["sensitive"].split(", ") if r["sensitive"] else []
         notes = [r["info"],
-                 "НЕ ПЕРЕНОСИТЬ В БАЗУ: пароли/доступы" if "пароли/доступы" in found else "",
+                 "НЕ ПЕРЕНОСИТЬ В БАЗУ: пароли/доступы — смените их и уберите файл из общей папки"
+                 if "пароли/доступы" in found else "",
                  "проверить перед переносом: " + ", ".join(f for f in found if f != "пароли/доступы")
                  if [f for f in found if f != "пароли/доступы"] else ""]
         if note := "; ".join(filter(None, notes)):
