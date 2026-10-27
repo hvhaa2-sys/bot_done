@@ -51,11 +51,11 @@ MODE_TITLES = {"off": "выключен", "observe": "наблюдение", "dr
 
 # Фильтры журнала: ключ в адресе → (подпись, условия выборки)
 FILTERS = {
-    "": ("Все", {}),
+    # Обращения из наблюдения — в разделе «Наблюдение»: здесь только разговоры, в которых участвует бот
+    "": ("Все", {"statuses": tuple(s for s in STATUS_NAMES if s != D.WATCH)}),
     "auto": ("Ответил сам", {"statuses": (D.SENT_AUTO,)}),
     "manager": ("Передано менеджеру", {"statuses": (D.ESCALATED,)}),
     "drafts": ("Черновики", {"statuses": (D.DRAFT_PENDING, D.DRAFT_SENT, D.DRAFT_EDITED, D.DRAFT_REJECTED)}),
-    "watch": ("Время ответа", {"statuses": (D.WATCH,)}),
     "flagged": ("Ошибки", {"flagged": True}),
     "sandbox": ("Тестовый чат", {"statuses": (D.SANDBOX,)}),
 }
@@ -114,6 +114,10 @@ button.small{padding:4px 10px;font-size:13px}button:disabled{opacity:.5;cursor:d
 .note{background:var(--accent-bg);border-radius:10px;padding:10px 14px;margin-bottom:16px}
 tr.flag td{background:var(--accent-bg)}details summary{cursor:pointer;color:var(--muted)}
 pre{white-space:pre-wrap;margin:0;font:inherit}
+.chat{display:flex;flex-direction:column;gap:10px}.chat .msg{max-width:85%}.chat .msg.me{align-self:flex-end}
+.chat .msg.me .bubble{background:var(--accent-bg);border-radius:14px 14px 4px 14px}
+.chats a{display:block;padding:8px 10px;border-radius:10px;text-decoration:none;color:var(--text)}
+.chats a.on{background:var(--bg);font-weight:600}
 .onboarding-banner,.onboarding-head{display:flex;justify-content:space-between;gap:16px;align-items:center}
 .onboarding-banner{border-bottom:1px solid var(--line);padding:0 0 18px;margin:0 0 20px}
 .onboarding-head{margin-bottom:24px}.onboarding-head h1{margin:0}.onboarding-head p{margin:4px 0 0}
@@ -136,7 +140,7 @@ gap:8px;overflow-x:auto;padding-bottom:8px}.onboarding-steps li{flex:0 0 auto;ma
 .onboarding-panel{padding:18px}.onboarding-case{grid-template-columns:1fr}.onboarding-banner{align-items:flex-start;flex-wrap:wrap}}
 """
 
-NAV = [("/", "Обзор"), ("/dialogs", "Диалоги"), ("/learn", "Обучение"), ("/kb", "База знаний"),
+NAV = [("/", "Обзор"), ("/dialogs", "Диалоги"), ("/observe", "Наблюдение"), ("/learn", "Обучение"), ("/kb", "База знаний"),
        ("/exam", "Экзамен"), ("/settings", "Настройки"), ("/onboarding", "Внедрение")]
 
 
@@ -421,8 +425,14 @@ def create_app(services: Services) -> FastAPI:
 
     # --- журнал ---
     @app.get("/dialogs", dependencies=[Depends(auth)])
-    async def dialogs(f: str = "", q: str = "") -> HTMLResponse:
+    async def dialogs(f: str = "", q: str = "") -> Response:
+        if f in ("observe", "watch"):  # раньше наблюдение жило вкладками «Диалогов»
+            return RedirectResponse("/observe" + (f"?{urlencode({'q': q})}" if q else ""), status_code=303)
         return page("Диалоги", dialogs_html(services, f, q), "/dialogs")
+
+    @app.get("/observe", dependencies=[Depends(auth)])
+    async def observe_page(conn: str = "", chat: str = "", q: str = "") -> HTMLResponse:
+        return page("Наблюдение", observe_html(services, conn, chat, q), "/observe")
 
     @app.post("/dialogs/{dialog_id}/flag", dependencies=[Depends(auth)])
     async def flag(dialog_id: int, flagged: int = Form(...), back: str = Form("/dialogs")) -> RedirectResponse:
@@ -669,19 +679,19 @@ def create_app(services: Services) -> FastAPI:
         """Черновик базы и «как было до бота» из переписки наблюдения — тем же импортом, что и выгрузка Telegram."""
         from tools.import_telegram import run_import
         if not services.watch_log.exists():
-            return page("База знаний", kb_html(services, "Переписки из наблюдения пока нет."), "/kb")
+            return page("Наблюдение", observe_html(services, msg="Переписки из наблюдения пока нет."), "/observe")
         try:
             r = await asyncio.to_thread(run_import, [services.watch_log], None, import_dir(services))
             msg = f"Черновик собран из наблюдения: чатов {r['chats']}, пар «вопрос — ответ» {r['pairs']}."
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
             msg = f"Не получилось разобрать переписку наблюдения: {exc}"
-        return page("База знаний", kb_html(services, msg), "/kb")
+        return page("Наблюдение", observe_html(services, msg=msg), "/observe")
 
     @app.post("/watch/clear", dependencies=[Depends(auth)])
     async def watch_clear() -> HTMLResponse:
         services.watch_log.unlink(missing_ok=True)
-        return page("База знаний", kb_html(services, "Файл переписки из наблюдения удалён. Журнал в «Диалогах» остался."),
-                    "/kb")
+        return page("Наблюдение", observe_html(services, msg="Файл переписки удалён. Журнал сообщений на этой странице остался."),
+                    "/observe")
 
     @app.get("/import/file/{name}", dependencies=[Depends(auth)])
     async def import_file(name: str) -> Response:
@@ -755,6 +765,70 @@ def import_dir(services: Services) -> Path:
     return services.settings.db_path.parent / "import"
 
 
+def observe_html(services: Services, conn_id: str = "", chat_id: str = "", q: str = "", msg: str = "") -> str:
+    """Раздел «Наблюдение»: включено ли, главные числа, чаты и переписка по порядку с временем ответа менеджера."""
+    conns = [c for c in services.db.connections() if c.approved and not c.id.startswith("max:")]
+    if any(c.mode == D.OBSERVE for c in conns):
+        state = ('<p class="ok">Идёт наблюдение: бот молчит, сохраняет переписку и замеряет, через сколько вы отвечаете. '
+                 "Клиентам ничего не отправляется.</p>")
+    else:
+        state = ('<p class="muted">Сейчас наблюдение выключено. Включить: «Обзор» → «Подключения» → «Наблюдение» '
+                 "или /mode observe в чате с ботом.</p>")
+    stats, waits = services.db.observation_stats(), services.watch_stats() or {}
+    median = waits.get("median_wait_min")
+    kpis = f"""<div class="kpis">
+<div class="card"><div class="muted">Сообщений</div><div class="kpi">{stats['messages']}</div></div>
+<div class="card"><div class="muted">Чатов</div><div class="kpi">{stats['chats']}</div></div>
+<div class="card"><div class="muted">Обычно вы отвечаете через</div><div class="kpi">{minutes_text(median) if median is not None else "—"}</div></div>
+<div class="card"><div class="muted">Кандидатов в базу</div><div class="kpi"><a href="/learn">{stats['candidates']}</a></div></div></div>"""
+    search = f"""<form method="get" action="/observe" class="row" style="margin-bottom:16px">
+<input type="search" name="q" value="{escape(q)}" placeholder="Поиск по переписке" style="flex:1"><button class="light">Найти</button></form>"""
+
+    def name(chat: int) -> str:
+        return services.chat_names.get(chat) or f"Чат {chat}"
+
+    def when(ts: float) -> str:
+        return dt.datetime.fromtimestamp(ts).strftime("%d.%m %H:%M")
+
+    chats = services.db.observed_chats()
+    if q.strip():
+        found = services.db.observations(query=q.strip())
+        rows = "".join(
+            f"<tr><td class='muted' style='white-space:nowrap'>{when(r['sent_at'])}</td>"
+            f"<td><a href='/observe?{urlencode({'conn': r['connection_id'], 'chat': r['chat_id']})}'>{escape(name(r['chat_id']))}</a></td>"
+            f"<td>{'Вы' if r['role'] == 'manager' else 'Клиент'}</td><td><pre>{escape(r['text'])}</pre></td></tr>" for r in found)
+        body = (f"<div class='card'><h2>Найдено: {len(found)}</h2><div class='scroll'><table>"
+                f"<tr><th>Когда</th><th>Чат</th><th>Кто</th><th>Сообщение</th></tr>{rows}</table></div></div>"
+                if found else "<div class='card muted'>Ничего не нашлось.</div>")
+    elif not chats:
+        body = '<div class="card muted">Сообщений пока нет. Они появятся, когда клиенты напишут в чаты, где подключён бот.</div>'
+    else:
+        picked = next((c for c in chats if c["connection_id"] == conn_id and str(c["chat_id"]) == chat_id), chats[0])
+        links = "".join(
+            f"<a href='/observe?{urlencode({'conn': c['connection_id'], 'chat': c['chat_id']})}' "
+            f"class='{'on' if c is picked else ''}'>{escape(name(c['chat_id']))}"
+            f"<div class='muted'>{plural(c['n'], 'сообщение', 'сообщения', 'сообщений')} · {when(c['last_at'])}</div></a>"
+            for c in chats)
+        messages, waiting, lines = services.db.observed_chat(picked["connection_id"], picked["chat_id"]), None, []
+        for m in messages:
+            mine = m["role"] == "manager"
+            note_text = ""
+            if not mine and waiting is None:
+                waiting = m["sent_at"]  # обращение — первое сообщение клиента после вашего ответа
+            elif mine and waiting is not None:
+                note_text, waiting = f" · ответ через {minutes_text((m['sent_at'] - waiting) / 60)}", None
+            lines.append(f"<div class='msg{' me' if mine else ''}'><div class='muted'>{'Вы' if mine else 'Клиент'} · "
+                         f"{when(m['sent_at'])}{note_text}</div><div class='bubble'>{escape(m['text'])}</div></div>")
+        body = f"""<div class="cols"><div class="card"><h2>{escape(name(picked['chat_id']))}</h2>
+<div class="chat">{''.join(lines)}</div></div>
+<div class="card"><h2>Чаты · {len(chats)}</h2><div class="chats">{links}</div></div></div>"""
+    file_card = watch_log_html(services)
+    return f"""<h1>Наблюдение</h1>{note(msg)}<div class="card">{state}
+<p class="hint">Телефоны, почты и номера карт скрыты. Голосовые и файлы сохраняются только как отметки.
+Факты из ваших ответов — в <a href="/learn">«Обучении»</a>.</p></div>{kpis}{search}{body}
+{f'<div class="card">{file_card}</div>' if file_card else ''}"""
+
+
 def watch_log_html(services: Services) -> str:
     """Переписка, которую бот записал в режиме наблюдения: скачать, собрать из неё черновик базы или удалить."""
     path = services.watch_log
@@ -762,7 +836,7 @@ def watch_log_html(services: Services) -> str:
         return ""
     lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     chats = {(m.get("conn"), m.get("chat")) for m in map(json.loads, lines)}
-    return f"""<h3>Переписка из наблюдения</h3>
+    return f"""<h2>Файл переписки</h2>
 <p class="muted">{plural(len(lines), "сообщение", "сообщения", "сообщений")} в {plural(len(chats), "чате", "чатах", "чатах")}.
 Файл хранится только на этом компьютере: без имён, телефоны, почты и карты скрыты.</p>
 <div class="row"><a class="btn light" href="/watch/file">Скачать</a>
@@ -894,7 +968,7 @@ def status_html(services: Services) -> str:
     observed = services.db.observation_stats()
     if observed["messages"] or any(c.mode == "observe" for c in conns):
         item(True, "Наблюдение без ответов",
-             f'<a href="/dialogs?f=observe">Сообщений: {observed["messages"]} · чатов: {observed["chats"]}</a>'
+             f'<a href="/observe">Сообщений: {observed["messages"]} · чатов: {observed["chats"]}</a>'
              f' · <a href="/learn">кандидатов в базу: {observed["candidates"]}</a>')
     calls, tokens = services.usage_today()
     limit = int(services.current()["daily_llm_limit"])
@@ -1133,25 +1207,9 @@ def growth_html(services: Services) -> str:
 
 
 def dialogs_html(services: Services, f: str, q: str) -> str:
-    f = f if f in FILTERS or f == "observe" else ""
+    f = f if f in FILTERS else ""
     tabs = "".join(
         f'<a href="/dialogs?f={key}" class="{"on" if key == f else ""}">{name}</a>' for key, (name, _) in FILTERS.items())
-    tabs += f'<a href="/dialogs?f=observe" class="{"on" if f == "observe" else ""}">Наблюдение</a>'
-    if f == "observe":
-        rows = "".join(
-            f"<tr><td class='muted'>{dt.datetime.fromtimestamp(r['sent_at']).strftime('%d.%m %H:%M')}</td>"
-            f"<td>{r['chat_id']}</td><td>{'Менеджер' if r['role'] == 'manager' else 'Клиент'}</td>"
-            f"<td><pre>{escape(r['text'])}</pre></td></tr>"
-            for r in services.db.observations(query=q.strip()))
-        rows = rows or "<tr><td colspan=4 class='muted'>Пока нет сообщений</td></tr>"
-        return f"""<h1>Диалоги</h1><div class="tabs">{tabs}</div>
-<form method="get" action="/dialogs" class="row"><input type="hidden" name="f" value="observe">
-<input type="search" name="q" value="{escape(q)}" placeholder="Поиск по переписке" style="flex:1">
-<button class="light">Найти</button></form><div class="card">
-<p class="muted">Клиентам ничего не отправляется. Факты из ответов менеджера — в <a href="/learn">«Обучении»</a>.
-Телефоны, почты и номера карт скрыты. Голосовые и файлы сохраняются только как отметки.</p>
-<div class="scroll"><table><tr><th>Когда</th><th>Чат</th><th>Кто</th><th>Сообщение</th></tr>
-{rows}</table></div></div>"""
     back = escape("/dialogs?" + urlencode({"f": f, "q": q} if q else {"f": f}))
     rows = []
     for r in services.db.recent_dialogs(300, query=q.strip(), **FILTERS[f][1]):
@@ -1263,7 +1321,7 @@ def kb_html(services: Services, msg: str = "") -> str:
 <form method="post" action="/import" enctype="multipart/form-data" class="row">
 <input type="file" name="files" accept=".json" multiple required>
 <input type="text" name="me" placeholder="Имя менеджера в Telegram (если выгружали отдельные чаты)" style="flex:1;min-width:240px">
-<button>Импортировать</button></form>{watch_log_html(services)}{imported}</div>"""
+<button>Импортировать</button></form>{imported}</div>"""
     return f"""<h1>База знаний</h1>{note(msg)}{versions_html(services)}
 <div class="card"><h2>Прайс · {plural(len(kb.prices), "позиция", "позиции", "позиций")}</h2>
 <p class="muted">Бот называет только эти цены. Нажмите на формат, чтобы поменять цену, или правьте весь прайс в Excel:
