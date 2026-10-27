@@ -142,8 +142,8 @@ def test_admin_shows_watch_and_offers_mode_only_for_telegram(env):
     assert services.db.get_connection("max:7").mode == "draft", "в MAX без бота клиенту никто не ответит"
     client.post("/mode", data={"connection_id": CONN, "mode": "auto"})
     assert services.db.get_connection(CONN).mode == "auto"
-    journal = client.get("/dialogs?f=watch").text
-    assert "Наблюдение" in journal and "менеджер ответил через 20 мин" in journal
+    journal = client.get("/dialogs?f=watch").text  # старая ссылка ведёт в раздел «Наблюдение»
+    assert "<h1>Наблюдение</h1>" in journal and "ответ через 20 мин" in journal
     client.post("/settings", data={"default_mode": "watch"})
     assert services.current()["default_mode"] == "observe", "старое имя режима принимается и приводится к общему"
 
@@ -188,12 +188,13 @@ def test_admin_downloads_builds_draft_and_deletes_watch_file(env):
     feed(dp, bot, chat_message("Сколько стоит экран в атриуме?", date=NOW - 1800))
     feed(dp, bot, chat_message("Экран в атриуме — 30 000 ₽ в месяц.", from_id=OWNER, mid=2, date=NOW - 600))
     client = TestClient(create_app(services))
-    kb = client.get("/kb?token=secret").text
-    assert "Переписка из наблюдения" in kb and "2 сообщения в 1 чате" in kb
+    page = client.get("/observe?token=secret").text
+    assert "Файл переписки" in page and "2 сообщения в 1 чате" in page
+    assert "Файл переписки" not in client.get("/kb").text, "файл переехал из «Базы знаний» в «Наблюдение»"
     download = client.get("/watch/file")
     assert download.status_code == 200 and "30 000" in download.text and "attachment" in download.headers["content-disposition"]
     assert "Черновик собран из наблюдения: чатов 1" in client.post("/watch/import").text
     assert (services.settings.db_path.parent / "import" / "faq_draft.md").exists()
-    assert "файл переписки из наблюдения удалён" in client.post("/watch/clear").text.lower()
+    assert "файл переписки удалён" in client.post("/watch/clear").text.lower()
     assert not services.watch_log.exists() and client.get("/watch/file").status_code == 404
-    assert services.db.recent_dialogs(1)[0]["status"] == D.WATCH, "журнал в «Диалогах» остаётся"
+    assert services.db.recent_dialogs(1)[0]["status"] == D.WATCH, "замер времени ответа остаётся"

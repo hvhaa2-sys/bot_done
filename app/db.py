@@ -500,6 +500,19 @@ class Database:
                                 (connection_id, chat_id, message_id)).fetchone()
         return row["id"], True
 
+    def observed_chats(self) -> list[sqlite3.Row]:
+        """Чаты наблюдения: сколько сообщений и когда последнее — свежие сверху."""
+        return self.conn.execute(
+            """SELECT connection_id, chat_id, COUNT(*) AS n, MAX(sent_at) AS last_at FROM observed_messages
+               GROUP BY connection_id, chat_id ORDER BY last_at DESC""").fetchall()
+
+    def observed_chat(self, connection_id: str, chat_id: int, limit: int = 300) -> list[sqlite3.Row]:
+        """Последние сообщения одного чата по порядку — как переписка в мессенджере."""
+        rows = self.conn.execute(
+            """SELECT * FROM observed_messages WHERE connection_id=? AND chat_id=?
+               ORDER BY sent_at DESC, message_id DESC LIMIT ?""", (connection_id, chat_id, limit)).fetchall()
+        return rows[::-1]
+
     def observations(self, limit: int = 300, *, query: str = "") -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM observed_messages WHERE text LIKE ? ORDER BY id DESC LIMIT ?",
                                  (f"%{query}%", limit)).fetchall()
