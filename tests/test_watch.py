@@ -146,3 +146,54 @@ def test_admin_shows_watch_and_offers_mode_only_for_telegram(env):
     assert "Наблюдение" in journal and "менеджер ответил через 20 мин" in journal
     client.post("/settings", data={"default_mode": "watch"})
     assert services.current()["default_mode"] == "watch"
+
+
+def watch_lines(services):
+    import json
+    return [json.loads(line) for line in services.watch_log.read_text(encoding="utf-8").splitlines()]
+
+
+def test_whole_correspondence_is_saved_to_local_file(env):
+    services, dp, bot, _, _ = env
+    feed(dp, bot, chat_message("Добрый день, это Иван, напоминаю о себе", from_id=OWNER, date=NOW - 3000))
+    feed(dp, bot, chat_message("Сколько стоит экран? Мой телефон +7 912 345-67-89", date=NOW - 900, mid=2))
+    feed(dp, bot, chat_message("30 000 ₽ в месяц.", from_id=OWNER, date=NOW - 300, mid=3))
+    lines = watch_lines(services)
+    assert [m["from"] for m in lines] == ["manager", "client", "manager"], "и сообщения, где менеджер пишет первым"
+    assert "+7 912" not in lines[1]["text"] and "[телефон]" in lines[1]["text"]
+    assert lines[1]["chat"] == CLIENT and lines[1]["conn"] == CONN and "T" in lines[1]["date"]
+    assert not {"name", "first_name", "username"} & set(lines[0]), "имён в файле нет"
+    services.db.set_mode("draft", connection_id=CONN)
+    services.db.pause_chat(CONN, CLIENT, 30)  # в черновиках бот молчит на паузе — нам важно только, что файл не растёт
+    feed(dp, bot, chat_message("А радио?", mid=4))
+    assert len(watch_lines(services)) == 3, "файл пишется только в наблюдении"
+
+
+def test_draft_and_baseline_from_watch_file(env, tmp_path):
+    from tools.import_telegram import run_import
+    services, dp, bot, _, _ = env
+    for i, wait in enumerate((120, 600, 1800)):
+        feed(dp, bot, chat_message(f"Сколько стоит экран в атриуме, вариант {i}?", date=NOW - 10000 + i * 3000,
+                                   mid=i * 2 + 1))
+        feed(dp, bot, chat_message("Экран в атриуме — 30 000 ₽ в месяц.", from_id=OWNER,
+                                   date=NOW - 10000 + i * 3000 + wait, mid=i * 2 + 2))
+    r = run_import([services.watch_log], None, tmp_path / "import")
+    assert r["chats"] == 1 and r["pairs"] == 3 and r["answered"] == 3
+    assert r["median_wait_min"] == services.watch_stats()["median_wait_min"] == 10.0, "файл и журнал считают одинаково"
+    assert "чат 1" in (tmp_path / "import" / "pairs.csv").read_text(encoding="utf-8"), "вместо имени — номер чата"
+
+
+def test_admin_downloads_builds_draft_and_deletes_watch_file(env):
+    services, dp, bot, _, _ = env
+    feed(dp, bot, chat_message("Сколько стоит экран в атриуме?", date=NOW - 1800))
+    feed(dp, bot, chat_message("Экран в атриуме — 30 000 ₽ в месяц.", from_id=OWNER, mid=2, date=NOW - 600))
+    client = TestClient(create_app(services))
+    kb = client.get("/kb?token=secret").text
+    assert "Переписка из наблюдения" in kb and "2 сообщения в 1 чате" in kb
+    download = client.get("/watch/file")
+    assert download.status_code == 200 and "30 000" in download.text and "attachment" in download.headers["content-disposition"]
+    assert "Черновик собран из наблюдения: чатов 1" in client.post("/watch/import").text
+    assert (services.settings.db_path.parent / "import" / "faq_draft.md").exists()
+    assert "файл переписки из наблюдения удалён" in client.post("/watch/clear").text.lower()
+    assert not services.watch_log.exists() and client.get("/watch/file").status_code == 404
+    assert services.db.recent_dialogs(1)[0]["status"] == D.WATCH, "журнал в «Диалогах» остаётся"

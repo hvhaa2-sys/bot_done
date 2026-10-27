@@ -265,6 +265,12 @@ pip install -r requirements-tools.txt && python -m tools.import_docs <папка
   `app/core/waits.py::wait_summary` (на нём же `import_telegram.response_stats`), рабочее время — из расписания.
   Вечерняя сводка: «Наблюдение за день: обращений N, вы ответили на M, обычно через X». `/mode watch`, выбор в «Обзоре»
   и режим по умолчанию в «Настройках»; для `max:*` наблюдения нет. 7 тестов `tests/test_watch.py`.
+  Файл переписки (решение пользователя: «сохраняй переписку локально»): в наблюдении каждое сообщение, и клиента, и
+  менеджера (даже если менеджер пишет первым), — строкой JSON в `data/watch/messages.jsonl` (`Services.log_watch_message`:
+  conn, chat_id, местное время, client/manager, текст через `mask_pd`, без имён). `data/watch/` в `.gitignore`, но
+  попадает в `./setup backup`. `tools.import_telegram` читает `.jsonl` (`watch_chats` → формат выгрузки, «чат N»),
+  поэтому черновик базы и stats.json собираются тем же импортом. Админка: «База знаний» → «Переписка из наблюдения» —
+  скачать (`/watch/file`), собрать черновик (`/watch/import`), удалить (`/watch/clear`). Ещё 3 теста.
 
 ## Принятые решения (не менять без обсуждения)
 

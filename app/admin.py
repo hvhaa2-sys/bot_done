@@ -506,6 +506,33 @@ def create_app(services: Services) -> FastAPI:
                 msg = f"Не получилось разобрать выгрузку: {exc}. Нужен экспорт Telegram Desktop в формате JSON."
         return page("База знаний", kb_html(services, msg), "/kb")
 
+    # --- переписка из режима наблюдения: файл на этом компьютере ---
+    @app.get("/watch/file", dependencies=[Depends(auth)])
+    async def watch_file() -> Response:
+        if not services.watch_log.exists():
+            raise HTTPException(404, "Переписки из наблюдения пока нет")
+        return Response(services.watch_log.read_bytes(), media_type="application/jsonl; charset=utf-8",
+                        headers={"Content-Disposition": "attachment; filename=watch-messages.jsonl"})
+
+    @app.post("/watch/import", dependencies=[Depends(auth)])
+    async def watch_import() -> HTMLResponse:
+        """Черновик базы и «как было до бота» из переписки наблюдения — тем же импортом, что и выгрузка Telegram."""
+        from tools.import_telegram import run_import
+        if not services.watch_log.exists():
+            return page("База знаний", kb_html(services, "Переписки из наблюдения пока нет."), "/kb")
+        try:
+            r = await asyncio.to_thread(run_import, [services.watch_log], None, import_dir(services))
+            msg = f"Черновик собран из наблюдения: чатов {r['chats']}, пар «вопрос — ответ» {r['pairs']}."
+        except (ValueError, KeyError, json.JSONDecodeError) as exc:
+            msg = f"Не получилось разобрать переписку наблюдения: {exc}"
+        return page("База знаний", kb_html(services, msg), "/kb")
+
+    @app.post("/watch/clear", dependencies=[Depends(auth)])
+    async def watch_clear() -> HTMLResponse:
+        services.watch_log.unlink(missing_ok=True)
+        return page("База знаний", kb_html(services, "Файл переписки из наблюдения удалён. Журнал в «Диалогах» остался."),
+                    "/kb")
+
     @app.get("/import/file/{name}", dependencies=[Depends(auth)])
     async def import_file(name: str) -> Response:
         path = import_dir(services) / name
@@ -576,6 +603,21 @@ async def run_exam(services: Services, state: dict) -> None:
 
 def import_dir(services: Services) -> Path:
     return services.settings.db_path.parent / "import"
+
+
+def watch_log_html(services: Services) -> str:
+    """Переписка, которую бот записал в режиме наблюдения: скачать, собрать из неё черновик базы или удалить."""
+    path = services.watch_log
+    if not path.exists():
+        return ""
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    chats = {(m.get("conn"), m.get("chat")) for m in map(json.loads, lines)}
+    return f"""<h3>Переписка из наблюдения</h3>
+<p class="muted">{plural(len(lines), "сообщение", "сообщения", "сообщений")} в {plural(len(chats), "чате", "чатах", "чатах")}.
+Файл хранится только на этом компьютере: без имён, телефоны, почты и карты скрыты.</p>
+<div class="row"><a class="btn light" href="/watch/file">Скачать</a>
+<form method="post" action="/watch/import"><button>Собрать черновик базы</button></form>
+<form method="post" action="/watch/clear"><button class="light" onclick="return confirm('Удалить файл переписки из наблюдения?')">Удалить файл</button></form></div>"""
 
 
 def import_stats(services: Services) -> dict | None:
@@ -1038,7 +1080,7 @@ def kb_html(services: Services, msg: str = "") -> str:
 <form method="post" action="/import" enctype="multipart/form-data" class="row">
 <input type="file" name="files" accept=".json" multiple required>
 <input type="text" name="me" placeholder="Имя менеджера в Telegram (если выгружали отдельные чаты)" style="flex:1;min-width:240px">
-<button>Импортировать</button></form>{imported}</div>"""
+<button>Импортировать</button></form>{watch_log_html(services)}{imported}</div>"""
     return f"""<h1>База знаний</h1>{note(msg)}{versions_html(services)}
 <div class="card"><h2>Прайс · {plural(len(kb.prices), "позиция", "позиции", "позиций")}</h2>
 <p class="muted">Бот называет только эти цены. Нажмите на формат, чтобы поменять цену, или правьте весь прайс в Excel:
