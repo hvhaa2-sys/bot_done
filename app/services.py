@@ -18,6 +18,7 @@ from .core.assistant import GREETING_MESSAGE, HOLDING_MESSAGE, Assistant
 from .core import candidates, versions
 from .core.knowledge import KnowledgeBase, format_rub
 from .core.price_guard import unknown_amounts
+from .core.waits import wait_summary
 from .db import Database
 from .llm import make_provider
 from .llm.base import LLMProvider
@@ -103,8 +104,8 @@ def validate(values: dict[str, str]) -> tuple[dict[str, str], list[str]]:
             errors.append("Отметьте хотя бы один рабочий день.")
         elif key == "kb_publish" and raw not in ("auto", "manual"):
             errors.append("Публикация базы — «сразу после проверки» или «вручную».")
-        elif key == "default_mode" and raw not in ("draft", "auto"):
-            errors.append("Режим должен быть «Черновики» или «Автоответ».")
+        elif key == "default_mode" and raw not in ("draft", "auto", "watch"):
+            errors.append("Режим должен быть «Черновики», «Автоответ» или «Наблюдение».")
         elif field.kind is str and not (field.low <= len(raw) <= (field.high or 10_000)):
             errors.append("Текст не может быть пустым или длиннее 500 символов.")
         elif field.kind in (int, float):
@@ -403,6 +404,18 @@ class Services:
         """Подпись менеджера под сообщением бота клиенту, если она задана в настройках."""
         signature = self.current()["signature"].strip()
         return f"{text}\n\n{signature}" if signature and text else text
+
+    def watch_stats(self) -> dict | None:
+        """Как было до бота по режиму наблюдения: сколько клиент ждал первого ответа менеджера.
+        Считается так же, как по выгрузке переписки; рабочее время — из настроек расписания."""
+        rows = self.db.watch_rows()
+        if not rows:
+            return None
+        tz, cur = self.local_now().tzinfo, self.current()
+        waits = [(dt.datetime.fromtimestamp(r["created_at"], tz), r["reply_after_s"] / 60)
+                 for r in rows if r["reply_after_s"] is not None]
+        unanswered = sum(r["reply_after_s"] is None for r in rows)
+        return {"source": "watch", **wait_summary(waits, unanswered, cur["work_start"], cur["work_end"], cur["work_days"])}
 
     def local_now(self) -> dt.datetime:
         return dt.datetime.now(ZoneInfo(os.environ.get("TIMEZONE", "Asia/Yekaterinburg")))

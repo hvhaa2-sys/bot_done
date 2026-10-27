@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import argparse
-import statistics
 import csv
 import datetime as dt
 import json
@@ -35,6 +34,7 @@ from app.core.knowledge import format_rub  # noqa: E402
 from app.core.pii import mask_pd  # noqa: E402,F401
 from app.core.price_guard import extract_amounts  # noqa: E402
 from app.core.text import tokenize  # noqa: E402
+from app.core.waits import wait_summary  # noqa: E402
 
 OUT_DIR = ROOT / "data" / "import"
 MAX_GAP = dt.timedelta(hours=24)       # ответ позже суток не считаем ответом на вопрос
@@ -183,23 +183,7 @@ def response_stats(chats: list[dict], owner_ids: set[str], work_hours: tuple[int
                 started = date
         unanswered += started is not None
 
-    def off_hours(d: dt.datetime) -> bool:
-        return str(d.isoweekday()) not in work_days or not work_hours[0] <= d.hour < work_hours[1]
-
-    minutes = [w for _, w in waits]
-    off = [w for d, w in waits if off_hours(d)]
-    total = len(waits) + unanswered
-    return {
-        "requests": total,
-        "answered": len(waits),
-        "unanswered": unanswered,
-        "median_wait_min": round(statistics.median(minutes), 1) if minutes else None,
-        "within_5_min": round(sum(w <= 5 for w in minutes) / len(minutes), 3) if minutes else None,
-        "over_1_hour": round(sum(w > 60 for w in minutes) / len(minutes), 3) if minutes else None,
-        "off_hours_share": round(len(off) / len(waits), 3) if waits else None,
-        "off_hours_median_wait_min": round(statistics.median(off), 1) if off else None,
-        "period": (f"{min(d for d, _ in waits):%d.%m.%Y}–{max(d for d, _ in waits):%d.%m.%Y}" if waits else ""),
-    }
+    return wait_summary(waits, unanswered, f"{work_hours[0]:02d}:00", f"{work_hours[1]:02d}:00", work_days)
 
 
 def run_import(files: list[Path], me: str | None = None, out_dir: Path = OUT_DIR) -> dict:

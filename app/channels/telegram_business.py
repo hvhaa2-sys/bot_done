@@ -18,6 +18,7 @@ import contextlib
 import datetime as dt
 import logging
 import re
+import statistics
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.exceptions import (TelegramAPIError, TelegramForbiddenError, TelegramNetworkError,
@@ -86,7 +87,7 @@ async def on_business_connection(bc: BusinessConnection, bot: Bot, services: Ser
         text = "Бот подключён, но без права отвечать. Разрешите ему отвечать: Настройки → Автоматизация чатов."
     else:
         text = (f"Бот подключён. Режим: {mode_name(conn.mode)}.\n"
-                "Сменить режим: /mode draft (черновики) или /mode auto (автоответ).\n\n"
+                "Сменить режим: /mode draft (черновики), /mode auto (автоответ) или /mode watch (наблюдение).\n\n"
                 "Совет: в «Автоматизации чатов» исключите контакты — тогда бот не будет "
                 "отвечать друзьям и семье, только новым клиентам.")
     await safe_send(bot, bc.user_chat_id, text)
@@ -124,10 +125,16 @@ async def on_business_message(message: Message, bot: Bot, services: Services, bu
         return
     # Пишет сам менеджер (текст, фото, голосовое — что угодно): бот замолкает в этом чате
     if message.from_user and message.from_user.id == conn.owner_user_id:
+        if conn.mode == D.WATCH:
+            # Наблюдение: бот и так молчит — паузу не ставим, а фиксируем, через сколько менеджер ответил
+            waited = services.db.watch_reply(conn.id, chat_id, message.text or message.caption
+                                             or f"[{media_kind(message) or 'сообщение'}]", message.date.timestamp())
+            if waited is not None:
+                services.event(f"{chat}: наблюдение — менеджер ответил через {wait_text(waited / 60)}")
         # Пауза считается от времени сообщения: после простоя (сон ноутбука, перезапуск) старые
         # ответы менеджера приходят пачкой и не должны заново глушить бота на полчаса
         left = services.settings.manager_pause_minutes - age_minutes(message.date)
-        if left > 0:
+        if left > 0 and conn.mode != D.WATCH:
             services.db.pause_chat(conn.id, chat_id, left)
             services.event(f"{chat}: менеджер написал сам — бот молчит в этом чате "
                            f"{max(1, round(left))} мин (снять: /resume)")
@@ -138,6 +145,15 @@ async def on_business_message(message: Message, bot: Bot, services: Services, bu
         return
     # Подпись к фото или файлу — тот же вопрос, что и текст
     text = message.text or message.caption
+    if conn.mode == D.WATCH:
+        # Наблюдение: бот не отвечает, не шлёт карточек и не тратит модель — только записывает обращение.
+        # Время — из сообщения: после простоя бота пачка старых сообщений не сдвигает замер
+        kind = media_kind(message)
+        if text or kind:
+            services.db.watch_question(conn.id, chat_id, text or f"[{kind}]", message.date.timestamp(),
+                                       services.kb_version)
+            services.event(f"{chat}: «{short(text or kind, 60)}» — наблюдение, бот молчит")
+        return
     if not text:
         kind = media_kind(message)
         if kind and not is_stale(message.date, services.settings.stale_message_minutes) \
@@ -360,6 +376,7 @@ async def on_start(message: Message, services: Services) -> None:
         "Команды:\n"
         "/mode draft — черновики: ответ сначала приходит вам\n"
         "/mode auto — автоответ: бот отвечает клиенту сам\n"
+        "/mode watch — наблюдение: бот молчит и только запоминает вопросы, ваши ответы и время ответа\n"
         "/status — статистика\n"
         f"/resume — снять паузу. Когда вы пишете клиенту сами, бот молчит в этом чате "
         f"{services.settings.manager_pause_minutes} мин."
@@ -368,13 +385,13 @@ async def on_start(message: Message, services: Services) -> None:
 
 async def on_mode(message: Message, command: CommandObject, services: Services) -> None:
     mode = (command.args or "").strip().lower()
-    if mode not in {"draft", "auto"}:
-        await message.answer("Укажите режим: /mode draft или /mode auto")
+    if mode not in D.MODES:
+        await message.answer("Укажите режим: /mode draft, /mode auto или /mode watch")
         return
     n = services.db.set_mode(mode, owner_user_id=message.from_user.id)
     if n:
         services.event(f"Менеджер включил режим: {mode_name(mode)}")
-        await message.answer(f"Режим: {mode_name(mode)}.")
+        await message.answer(f"Режим: {mode_name(mode)}." + (WATCH_NOTE if mode == D.WATCH else ""))
     else:
         await message.answer("Сначала подключите бота: Настройки → Автоматизация чатов.")
 
@@ -382,13 +399,19 @@ async def on_mode(message: Message, command: CommandObject, services: Services) 
 # --- вечерняя сводка: что бот ответил сам, с кнопками «Ошибка» ---
 def build_summary(services: Services, conn: D.Connection, since_ts: float) -> tuple[str, InlineKeyboardMarkup | None] | None:
     rows = [r for r in services.db.dialogs_since(conn.id, since_ts) if r["status"] != D.SANDBOX]
-    if not rows:
+    watched = [r for r in rows if r["status"] == D.WATCH]
+    rows = [r for r in rows if r["status"] != D.WATCH]
+    if not rows and not watched:
         return None
     auto = [r for r in rows if r["status"] == D.SENT_AUTO]
     escalated = sum(r["status"] == D.ESCALATED for r in rows)
     drafts = len(rows) - len(auto) - escalated
     lines = [f"Итоги дня: вопросов от клиентов — {len(rows)}.",
-             f"Бот ответил сам — {len(auto)}, передал вам — {escalated}, черновиков — {drafts}."]
+             f"Бот ответил сам — {len(auto)}, передал вам — {escalated}, черновиков — {drafts}."] if rows else []
+    if watched:
+        waits = [r["reply_after_s"] / 60 for r in watched if r["reply_after_s"] is not None]
+        median = f", обычно через {wait_text(statistics.median(waits))} (медиана)" if waits else ""
+        lines.append(f"Наблюдение за день: обращений клиентов — {len(watched)}, вы ответили на {len(waits)}{median}.")
     shown = auto[-10:]
     if shown:
         lines += ["", "Ответы бота:"]
@@ -541,7 +564,17 @@ def send_failure(conn: D.Connection) -> str:
 
 
 def mode_name(mode: str) -> str:
-    return "автоответ" if mode == "auto" else "черновики для менеджера"
+    return {"auto": "автоответ", D.WATCH: "наблюдение"}.get(mode, "черновики для менеджера")
+
+
+WATCH_NOTE = ("\nБот ничего не пишет клиентам и не присылает карточек: запоминает вопросы, ваши ответы и через сколько "
+              "вы ответили. Ваши ответы попадут в предложения для базы знаний. Через неделю-две включите /mode auto.")
+
+
+def wait_text(minutes: float) -> str:
+    if minutes < 1:
+        return "меньше минуты"
+    return f"{minutes:.0f} мин" if minutes < 90 else f"{minutes / 60:.1f} ч".replace(".", ",")
 
 
 TELEGRAM_LIMIT = 4096  # длиннее Telegram не принимает
