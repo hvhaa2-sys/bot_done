@@ -134,6 +134,8 @@ def test_heldout_is_separate_six_new_cases():
 
 
 def test_known_saved_responses_reveal_the_four_failures():
+    if not E.KNOWN_BASELINE.exists():  # прогоны в eval/simulation/runs/ живут только на машине, где их делали
+        pytest.skip("нет сохранённого прогона eval/simulation/runs — он не входит в git")
     report = E.read_json(E.KNOWN_BASELINE)
     findings = {r["id"]: r for r in E.evaluate(report, E.load_suite("regression"))}
     expected = ["many_production_questions/round-1/sound_scope",

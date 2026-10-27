@@ -545,6 +545,30 @@ def test_manager_tail_dropped_only_when_answer_is_complete():
     assert drop_manager_tail(full) == (full.split(" Для")[0], False)
     assert drop_manager_tail("Свободные даты подтвердит менеджер.")[1] is True
     assert drop_manager_tail("Цена 25 000 ₽. Остальное уточнит менеджер.")[1] is True, "без хвоста почти ничего"
+    assert drop_manager_tail("Цена 25 000 ₽. Подробнее расскажет менеджер.")[1] is True, "вежливый хвост, но ответа мало"
+
+
+@pytest.mark.parametrize("tail, promise", [
+    ("Подробнее расскажет менеджер.", False),
+    ("Детали вам с радостью подскажет наш менеджер.", False),
+    ("Менеджер расскажет подробнее.", False),
+    ("Если появятся вопросы, менеджер ответит.", False),
+    ("По любым вопросам вам ответит менеджер.", False),
+    ("Подробнее о свободных датах расскажет менеджер.", True),
+    ("Стоимость печати сообщит менеджер.", True),
+    ("Остальное расскажет менеджер.", True),
+    ("Менеджер пришлёт фото места.", True),
+])
+def test_polite_manager_tail_is_not_a_promise(tail, promise):
+    from app.core.assistant import drop_manager_tail
+    head = "Цифровой экран на фуд-корте ВЕЕР Молл — 42 000 ₽ за месяц с НДС 5%."
+    assert drop_manager_tail(f"{head} {tail}") == ((f"{head} {tail}", True) if promise else (head, False))
+
+
+def test_complete_answer_with_polite_tail_goes_to_client(kb):
+    text = "Цифровой экран в атриуме — 30 000 ₽ за месяц, ролик до 15 секунд. Подробнее расскажет менеджер."
+    r = run(Assistant(kb, FakeLLM(text)).answer("Сколько стоит экран в атриуме?"))
+    assert r.decision == ANSWER and r.text == text.removesuffix(" Подробнее расскажет менеджер.")
 
 
 def test_cheapest_looks_at_whole_price_list_of_the_mall():
@@ -633,6 +657,43 @@ def test_price_from_another_mall_goes_to_manager():
     assert r.decision == ESCALATE and r.reason.startswith("venue_mismatch")
     ok = "Экран в ВЕЕР Молл — 31 500 ₽, в ДЕПО — 26 250 ₽ в месяц."
     assert run(Assistant(kb, FakeLLM(ok), min_score=0).answer("экраны в веере и депо сколько?")).decision == ANSWER
+
+
+def test_price_of_another_format_in_same_mall_goes_to_manager():
+    rows = [PriceRow("Цифровой экран", "ВЕЕР Молл, Екатеринбург — фуд-корт", "1 месяц", 42000, ""),
+            PriceRow("Баннер", "ВЕЕР Молл, Екатеринбург — атриум", "1 месяц", 25000, "печать — 14 000 ₽")]
+    kb = KnowledgeBase([], rows, [])
+    q = "экран и баннер в веере сколько стоят?"
+    r = run(Assistant(kb, FakeLLM("Экран на фуд-корте ВЕЕР Молл — 25 000 ₽ в месяц."), min_score=0).answer(q))
+    assert r.decision == ESCALATE and r.reason == "format_mismatch:[25000]"
+    for ok in ("Экран на фуд-корте — 42 000 ₽, баннер в атриуме — 25 000 ₽ в месяц.",
+               "На фуд-корте — 42 000 ₽ в месяц.",                       # формат назван местом строки
+               "Баннер в атриуме — 25 000 ₽ в месяц, печать — 14 000 ₽."):  # доплата — словами примечания
+        assert run(Assistant(kb, FakeLLM(ok), min_score=0).answer(q)).decision == ANSWER, ok
+
+
+def test_weekday_price_named_for_weekend_goes_to_manager():
+    rows = [PriceRow("Промо-акция с 1 промоутером", "ВЕЕР Молл, Екатеринбург", "1 день в будни (понедельник–четверг)",
+                     12000, "с НДС 5%"),
+            PriceRow("Промо-акция с 1 промоутером", "ВЕЕР Молл, Екатеринбург", "1 день в выходные (пятница–воскресенье)",
+                     18000, "с НДС 5%")]
+    kb = KnowledgeBase([], rows, [])
+    q = "сколько стоит промо-акция с промоутером в веере в выходные?"
+    r = run(Assistant(kb, FakeLLM("Промо-акция в ВЕЕР Молл в выходные — 12 000 ₽ за день."), min_score=0).answer(q))
+    assert r.decision == ESCALATE and r.reason == "period_mismatch:[12000]"
+    for ok in ("Промо-акция в выходные — 18 000 ₽ за день, в будни — 12 000 ₽.",
+               "В будни 12 000 ₽ и 18 000 ₽ в выходные.",                 # оба дня в одной части — не угадываем
+               "Промо-акция с промоутером — 18 000 ₽ за день в выходные."):
+        assert run(Assistant(kb, FakeLLM(ok), min_score=0).answer(q)).decision == ANSWER, ok
+
+
+@pytest.mark.parametrize("text, kind", [
+    ("1 день в будни (понедельник–четверг)", "будни"), ("все выходные месяца", "выходные"),
+    ("1 выходной или праздничный день", "выходные"), ("в будни и в выходные", ""), ("1 месяц", ""),
+])
+def test_day_kind_of_price_period(text, kind):
+    from app.core.knowledge import day_kind
+    assert day_kind(text) == kind
 
 
 def test_price_must_come_from_context_not_whole_price_list():
@@ -1083,14 +1144,64 @@ def test_billboard_answer_names_everything_we_do_not_sell(kb):
 
 
 def test_full_list_of_asked_format_gets_no_hedge():
-    from app.core.assistant import hedge_partial_list
+    from app.core.assistant import complete_partial_list
     rows = [PriceRow("Цифровой экран Инцентра", "ТРЦ «Радуга парк», Екатеринбург — траволатор", "1 месяц", 31500, ""),
             PriceRow("Цифровой экран Инцентра", "ТРЦ «Радуга парк», Екатеринбург — центральный вход", "1 месяц", 63000, "")]
     rows += [PriceRow("Промо-акция", "ТРЦ «Радуга парк», Екатеринбург", f"{d} дня", 10000 + d, "") for d in range(1, 5)]
     kb = KnowledgeBase([], rows, [])
     hits = kb.search("радуга парк экран промо", top_k=10)
     text = "В «Радуге» два экрана: у траволатора — 31 500 ₽ и у центрального входа — 63 000 ₽ в месяц."
-    assert hedge_partial_list(text, "Какие там есть экраны и сколько стоят?", hits) == text
+    assert complete_partial_list(text, "Какие там есть экраны и сколько стоят?", hits, kb.prices) == text
+
+
+def _banners(n: int) -> KnowledgeBase:
+    return KnowledgeBase([], [PriceRow(f"Баннер № {i}", "ВЕЕР Молл, Екатеринбург (ул. Космонавтов) — атриум", "1 месяц",
+                                       20000 + i * 1000, "без НДС" if i == n else "") for i in range(1, n + 1)], [])
+
+
+def test_partial_list_is_completed_from_price_list():
+    from app.core.assistant import complete_partial_list
+    kb = _banners(6)
+    hits = kb.retrieve("какие баннеры есть в веере?")
+    text = "В ВЕЕР Молл есть баннеры № 1 — 21 000 ₽ и № 2 — 22 000 ₽ в месяц. Какой срок вас интересует?"
+    done = complete_partial_list(text, "какие баннеры есть в веере?", hits, kb.prices)
+    assert done == ("В ВЕЕР Молл есть баннеры № 1 — 21 000 ₽ и № 2 — 22 000 ₽ в месяц. Ещё варианты в ВЕЕР Молл, "
+                    "Екатеринбург: " + "; ".join(f"Баннер № {i} — атриум: {20 + i} 000 ₽ за 1 месяц" for i in range(3, 7))
+                    + " (без НДС). Какой срок вас интересует?")
+    assert set(extract_amounts(done)) == {r.price_rub for r in kb.prices}, "все цены — из прайса"
+
+
+def test_list_completion_keeps_asked_place_and_names_each_mall():
+    from app.core.assistant import complete_partial_list
+    rows = [PriceRow("Цифровой экран", f"{mall} — {place}", "1 месяц", price, "")
+            for mall, place, price in (("ВЕЕР Молл, Екатеринбург", "фуд-корт", 42000),
+                                       ("ДЕПО, Нижний Тагил", "фуд-корт", 26250),
+                                       ("Бутово Молл, Москва (ул. Поляны, 8)", "фуд-корт", 30000),
+                                       ("ТРЦ «Глобус», Екатеринбург", "фуд-корт", 37800),
+                                       ("ТРЦ «Мега», Екатеринбург", "фуд-корт", 40000),
+                                       ("ВЕЕР Молл, Екатеринбург", "атриум", 31500))]
+    kb = KnowledgeBase([], rows, [])
+    q = "какие экраны есть на фуд-корте?"
+    text = "На фуд-корте есть экраны в ВЕЕР Молл — 42 000 ₽ и в ДЕПО — 26 250 ₽ в месяц."
+    done = complete_partial_list(text, q, kb.retrieve(q), kb.prices)
+    assert "Цифровой экран, Бутово Молл, Москва — фуд-корт: 30 000 ₽ за 1 месяц" in done, "адрес в скобках убран"
+    assert "атриум" not in done and "31 500" not in done, "спросили про фуд-корт"
+
+
+def test_long_partial_list_names_limit_and_says_it_is_not_all():
+    from app.core.assistant import LIST_APPEND_LIMIT, PARTIAL_LIST_NOTE, complete_partial_list
+    kb = _banners(14)
+    hits = kb.retrieve("какие баннеры есть в веере?")
+    text = "Есть баннеры № 1 — 21 000 ₽ и № 2 — 22 000 ₽ в месяц."
+    done = complete_partial_list(text, "какие баннеры есть в веере?", hits, kb.prices)
+    assert done.count("Баннер №") == LIST_APPEND_LIMIT and done.endswith(PARTIAL_LIST_NOTE)
+
+
+def test_list_completion_goes_through_assistant():
+    kb = _banners(6)
+    r = run(Assistant(kb, FakeLLM("Есть баннеры № 1 — 21 000 ₽ и № 2 — 22 000 ₽ в месяц."), min_score=0)
+            .answer("какие баннеры есть в веере?"))
+    assert r.decision == ANSWER and "Баннер № 6" in r.text and "26 000 ₽" in r.text
 
 
 def test_mixed_script_without_lookalikes_is_fixed():

@@ -34,6 +34,7 @@ from .core.candidate_review import NOTE_PREFIX
 from .core.learning import faq_entry, group_questions
 from .core.price_guard import unknown_amounts
 from .core.versions import SHOWN as SHOWN_CHANGES, Report
+from .password import verify_password
 from .services import DAY_NAMES, MODELS, Services, model_key, model_title, validate
 
 STATUS_NAMES = {
@@ -44,7 +45,9 @@ STATUS_NAMES = {
     D.DRAFT_REJECTED: "Черновик пропущен",
     D.ESCALATED: "Передано менеджеру",
     D.SANDBOX: "Тестовый чат",
+    D.WATCH: "Наблюдение",
 }
+MODE_TITLES = {"off": "выключен", "observe": "наблюдение", "draft": "черновики", "auto": "автоответ"}
 
 # Фильтры журнала: ключ в адресе → (подпись, условия выборки)
 FILTERS = {
@@ -52,6 +55,7 @@ FILTERS = {
     "auto": ("Ответил сам", {"statuses": (D.SENT_AUTO,)}),
     "manager": ("Передано менеджеру", {"statuses": (D.ESCALATED,)}),
     "drafts": ("Черновики", {"statuses": (D.DRAFT_PENDING, D.DRAFT_SENT, D.DRAFT_EDITED, D.DRAFT_REJECTED)}),
+    "watch": ("Время ответа", {"statuses": (D.WATCH,)}),
     "flagged": ("Ошибки", {"flagged": True}),
     "sandbox": ("Тестовый чат", {"statuses": (D.SANDBOX,)}),
 }
@@ -151,13 +155,21 @@ def plural(n: int, one: str, few: str, many: str) -> str:
     return f"{n} {form}"
 
 
-def login_page(msg: str = "", status: int = 401) -> HTMLResponse:
+def login_page(msg: str = "", status: int = 401, with_password: bool = False) -> HTMLResponse:
+    if with_password:
+        fields = """<label for="l">Логин</label>
+<input id="l" type="text" name="login" autocomplete="username" required autofocus>
+<label for="p">Пароль</label><input id="p" type="password" name="password" autocomplete="current-password" required>
+<p class="hint">Сменить: .venv/bin/python -m app.password</p>"""
+    else:
+        fields = """<label for="t">Токен админки</label>
+<input id="t" type="text" name="token" autocomplete="current-password" required autofocus>
+<p class="hint">Он записан в файле .env в строке ADMIN_TOKEN. Вместо токена можно задать логин и пароль:
+.venv/bin/python -m app.password</p>"""
     return HTMLResponse(f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Вход</title><style>{CSS}</style></head>
 <body><main style="max-width:420px;padding-top:12vh"><div class="card"><h1>ИИ-помощник менеджера</h1>
-{note(msg)}<form method="post" action="/login"><label for="t">Токен админки</label>
-<input id="t" type="text" name="token" autocomplete="current-password" required autofocus>
-<p class="hint">Он записан в файле .env в строке ADMIN_TOKEN.</p><p><button>Войти</button></p></form></div></main>
+{note(msg)}<form method="post" action="/login">{fields}<p><button>Войти</button></p></form></div></main>
 </body></html>""", status_code=status)
 
 
@@ -187,24 +199,35 @@ def create_app(services: Services) -> FastAPI:
             # Старая cookie после смены ADMIN_TOKEN не попытка подбора: просто покажем форму входа
             raise HTTPException(401, "Войдите: токен — строка ADMIN_TOKEN в файле .env")
 
+    with_password = bool(services.settings.admin_login and services.settings.admin_password_hash)
+
     @app.exception_handler(StarletteHTTPException)
     async def login_on_401(request: Request, exc: StarletteHTTPException):
         if exc.status_code == 401:
-            return login_page()
+            return login_page(with_password=with_password)
         if exc.status_code == 429:
-            return login_page(exc.detail, status=429)
+            return login_page(exc.detail, status=429, with_password=with_password)
         return await http_exception_handler(request, exc)
 
     @app.post("/login")
-    async def login(request: Request, token: str = Form("")) -> Response:
-        ip = request.client.host if request.client else "?"
+    async def do_login(request: Request, token: str = Form(""), login: str = Form(""),
+                       password: str = Form("")) -> Response:
+        ip, st = (request.client.host if request.client else "?"), services.settings
         if locked(ip):
-            return login_page("Слишком много неверных попыток. Подождите 10 минут.", status=429)
-        if not secrets.compare_digest(token.strip(), services.settings.admin_token):
+            return login_page("Слишком много неверных попыток. Подождите 10 минут.", status=429,
+                              with_password=with_password)
+        if with_password and not token:
+            # Сначала проверяем пароль, потом логин: на неверный логин уходит то же время, что и на пароль
+            ok = verify_password(password, st.admin_password_hash) & secrets.compare_digest(login.strip(), st.admin_login)
+            error = "Неверный логин или пароль."
+        else:
+            ok, error = secrets.compare_digest(token.strip(), st.admin_token), "Неверный токен."
+        if not ok:
             failures.setdefault(ip, []).append(time.time())
-            return login_page("Неверный токен.")
+            return login_page(error, with_password=with_password)
+        # Сессия — та же cookie, что и при входе по токену: проверка доступа не меняется
         response = RedirectResponse("/", status_code=303)
-        response.set_cookie("admin_token", token.strip(), httponly=True, samesite="lax")
+        response.set_cookie("admin_token", st.admin_token, httponly=True, samesite="lax")
         return response
 
     @app.get("/logout")
@@ -225,10 +248,10 @@ def create_app(services: Services) -> FastAPI:
         ip = request.client.host if request.client else "?"
         if request.method != "GET" or locked(ip):
             return login_page("Слишком много неверных попыток. Подождите 10 минут." if locked(ip) else "",
-                              status=429 if locked(ip) else 401)
+                              status=429 if locked(ip) else 401, with_password=with_password)
         if not secrets.compare_digest(token, services.settings.admin_token):
             failures.setdefault(ip, []).append(time.time())
-            return login_page("Неверный токен.")
+            return login_page("Неверный токен в ссылке.", with_password=with_password)
         response = RedirectResponse(clean, status_code=303)
         response.set_cookie("admin_token", token, httponly=True, samesite="lax")
         return response
@@ -390,7 +413,9 @@ def create_app(services: Services) -> FastAPI:
 
     @app.post("/mode", dependencies=[Depends(auth)])
     async def set_mode(connection_id: str = Form(...), mode: str = Form(...)) -> RedirectResponse:
-        if mode in D.MODES:
+        mode = D.MODE_ALIASES.get(mode, mode)
+        # В MAX клиенты пишут боту напрямую: если он молчит, им никто не ответит — тихих режимов там нет
+        if mode in D.MODES and not (mode in D.SILENT_MODES and connection_id.startswith("max:")):
             services.db.set_mode(mode, connection_id=connection_id)
         return RedirectResponse("/", status_code=303)
 
@@ -631,6 +656,33 @@ def create_app(services: Services) -> FastAPI:
                 msg = f"Не получилось разобрать выгрузку: {exc}. Нужен экспорт Telegram Desktop в формате JSON."
         return upload_result(msg, back)
 
+    # --- переписка из режима наблюдения: файл на этом компьютере ---
+    @app.get("/watch/file", dependencies=[Depends(auth)])
+    async def watch_file() -> Response:
+        if not services.watch_log.exists():
+            raise HTTPException(404, "Переписки из наблюдения пока нет")
+        return Response(services.watch_log.read_bytes(), media_type="application/jsonl; charset=utf-8",
+                        headers={"Content-Disposition": "attachment; filename=watch-messages.jsonl"})
+
+    @app.post("/watch/import", dependencies=[Depends(auth)])
+    async def watch_import() -> HTMLResponse:
+        """Черновик базы и «как было до бота» из переписки наблюдения — тем же импортом, что и выгрузка Telegram."""
+        from tools.import_telegram import run_import
+        if not services.watch_log.exists():
+            return page("База знаний", kb_html(services, "Переписки из наблюдения пока нет."), "/kb")
+        try:
+            r = await asyncio.to_thread(run_import, [services.watch_log], None, import_dir(services))
+            msg = f"Черновик собран из наблюдения: чатов {r['chats']}, пар «вопрос — ответ» {r['pairs']}."
+        except (ValueError, KeyError, json.JSONDecodeError) as exc:
+            msg = f"Не получилось разобрать переписку наблюдения: {exc}"
+        return page("База знаний", kb_html(services, msg), "/kb")
+
+    @app.post("/watch/clear", dependencies=[Depends(auth)])
+    async def watch_clear() -> HTMLResponse:
+        services.watch_log.unlink(missing_ok=True)
+        return page("База знаний", kb_html(services, "Файл переписки из наблюдения удалён. Журнал в «Диалогах» остался."),
+                    "/kb")
+
     @app.get("/import/file/{name}", dependencies=[Depends(auth)])
     async def import_file(name: str) -> Response:
         path = import_dir(services) / name
@@ -703,6 +755,21 @@ def import_dir(services: Services) -> Path:
     return services.settings.db_path.parent / "import"
 
 
+def watch_log_html(services: Services) -> str:
+    """Переписка, которую бот записал в режиме наблюдения: скачать, собрать из неё черновик базы или удалить."""
+    path = services.watch_log
+    if not path.exists():
+        return ""
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    chats = {(m.get("conn"), m.get("chat")) for m in map(json.loads, lines)}
+    return f"""<h3>Переписка из наблюдения</h3>
+<p class="muted">{plural(len(lines), "сообщение", "сообщения", "сообщений")} в {plural(len(chats), "чате", "чатах", "чатах")}.
+Файл хранится только на этом компьютере: без имён, телефоны, почты и карты скрыты.</p>
+<div class="row"><a class="btn light" href="/watch/file">Скачать</a>
+<form method="post" action="/watch/import"><button>Собрать черновик базы</button></form>
+<form method="post" action="/watch/clear"><button class="light" onclick="return confirm('Удалить файл переписки из наблюдения?')">Удалить файл</button></form></div>"""
+
+
 def import_stats(services: Services) -> dict | None:
     path = import_dir(services) / "stats.json"
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
@@ -759,9 +826,13 @@ def connect_guide_html(services: Services) -> str:
 
 def before_after_html(services: Services) -> str:
     """Главная цифра для пилота: сколько клиент ждал ответа до бота и сколько ждёт с ботом."""
-    st = import_stats(services)
+    # Наблюдение — живой замер на том же боте; выгрузка переписки — если наблюдения ещё не было
+    watch = services.watch_stats()
+    st = watch if watch and watch.get("median_wait_min") is not None else import_stats(services)
     if not st or st.get("median_wait_min") is None:
         return ""
+    source = (f"медиана за наблюдение {st.get('period', '')}, обращений с ответом — {st['answered']}"
+              if st.get("source") == "watch" else f"медиана по переписке {st.get('period', '')}")
     exam = last_exam(services)
     bot = (f"{exam['summary'].get('latency_answer_avg_ms', 0) / 1000:.1f} с".replace(".", ",")
            if exam else "пару секунд")
@@ -771,7 +842,7 @@ def before_after_html(services: Services) -> str:
                 if st.get("repeated_share") is not None else "")
     return f"""<div class="card"><h2>Было → стало</h2><div class="kpis" style="margin:0">
 <div><div class="muted">Клиент ждал ответа менеджера</div><div class="kpi">{minutes_text(st['median_wait_min'])}</div>
-<div class='muted'>медиана по переписке {escape(st.get('period', ''))}</div></div>
+<div class='muted'>{escape(source)}</div></div>
 <div><div class="muted">Бот отвечает за</div><div class="kpi ok">{bot}</div><div class='muted'>по последнему экзамену</div></div>
 <div><div class="muted">Дольше часа ждали</div><div class="kpi">{st['over_1_hour']:.0%}</div>{off}{repeated}</div>
 </div></div>"""
@@ -804,10 +875,19 @@ def status_html(services: Services) -> str:
              "не включён бизнес-режим: @BotFather → /mybots → бот → Bot Settings → Secretary Mode")
     else:
         item(True, f"Бот @{escape(bot['username'])}", "запущен")
+    if st.max_bot_token:
+        mx = services.max_status
+        if mx is None:
+            item(None, "MAX", "подключаюсь…")
+        elif not mx["ok"]:
+            item(False, "MAX", escape(mx["error"]))
+        else:
+            item(True, f"Бот MAX {escape(mx['username'] or mx['name'])}",
+                 "запущен" if any(c.id.startswith("max:") and c.approved for c in services.db.connections())
+                 else "запущен; менеджеру — написать боту /manager")
     conns = [c for c in services.db.connections() if c.approved]
     pending = sum(not c.approved for c in services.db.connections())
-    mode_names = {"off": "выключен", "observe": "наблюдение", "auto": "автоответ", "draft": "черновики"}
-    modes = ", ".join(mode_names.get(c.mode, c.mode) for c in conns)
+    modes = ", ".join(MODE_TITLES.get(c.mode, c.mode) for c in conns)
     item(bool(conns) and not pending, "Подключения",
          (f"{len(conns)}: {modes}" if conns else "менеджер ещё не подключил бота")
          + (f" · {pending} ждёт разрешения ниже" if pending else ""))
@@ -867,6 +947,14 @@ def activity_html(services: Services) -> str:
 <p class="muted">Обновите страницу, чтобы увидеть новые события. Полный журнал — в «Диалогах».</p></div>"""
 
 
+def silent_options(c) -> str:
+    """«Выключен» и «Наблюдение» — только для Telegram: в MAX клиентам, кроме бота, никто не ответит."""
+    if c.id.startswith("max:"):
+        return ""
+    return (f'<option value="off" {"selected" if c.mode == "off" else ""}>Выключен</option>\n'
+            f'<option value="observe" {"selected" if c.mode == D.OBSERVE else ""}>Наблюдение</option>\n')
+
+
 def connections_html(services: Services) -> str:
     conns = services.db.connections()
     if not conns:
@@ -874,6 +962,8 @@ def connections_html(services: Services) -> str:
 
     def row(c) -> str:
         who = escape(services.owner_names.get(c.owner_user_id, f"id {c.owner_user_id}"))
+        if c.id.startswith("max:") and not who.startswith("MAX"):
+            who = f"MAX: {who}"
         if not c.approved:
             return f"""<tr class="flag"><td>{who}</td><td>ждёт разрешения</td><td class="row">
 <form method="post" action="/connections/{escape(c.id)}/approve"><button class="small">Разрешить</button></form>
@@ -881,15 +971,14 @@ def connections_html(services: Services) -> str:
 </td></tr>"""
         return f"""<tr><td>{who}</td><td>{'включено' if c.enabled else 'выключено'}</td>
 <td><form method="post" action="/mode" class="row"><input type="hidden" name="connection_id" value="{escape(c.id)}">
-<select name="mode" style="width:auto"><option value="off" {'selected' if c.mode == 'off' else ''}>Выключен</option>
-<option value="observe" {'selected' if c.mode == 'observe' else ''}>Наблюдение</option>
-<option value="draft" {'selected' if c.mode == 'draft' else ''}>Черновики</option>
+<select name="mode" style="width:auto">{silent_options(c)}<option value="draft" {'selected' if c.mode == 'draft' else ''}>Черновики</option>
 <option value="auto" {'selected' if c.mode == 'auto' else ''}>Автоответ</option></select>
 <button class="small">Сохранить</button></form></td></tr>"""
     pending = sum(not c.approved for c in conns)
     hint = ("<p class='muted'>Кто-то подключил бота к своему аккаунту. Разрешайте только своим менеджерам: "
             "каждое подключение тратит лимит модели.</p>" if pending else "")
-    return f"""<div class="card"><h2>Подключения Telegram</h2>{hint}<div class="scroll"><table>
+    title = "Подключения" if any(c.id.startswith("max:") for c in conns) else "Подключения Telegram"
+    return f"""<div class="card"><h2>{title}</h2>{hint}<div class="scroll"><table>
 <tr><th>Менеджер</th><th>Статус</th><th>Режим</th></tr>{"".join(row(c) for c in conns)}</table></div></div>"""
 
 
@@ -1068,6 +1157,9 @@ def dialogs_html(services: Services, f: str, q: str) -> str:
     for r in services.db.recent_dialogs(300, query=q.strip(), **FILTERS[f][1]):
         flagged = bool(r["flagged"])
         reason = escape(human_reason(r["reason"])) if r["reason"] else ""
+        if r["status"] == D.WATCH:
+            reason = (f"менеджер ответил через {minutes_text(r['reply_after_s'] / 60)}" if r["reply_after_s"] is not None
+                      else "менеджер ещё не ответил")
         rows.append(
             f"<tr class='{'flag' if flagged else ''}'><td class='muted'>"
             f"{dt.datetime.fromtimestamp(r['created_at']).strftime('%d.%m %H:%M')}</td>"
@@ -1171,7 +1263,7 @@ def kb_html(services: Services, msg: str = "") -> str:
 <form method="post" action="/import" enctype="multipart/form-data" class="row">
 <input type="file" name="files" accept=".json" multiple required>
 <input type="text" name="me" placeholder="Имя менеджера в Telegram (если выгружали отдельные чаты)" style="flex:1;min-width:240px">
-<button>Импортировать</button></form>{imported}</div>"""
+<button>Импортировать</button></form>{watch_log_html(services)}{imported}</div>"""
     return f"""<h1>База знаний</h1>{note(msg)}{versions_html(services)}
 <div class="card"><h2>Прайс · {plural(len(kb.prices), "позиция", "позиции", "позиций")}</h2>
 <p class="muted">Бот называет только эти цены. Нажмите на формат, чтобы поменять цену, или правьте весь прайс в Excel:
@@ -1332,7 +1424,7 @@ def settings_html(services: Services, msg: str = "", form: dict | None = None) -
 <label for="model">Нейросеть</label><select id="model" name="model">{models}</select>{key_warn}
 <p class="hint">Lite отвечает быстрее, Pro точнее: на экзамене у Pro не было опасных ответов.</p>
 <label for="mode">Режим для новых подключений</label>
-<select id="mode" name="default_mode"><option value="observe" {"selected" if mode == "observe" else ""}>Наблюдение — сбор переписки без ответов</option>
+<select id="mode" name="default_mode"><option value="observe" {"selected" if mode == "observe" else ""}>Наблюдение — бот молчит, сохраняет переписку и считает время ответа менеджера</option>
 <option value="draft" {"selected" if mode == "draft" else ""}>Черновики — ответ сначала видит менеджер</option>
 <option value="auto" {"selected" if mode == "auto" else ""}>Автоответ — бот отвечает клиенту сам</option></select>
 <p class="hint">У уже подключённых менеджеров режим меняется на странице «Обзор» или командой /mode в боте.</p></div>

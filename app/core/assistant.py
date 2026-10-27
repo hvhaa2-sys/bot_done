@@ -19,7 +19,7 @@ from ..llm.base import LLMProvider
 from .conversation import MAX_CLARIFICATIONS, Conversation
 from .answer_grounding import budget_issues, price_period_issues, property_issues
 from .client_intent import active_request
-from .knowledge import KnowledgeBase, SearchHit, _format_words, format_rub, parse_budget
+from .knowledge import KnowledgeBase, PriceRow, SearchHit, _format_words, format_rub, parse_budget
 from .price_guard import (drop_bracket_totals, computed_totals, drop_numbers, extract_amounts, row_multipliers,
                           ungrounded_numbers,
                           unknown_amounts,
@@ -44,6 +44,7 @@ R_LIMIT = "limit"
 R_TERMS = "terms_mismatch"
 R_VENUE = "venue_mismatch"
 R_PERIOD = "period_mismatch"
+R_FORMAT = "format_mismatch"
 R_OFF_RANGE = "off_range"
 R_CATALOG = "catalog"
 R_FOREIGN = "foreign_words"
@@ -347,7 +348,10 @@ class Assistant:
         if hits and (wrong := self.kb.mismatched_amounts(text, hits, question)):
             # «Экран в ДЕПО — 31 500 ₽»: сумма настоящая, но из строки другого ТЦ
             return Reply(ESCALATE, text, confidence, f"{R_VENUE}:{wrong}", sources, raw=raw)
-        if hits and (wrong := self.kb.wrong_tier_amounts(text, hits, question)):
+        if hits and (wrong := self.kb.mismatched_formats(text, hits)):
+            # «Экран на фуд-корте — 25 000 ₽»: ТЦ тот же, но сумма из строки баннера
+            return Reply(ESCALATE, text, confidence, f"{R_FORMAT}:{wrong}", sources, raw=raw)
+        if hits and (wrong := self.kb.wrong_tier_amounts(text, hits, question) or self.kb.wrong_day_amounts(text, hits)):
             return Reply(ESCALATE, text, confidence, f"{R_PERIOD}:{wrong}", sources, raw=raw)
         if hits and (wrong := price_period_issues(self.kb, text, hits, question)):
             return Reply(ESCALATE, text, confidence, f"{R_PERIOD}:{wrong}", sources, raw=raw)
@@ -369,13 +373,26 @@ class Assistant:
                 # «С учётом сезонной наценки» у машины, «учесть НДС» сверх цены — к менеджеру
                 return Reply(ESCALATE, text, confidence, f"{R_TERMS}:{problem}", sources, raw=raw)
             text = add_missing_conditions(drop_foreign_extras(text, rows), rows)
-            text = hedge_partial_list(text, question, hits)
+            text = complete_partial_list(text, question, hits, self.kb.prices)
         return Reply(ANSWER, text, confidence, "", sources, raw=raw)
 
 
 # Менеджер что-то сделает сам — это обещание клиенту. «Свяжитесь с менеджером» — просто вежливость
 _MANAGER_PROMISE_RE = re.compile(r"пришл|уточнит\b|свяж[еу]тся|подтверд|расскаж|сообщ|ответит|верн[её]тся"
                                  r"|подготов|рассчита|подбер[её]т", re.IGNORECASE)
+# «Подробнее расскажет менеджер», «Если появятся вопросы, менеджер ответит» — вежливость целой фразой, а не обещание
+# конкретного действия: ответ полный, хвост убираем. «Подробнее о свободных датах расскажет менеджер», «Стоимость
+# печати сообщит менеджер», «Остальное расскажет менеджер» — обещание или неполный ответ: к менеджеру, как раньше
+_TAIL_VERB = r"(?:расскаж|сообщ|подскаж|ответ|проконсультир)\w*"
+_TAIL_MANAGER = r"(?:(?:наш|ваш)\w*\s+)?менеджер\w*"
+_TAIL_FILL = r"(?:\s+(?:вам|с радостью|охотно|обязательно|всё|все))*"
+_GENERIC_TAIL_RE = re.compile(
+    rf"\W*(?:(?:а\s+)?(?:подробн\w*|детал\w*|дополнительн\w*){_TAIL_FILL}\s+{_TAIL_VERB}{_TAIL_FILL}\s+{_TAIL_MANAGER}"
+    rf"|{_TAIL_MANAGER}{_TAIL_FILL}\s+{_TAIL_VERB}{_TAIL_FILL}\s+(?:подробн\w*|детал\w*)"
+    rf"|если\s+(?:у вас\s+)?(?:появ|оста|возник)\w*\s+(?:ещ[её]\s+|дополнительн\w*\s+)?вопрос\w*,\s*{_TAIL_MANAGER}"
+    rf"{_TAIL_FILL}\s+{_TAIL_VERB}{_TAIL_FILL}"
+    rf"|по\s+(?:любым|всем|другим)\s+вопросам{_TAIL_FILL}\s+{_TAIL_VERB}{_TAIL_FILL}\s+{_TAIL_MANAGER})\W*",
+    re.IGNORECASE)
 _ARITHMETIC_HINT_RE = re.compile(r"[^.!?\n]*(?:умнож|сложите|сложив)[^.!?\n]*[.!?]?\s*", re.IGNORECASE)
 _MANAGER_TAIL_MIN = 40  # без хвоста про менеджера должен остаться настоящий ответ, а не одно «Да.»
 
@@ -398,7 +415,7 @@ def drop_manager_tail(text: str) -> tuple[str, bool]:
     последней фразы. Если менеджер упомянут не только в конце, ответа без него нет."""
     sentences = re.findall(r"[^.!?\n]+[.!?]*\s*", text)
     while sentences and _MENTIONS_MANAGER_RE.search(sentences[-1]):
-        if _MANAGER_PROMISE_RE.search(sentences[-1]):
+        if _MANAGER_PROMISE_RE.search(sentences[-1]) and not _GENERIC_TAIL_RE.fullmatch(sentences[-1]):
             return text, True  # «цифры менеджер пришлёт» — обещание: без менеджера его никто не выполнит
         sentences.pop()
     rest = "".join(sentences).strip()
@@ -461,11 +478,12 @@ _RETRY_HINTS = {
     R_PRICE_MISMATCH: "В ответе есть число {detail}, которого нет в строках контекста. Назови цены только так, "
                       "как они записаны в строках «Прайс», без пересчёта, итогов и сумм за несколько месяцев.",
     R_VENUE: "Сумма {detail} взята из строки другого торгового центра. Называй цену из строки того ТЦ, о котором спрашивают.",
-    R_PERIOD: "Сумма {detail} связана с другой строкой или периодом. Сохрани ТЦ, формат и единицу цены из одной строки. "
-              "Не выдавай месячную цену за двухнедельную. Если нужного тарифа нет, назови известную цену с её "
-              "настоящим периодом или поставь needs_manager = true.",
+    R_PERIOD: "Сумма {detail} связана с другой строкой, периодом или днями размещения (будни, выходные). Сохрани ТЦ, "
+              "формат и единицу цены из одной строки. Не выдавай месячную цену за двухнедельную. Если нужного тарифа "
+              "нет, назови известную цену с её настоящим периодом или поставь needs_manager = true.",
     R_UNGROUNDED: "Свойства {detail} не подтверждены для этой площадки и формата. Не переноси сведения другого "
                   "экрана и не угадывай. Если без них нельзя ответить на вопрос, поставь needs_manager = true.",
+    R_FORMAT: "Сумма {detail} — цена другого формата из контекста. Называй цену из строки того формата, о котором пишешь.",
     R_TERMS: "Неверно об условиях ({detail}): если в строке «с НДС, уже в цене» — НДС не добавляется, если «без НДС» — "
              "не пиши, что он включён; печать, монтаж и производство входят в цену, только если так написано в строке, "
              "иначе назови их отдельно. Для бюджета проверяй общий предел и отдельные пределы размещения/подготовки: "
@@ -573,32 +591,68 @@ def add_missing_conditions(text: str, rows: list) -> str:
             extra.append(f"Отдельно оплачивается: {'; '.join(priced)}.")
     if not extra:
         return text
-    added = " ".join(dict.fromkeys(extra))
     # «…Какая форма рекламы вам интересна?» — доплату ставим перед заключительным вопросом
-    if (question := re.search(r"(\s*)([^.!?\n]*\?)\s*$", text)) and text[:question.start()].strip():
-        head = text[:question.start()].rstrip()
-        return f"{head} {added}{question.group(1) or ' '}{question.group(2).strip()}"
-    return (text.rstrip() + " " + added).strip()
+    return _before_question(text, " ".join(dict.fromkeys(extra)))
 
 
 _HEDGE_RE = re.compile(r"например|в том числе|среди них|и другие|есть и друг|не все|часть", re.IGNORECASE)
+LIST_APPEND_LIMIT = 8  # больше строк кодом не дописываем: простыня в чате не читается, остальное — по вопросу
+PARTIAL_LIST_NOTE = "Это часть вариантов — могу рассказать и про остальные."
 
 
-def hedge_partial_list(text: str, question: str, hits: list[SearchHit]) -> str:
+def complete_partial_list(text: str, question: str, hits: list[SearchHit], prices: list[PriceRow]) -> str:
     """«Какие баннеры есть?» — модель перечисляет 5 из 13 под «доступны следующие». Если клиент просил
-    перечень, а названа меньшая часть найденных цен, честно говорим, что это не всё."""
+    перечень, а названа меньшая часть найденных цен, недостающие строки спрошенного формата дописываем кодом
+    прямо из прайса (модель их не пересказывает, поэтому цены и сроки точные). Не больше LIST_APPEND_LIMIT,
+    остальное — «это часть вариантов»; без названного формата не знаем, что дописывать, — только эта фраза."""
     rows = [h for h in hits if h.chunk.kind == "price"]
     # Считаем только строки того формата, о котором спросили: у «Радуги» два экрана — оба названы,
     # а промо и радио того же ТЦ в контексте не повод писать «это часть вариантов»
     asked = set(tokenize(question))
-    rows = [h for h in rows if _format_words(h.chunk.fmt) & asked] or rows
-    prices = {h.chunk.price for h in rows}
-    named = set(extract_amounts(text)) & prices
-    if not _LIST_QUESTION_RE.search(question) or len(prices) < 5 or len(named) >= len(prices) or _HEDGE_RE.search(text):
+    of_format = [h for h in rows if _format_words(h.chunk.fmt) & asked]
+    # «Какие экраны на фуд-корте?» — экраны атриума дописывать не нужно
+    of_format = [h for h in of_format if h.chunk.place & asked] or of_format
+    rows = of_format or rows
+    amounts = {h.chunk.price for h in rows}
+    named = set(extract_amounts(text)) & amounts
+    if not _LIST_QUESTION_RE.search(question) or len(amounts) < 5 or len(named) >= len(amounts) or _HEDGE_RE.search(text):
         return text
     if len(named) < 2:
         return text
-    return text.rstrip() + " Это часть вариантов — могу рассказать и про остальные."
+    missing = list({h.chunk.id: h for h in rows if h.chunk.price not in named}.values())
+    if not of_format:
+        return _before_question(text, PARTIAL_LIST_NOTE)
+    listed = [prices[int(h.chunk.id.split("-")[1])] for h in missing[:LIST_APPEND_LIMIT]]
+    # Одна площадка у всех строк — называем её один раз: «Ещё варианты в ДЕПО, Нижний Тагил: …»
+    venues = {_venue_head(r.placement) for r in listed}
+    where = f" в {venues.pop()}" if len(venues) == 1 else ""
+    added = f"Ещё варианты{where}: " + "; ".join(list_item(r, with_venue=not where) for r in listed) + "."
+    if len(missing) > LIST_APPEND_LIMIT:
+        added += " " + PARTIAL_LIST_NOTE
+    return _before_question(text, added)
+
+
+def list_item(row: PriceRow, with_venue: bool = True) -> str:
+    """Строка прайса для перечня клиенту: «Баннер № 2, ВЕЕР Молл, Екатеринбург — атриум: 25 000 ₽ за 1 месяц»,
+    без площадки — «Баннер № 2 — атриум: 25 000 ₽ за 1 месяц»."""
+    place = row.placement.partition(" — ")[2]
+    name = f"{row.format}, {_venue_head(row.placement)}" if with_venue else row.format
+    period = f" за {row.period}" if row.period else ""
+    vat = " (без НДС)" if "без ндс" in row.notes.lower() else ""
+    return f"{name}{f' — {place}' if place else ''}: {format_rub(row.price_rub)}{period}{vat}"
+
+
+def _venue_head(placement: str) -> str:
+    """Площадка без места и адреса в скобках: «ДЕПО, Нижний Тагил — фуд-корт» → «ДЕПО, Нижний Тагил»."""
+    return re.sub(r"\s*\(.*?\)", "", placement.partition(" — ")[0]).strip()
+
+
+def _before_question(text: str, added: str) -> str:
+    """Дописать к ответу, но перед заключительным вопросом клиенту («…Какая форма рекламы вам интересна?»)."""
+    if (question := re.search(r"(\s*)([^.!?\n]*\?)\s*$", text)) and text[:question.start()].strip():
+        head = text[:question.start()].rstrip()
+        return f"{head} {added}{question.group(1) or ' '}{question.group(2).strip()}"
+    return (text.rstrip() + " " + added).strip()
 
 
 _LIST_QUESTION_RE = re.compile(r"какие|что (?:у вас )?есть|что можно|варианты|перечисл|все\b|список", re.IGNORECASE)

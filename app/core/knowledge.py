@@ -334,6 +334,50 @@ class KnowledgeBase:
                     bad.append(amount)
         return bad
 
+    def mismatched_formats(self, answer: str, hits: list[SearchHit]) -> list[int]:
+        """«Экран на фуд-корте — 25 000 ₽»: ТЦ тот же, сумма есть в контексте, но это цена баннера.
+        Формат ищется в той же части фразы, иначе раньше в том же предложении. Ответ про формат
+        засчитывается и по месту строки («на фуд-корте — 42 000 ₽») и по её доплатам («печать — 14 000 ₽»)."""
+        rows = [h.chunk for h in hits if h.chunk.kind == "price"]
+        if not rows:
+            return []
+        owners: dict[int, list[frozenset[str]]] = {}
+        for c in rows:
+            row = self.prices[int(c.id.split("-")[1])]
+            words = _format_words(c.fmt) | c.place
+            owners.setdefault(row.price_rub, []).append(words)
+            for amount in extract_amounts(row.notes):  # доплату называют словами примечания: «флаги — 28 000 ₽»
+                owners.setdefault(amount, []).append(words | frozenset(tokenize(row.notes)))
+        vocab = frozenset().union(*(_format_words(c.fmt) for c in rows)) - _SUMMARY_SKIP
+        bad: list[int] = []
+        for sentence in re.findall(r"[^.!?\n]+", answer):
+            named: frozenset[str] = frozenset()
+            for clause in re.findall(r"[^,;:—–]+", sentence):
+                named = vocab.intersection(_VENUE_ALIASES.get(t, t) for t in self.normalize(clause)) or named
+                for amount in extract_amounts(clause):
+                    found = owners.get(amount)
+                    if found and named and not any(w & named for w in found) and amount not in bad:
+                        bad.append(amount)
+        return bad
+
+    def wrong_day_amounts(self, answer: str, hits: list[SearchHit]) -> list[int]:
+        """«Промоутер в выходные — 12 000 ₽»: это цена будней (у выходных — 18 000 ₽). Проверяем только суммы,
+        у которых все строки контекста — с днями в сроке; фразу, где названы и будни, и выходные, не трогаем."""
+        days: dict[int, set[str]] = {}
+        for h in hits:
+            if h.chunk.kind == "price":
+                days.setdefault(h.chunk.price, set()).add(day_kind(h.chunk.period))
+        bad: list[int] = []
+        for sentence in re.findall(r"[^.!?\n]+", answer):
+            said = ""
+            for clause in re.findall(r"[^,;:—–]+", sentence):
+                said = day_kind(clause, unknown=said)
+                for amount in extract_amounts(clause):
+                    kinds = days.get(amount)
+                    if said and kinds and "" not in kinds and said not in kinds and amount not in bad:
+                        bad.append(amount)
+        return bad
+
     def rows_in_answer(self, answer: str, hits: list[SearchHit]) -> list[PriceRow]:
         """Строки контекста, чью цену называет ответ: цена и формат в той же фразе. Одного ТЦ мало —
         к «промо в ДЕПО, все выходные — 25 000 ₽» дописывались условия баннера ДЕПО за те же 25 000 ₽."""
@@ -589,6 +633,18 @@ _CITY_TOKENS = frozenset(stem(w) for w in "москва тагил оренбу�
 _CITY_RE = re.compile(r"(?P<ekb>екатеринбург\w*|\bекб\b|\bебург\w*)|(?P<nt>тагил\w*)|(?P<msk>москв\w*)|(?P<orb>оренбург\w*)")
 _CITY_NAMES = {"ekb": "екатеринбург", "nt": "тагил", "msk": "москва", "orb": "оренбург"}
 _CHEAPEST_RE = re.compile(r"сам\w* (?:дешев|недорог|бюджетн|доступн)|минимальн\w* (?:цен|стоимост)|\b(?:по)?дешевле\b")
+
+
+# Срок строки и часть ответа: «1 день в будни (понедельник–четверг)», «все выходные месяца»
+_WEEKDAYS_RE = re.compile(r"\bбудн\w*|\bрабоч\w* дн\w*")
+_WEEKENDS_RE = re.compile(r"\bвыходн\w*|\bпраздничн\w*|\bсуббот\w*|\bвоскресен\w*")
+
+
+def day_kind(text: str, unknown: str = "") -> str:
+    """«будни» или «выходные» по сроку строки или части ответа. Названы оба — "", ничего — unknown."""
+    low = text.lower().replace("ё", "е")
+    kinds = [kind for kind, rx in (("будни", _WEEKDAYS_RE), ("выходные", _WEEKENDS_RE)) if rx.search(low)]
+    return kinds[0] if len(kinds) == 1 else "" if kinds else unknown
 
 
 def parse_budget(text: str) -> int | None:

@@ -18,6 +18,7 @@ import contextlib
 import datetime as dt
 import logging
 import re
+import statistics
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.exceptions import (TelegramAPIError, TelegramForbiddenError, TelegramNetworkError,
@@ -87,12 +88,14 @@ async def on_business_connection(bc: BusinessConnection, bot: Bot, services: Ser
         text = ("Бот выключен: не отвечает клиентам и не сохраняет переписку. "
                 "Включить: /mode observe (наблюдение), /mode draft (черновики) или /mode auto (автоответ).")
     elif conn.mode == "observe":
-        text = "Наблюдение включено. Сохраняю переписку и предлагаю факты в «Обучении». Клиентам не отвечаю."
+        text = ("Наблюдение включено. Клиентам не отвечаю: сохраняю переписку, замеряю, через сколько вы отвечаете, "
+                "и предлагаю факты в «Обучении». Выключить совсем: /mode off.")
     elif not can_reply:
         text = "Бот подключён, но без права отвечать. Разрешите ему отвечать: Настройки → Автоматизация чатов."
     else:
         text = (f"Бот подключён. Режим: {mode_name(conn.mode)}.\n"
-                "Сменить режим: /mode observe (наблюдение), /mode draft (черновики), /mode auto (автоответ).\n\n"
+                "Сменить режим: /mode observe (наблюдение), /mode draft (черновики), /mode auto (автоответ), "
+                "/mode off (выключить).\n\n"
                 "Совет: в «Автоматизации чатов» исключите контакты — тогда бот не будет "
                 "отвечать друзьям и семье, только новым клиентам.")
     await safe_send(bot, bc.user_chat_id, text)
@@ -130,9 +133,12 @@ async def on_business_message(message: Message, bot: Bot, services: Services, bu
         return
     if conn.mode == "off":
         return  # выключен: ни ответа, ни паузы, ни записи
-    if conn.mode == "observe":
+    if conn.mode == D.OBSERVE:
+        # Наблюдение: журнал с правками и кандидаты в базу (observe), а для нового сообщения — ещё файл переписки
+        # и замер, через сколько ответил менеджер. Повторная доставка того же сообщения замер не задваивает
         text = message.text or message.caption or f"[{media_kind(message) or 'нетекстовое сообщение'}]"
-        await observe(message, services, conn, text)
+        if await observe(message, services, conn, text):
+            record_wait(services, conn, chat, message, text)
         return
     # Пишет сам менеджер (текст, фото, голосовое — что угодно): бот замолкает в этом чате
     if message.from_user and message.from_user.id == conn.owner_user_id:
@@ -407,6 +413,7 @@ async def on_start(message: Message, services: Services) -> None:
         "/mode observe — наблюдение: собираю переписку без ответов\n"
         "/mode draft — черновики: ответ сначала приходит вам\n"
         "/mode auto — автоответ: бот отвечает клиенту сам\n"
+        "/mode watch — наблюдение: бот молчит и только запоминает вопросы, ваши ответы и время ответа\n"
         "/status — статистика\n"
         f"/resume — снять паузу. Когда вы пишете клиенту сами, бот молчит в этом чате "
         f"{services.settings.manager_pause_minutes} мин."
@@ -415,13 +422,14 @@ async def on_start(message: Message, services: Services) -> None:
 
 async def on_mode(message: Message, command: CommandObject, services: Services) -> None:
     mode = (command.args or "").strip().lower()
+    mode = D.MODE_ALIASES.get(mode, mode)  # «/mode watch» — прежнее имя наблюдения
     if mode not in D.MODES:
         await message.answer("Укажите режим: /mode off, /mode observe, /mode draft или /mode auto")
         return
     n = services.db.set_mode(mode, owner_user_id=message.from_user.id)
     if n:
         services.event(f"Менеджер включил режим: {mode_name(mode)}")
-        await message.answer(f"Режим: {mode_name(mode)}.")
+        await message.answer(f"Режим: {mode_name(mode)}." + (OBSERVE_NOTE if mode == D.OBSERVE else ""))
     else:
         await message.answer("Сначала подключите бота: Настройки → Автоматизация чатов.")
 
@@ -429,13 +437,19 @@ async def on_mode(message: Message, command: CommandObject, services: Services) 
 # --- вечерняя сводка: что бот ответил сам, с кнопками «Ошибка» ---
 def build_summary(services: Services, conn: D.Connection, since_ts: float) -> tuple[str, InlineKeyboardMarkup | None] | None:
     rows = [r for r in services.db.dialogs_since(conn.id, since_ts) if r["status"] != D.SANDBOX]
-    if not rows:
+    watched = [r for r in rows if r["status"] == D.WATCH]
+    rows = [r for r in rows if r["status"] != D.WATCH]
+    if not rows and not watched:
         return None
     auto = [r for r in rows if r["status"] == D.SENT_AUTO]
     escalated = sum(r["status"] == D.ESCALATED for r in rows)
     drafts = len(rows) - len(auto) - escalated
     lines = [f"Итоги дня: вопросов от клиентов — {len(rows)}.",
-             f"Бот ответил сам — {len(auto)}, передал вам — {escalated}, черновиков — {drafts}."]
+             f"Бот ответил сам — {len(auto)}, передал вам — {escalated}, черновиков — {drafts}."] if rows else []
+    if watched:
+        waits = [r["reply_after_s"] / 60 for r in watched if r["reply_after_s"] is not None]
+        median = f", обычно через {wait_text(statistics.median(waits))} (медиана)" if waits else ""
+        lines.append(f"Наблюдение за день: обращений клиентов — {len(watched)}, вы ответили на {len(waits)}{median}.")
     shown = auto[-10:]
     if shown:
         lines += ["", "Ответы бота:"]
@@ -457,16 +471,18 @@ async def maybe_send_summaries(bot: Bot, services: Services, now: dt.datetime | 
     start = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     sent = 0
     for conn in services.db.connections():
-        if not conn.approved or conn.mode in D.SILENT_MODES:
-            continue
+        if not conn.approved or conn.mode == "off":
+            continue  # в наблюдении сводка приходит: обращения за день и через сколько вы ответили
+        if conn.id.startswith("max:"):
+            continue  # менеджерам MAX сводку шлёт их адаптер (max_bot.py)
         summary = build_summary(services, conn, start) if conn.enabled else None
         if summary:
             await safe_send(bot, conn.owner_chat_id, summary[0], reply_markup=summary[1],
-                            services=services, connection_id=conn.id)
+                            services=services, connection_id=conn.id, summary=True)
             sent += 1
         if conn.enabled and (proposals := build_candidates_message(services, conn)):
             await safe_send(bot, conn.owner_chat_id, proposals[0], reply_markup=proposals[1],
-                            services=services, connection_id=conn.id)
+                            services=services, connection_id=conn.id, summary=True)
     services.db.set_settings({"summary_sent": today})
     return sent
 
@@ -591,7 +607,31 @@ def send_failure(conn: D.Connection) -> str:
 
 def mode_name(mode: str) -> str:
     return {"off": "выключен — не отвечает и не сохраняет переписку", "observe": "наблюдение без ответов",
-            "auto": "автоответ", "draft": "черновики для менеджера"}.get(mode, mode)
+            "auto": "автоответ", "draft": "черновики для менеджера"}.get(D.MODE_ALIASES.get(mode, mode), mode)
+
+
+OBSERVE_NOTE = ("\nБот ничего не пишет клиентам и не присылает карточек: запоминает вопросы, ваши ответы и через сколько "
+              "вы ответили. Ваши ответы попадут в предложения для базы знаний. Через неделю-две включите /mode auto.")
+
+
+def record_wait(services: Services, conn: D.Connection, chat: str, message: Message, text: str) -> None:
+    """Наблюдение: строка в файл переписки и замер, через сколько ответил менеджер (как в импорте выгрузки).
+    Время — из сообщения: после простоя бота пачка старых сообщений не сдвигает замер."""
+    ts = message.date.timestamp()
+    manager = bool(message.from_user and message.from_user.id == conn.owner_user_id)
+    services.log_watch_message(conn.id, message.chat.id, "manager" if manager else "client", text, ts)
+    if manager:
+        waited = services.db.watch_reply(conn.id, message.chat.id, text, ts)
+        if waited is not None:
+            services.event(f"{chat}: наблюдение — менеджер ответил через {wait_text(waited / 60)}")
+    else:
+        services.db.watch_question(conn.id, message.chat.id, text, ts, services.kb_version)
+
+
+def wait_text(minutes: float) -> str:
+    if minutes < 1:
+        return "меньше минуты"
+    return f"{minutes:.0f} мин" if minutes < 90 else f"{minutes / 60:.1f} ч".replace(".", ",")
 
 
 TELEGRAM_LIMIT = 4096  # длиннее Telegram не принимает
@@ -629,11 +669,14 @@ async def with_retry(send, *args, **kwargs):
 
 
 async def safe_send(bot: Bot, chat_id: int, text: str, *, services: Services | None = None,
-                    connection_id: str | None = None, **kwargs) -> None:
+                    connection_id: str | None = None, summary: bool = False, **kwargs) -> None:
+    """Менеджеру. В «выключен» не пишем ничего, в наблюдении — только вечернюю сводку (summary), без карточек:
+    режим проверяется в момент отправки, если его сменили, пока модель думала."""
     async def send():
         if services and connection_id:
             conn = services.db.get_connection(connection_id)
-            if not conn or not conn.enabled or not conn.approved or conn.mode in D.SILENT_MODES:
+            if not conn or not conn.enabled or not conn.approved or conn.mode == "off" \
+                    or (conn.mode in D.SILENT_MODES and not summary):
                 return
         return await bot.send_message(chat_id, fit(text), **kwargs)
 

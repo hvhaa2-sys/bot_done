@@ -99,12 +99,16 @@ DRAFT_EDITED = "draft_edited"    # менеджер отправил свою п
 DRAFT_REJECTED = "draft_rejected"
 ESCALATED = "escalated"          # передано менеджеру, клиенту ушло «уточню»
 SANDBOX = "sandbox"
-# Режимы подключения: off — бот молчит и ничего не сохраняет; observe — молчит, но сохраняет переписку;
-# draft — черновики менеджеру; auto — отвечает клиенту сам. В off и observe клиенту и менеджеру бот не пишет
+# Режимы подключения: off — бот молчит и ничего не сохраняет; observe — молчит, сохраняет переписку, предлагает
+# факты в базу и замеряет, как быстро отвечает менеджер; draft — черновики менеджеру; auto — отвечает клиенту сам.
+# В off и observe клиенту и менеджеру бот не пишет. «watch» — прежнее имя наблюдения (ветка 27.10), принимаем как синоним
+OBSERVE = "observe"
 MODES = ("off", "observe", "draft", "auto")
-SILENT_MODES = frozenset({"off", "observe"})
+MODE_ALIASES = {"watch": OBSERVE}
+SILENT_MODES = frozenset({"off", OBSERVE})
 OBSERVE_PAIR_HOURS = 24      # наблюдение: ответ менеджера на вопрос без явного «ответить» — в пределах суток
 OBSERVE_PIECE_MINUTES = 30   # куски одного вопроса или ответа — не дальше получаса друг от друга
+WATCH = "watch"              # статус журнала: обращение клиента в наблюдении и ответ менеджера (время ответа)
 HISTORY_MINUTES = 180  # дольше трёх часов — уже другой разговор              # вопрос из песочницы админки
 
 
@@ -142,10 +146,17 @@ class Database:
         # По какой версии базы знаний бот отвечал: снимок версии хранится, источники ответа можно открыть
         if "kb_version" not in columns:
             self.conn.execute("ALTER TABLE dialogs ADD COLUMN kb_version INTEGER")
+        # Наблюдение: через сколько секунд менеджер ответил клиенту сам (до бота)
+        if "reply_after_s" not in columns:
+            self.conn.execute("ALTER TABLE dialogs ADD COLUMN reply_after_s REAL")
         # Одобрение подключений: в старых базах подключения создавал сам владелец — считаем одобренными
         conn_columns = {r["name"] for r in self.conn.execute("PRAGMA table_info(connections)")}
         if "approved" not in conn_columns:
             self.conn.execute("ALTER TABLE connections ADD COLUMN approved INTEGER NOT NULL DEFAULT 1")
+        # Наблюдение в ветке 27.10 называлось «watch»: переводим на общее имя, чтобы режим не пропал
+        for alias, mode in MODE_ALIASES.items():
+            self.conn.execute("UPDATE connections SET mode=? WHERE mode=?", (mode, alias))
+            self.conn.execute("UPDATE settings SET value=? WHERE key='default_mode' AND value=?", (mode, alias))
         candidate_columns = {r["name"] for r in self.conn.execute("PRAGMA table_info(candidates)")}
         if "observation_id" not in candidate_columns:
             self.conn.execute("ALTER TABLE candidates ADD COLUMN observation_id INTEGER")
@@ -183,6 +194,7 @@ class Database:
 
     def set_mode(self, mode: str, *, connection_id: str | None = None,
                  owner_user_id: int | None = None) -> int:
+        mode = MODE_ALIASES.get(mode, mode)
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}")
         if connection_id:
@@ -245,6 +257,48 @@ class Database:
         )
         self.conn.commit()
         return int(cur.lastrowid)
+
+    # --- наблюдение: бот молчит, записываем вопросы и как быстро ответил менеджер ---
+    def watch_question(self, connection_id: str, chat_id: int, text: str, ts: float,
+                       kb_version: int | None = None) -> int:
+        """Сообщение клиента в режиме наблюдения. Пока менеджер не ответил, следующие сообщения клиента —
+        то же обращение: дописываем к нему, ожидание считается от первого (как в импорте переписки)."""
+        last = self._last_in_chat(connection_id, chat_id)
+        if last and last["status"] == WATCH and not last["answer"]:
+            self.conn.execute("UPDATE dialogs SET question=question || char(10) || ? WHERE id=?",
+                              (mask_pd(text), last["id"]))
+            self.conn.commit()
+            return int(last["id"])
+        cur = self.conn.execute(
+            """INSERT INTO dialogs (connection_id, chat_id, question, answer, decision, reason, confidence, status,
+                 sources, mode, created_at, kb_version) VALUES (?, ?, ?, '', 'watch', 'watch', 0, ?, '[]', 'watch', ?, ?)""",
+            (connection_id, chat_id, mask_pd(text), WATCH, ts, kb_version))
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def watch_reply(self, connection_id: str, chat_id: int, text: str, ts: float) -> float | None:
+        """Менеджер написал клиенту сам. Первое сообщение закрывает обращение и фиксирует время ответа,
+        следующие (пока клиент молчит) дописываются к ответу. Возвращает секунды ожидания для первого."""
+        last = self._last_in_chat(connection_id, chat_id)
+        if not last or last["status"] != WATCH:
+            return None  # менеджер пишет первым или обращение из другого режима — ожидания нет
+        if last["answer"]:
+            self.conn.execute("UPDATE dialogs SET answer=answer || char(10) || ? WHERE id=?",
+                              (mask_pd(text), last["id"]))
+            self.conn.commit()
+            return None
+        waited = max(0.0, ts - last["created_at"])
+        self.conn.execute("UPDATE dialogs SET answer=?, reply_after_s=? WHERE id=?", (mask_pd(text), waited, last["id"]))
+        self.conn.commit()
+        return waited
+
+    def watch_rows(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT created_at, reply_after_s FROM dialogs WHERE status=? ORDER BY id", (WATCH,)).fetchall()
+
+    def _last_in_chat(self, connection_id: str, chat_id: int) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM dialogs WHERE connection_id=? AND chat_id=? ORDER BY id DESC LIMIT 1",
+                                 (connection_id, chat_id)).fetchone()
 
     def get_dialog(self, dialog_id: int) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM dialogs WHERE id=?", (dialog_id,)).fetchone()
@@ -391,7 +445,8 @@ class Database:
         ).fetchall()
         by_status = {r["status"]: r["n"] for r in rows}
         total = sum(by_status.values())
-        real = total - by_status.get(SANDBOX, 0)
+        # Наблюдение — вопросы, на которые бот и не должен был отвечать: в доли ответов бота не входят
+        real = total - by_status.get(SANDBOX, 0) - by_status.get(WATCH, 0)
         drafts_decided = sum(by_status.get(s, 0) for s in (DRAFT_SENT, DRAFT_EDITED, DRAFT_REJECTED))
         lat = self.conn.execute("SELECT AVG(latency_ms) FROM dialogs").fetchone()[0]
         flagged = self.conn.execute(
