@@ -37,7 +37,7 @@ def test_dialogs_no_longer_mix_in_observation(bot_env):
     client = TestClient(create_app(e.services))
     client.get("/?token=test-observe")
     dialogs = client.get("/dialogs").text
-    assert "Сколько стоит экран?" not in dialogs and ">Наблюдение</a>" not in dialogs.split('<main id="main">')[1]
+    assert "Сколько стоит экран?" not in dialogs and ">Наблюдение</a>" not in dialogs.split('<main id="main"')[1]
     assert client.get("/dialogs?f=observe", follow_redirects=False).headers["location"] == "/observe"
 
 
