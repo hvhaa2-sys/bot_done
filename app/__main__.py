@@ -118,7 +118,11 @@ async def main() -> None:
     if settings.admin_token == "change-me":
         log.warning("ADMIN_TOKEN по умолчанию: задайте свой в .env, иначе любой сайт, открытый в браузере, "
                     "может слать запросы в админку")
-    log.info("Админка: http://localhost:%d/?token=%s", settings.admin_port, settings.admin_token)
+    if settings.admin_login and settings.admin_password_hash:
+        # Вход по логину и паролю: токен в лог не пишем
+        log.info("Админка: http://localhost:%d — вход по логину «%s»", settings.admin_port, settings.admin_login)
+    else:
+        log.info("Админка: http://localhost:%d/?token=%s", settings.admin_port, settings.admin_token)
     try:
         await server.serve()  # работает до Ctrl+C
     finally:
