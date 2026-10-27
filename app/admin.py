@@ -675,6 +675,16 @@ def status_html(services: Services) -> str:
              "не включён бизнес-режим: @BotFather → /mybots → бот → Bot Settings → Secretary Mode")
     else:
         item(True, f"Бот @{escape(bot['username'])}", "запущен")
+    if st.max_bot_token:
+        mx = services.max_status
+        if mx is None:
+            item(None, "MAX", "подключаюсь…")
+        elif not mx["ok"]:
+            item(False, "MAX", escape(mx["error"]))
+        else:
+            item(True, f"Бот MAX {escape(mx['username'] or mx['name'])}",
+                 "запущен" if any(c.id.startswith("max:") and c.approved for c in services.db.connections())
+                 else "запущен; менеджеру — написать боту /manager")
     conns = [c for c in services.db.connections() if c.approved]
     pending = sum(not c.approved for c in services.db.connections())
     modes = ", ".join("автоответ" if c.mode == "auto" else "черновики" for c in conns)
@@ -739,6 +749,8 @@ def connections_html(services: Services) -> str:
 
     def row(c) -> str:
         who = escape(services.owner_names.get(c.owner_user_id, f"id {c.owner_user_id}"))
+        if c.id.startswith("max:") and not who.startswith("MAX"):
+            who = f"MAX: {who}"
         if not c.approved:
             return f"""<tr class="flag"><td>{who}</td><td>ждёт разрешения</td><td class="row">
 <form method="post" action="/connections/{escape(c.id)}/approve"><button class="small">Разрешить</button></form>
@@ -752,7 +764,8 @@ def connections_html(services: Services) -> str:
     pending = sum(not c.approved for c in conns)
     hint = ("<p class='muted'>Кто-то подключил бота к своему аккаунту. Разрешайте только своим менеджерам: "
             "каждое подключение тратит лимит модели.</p>" if pending else "")
-    return f"""<div class="card"><h2>Подключения Telegram</h2>{hint}<div class="scroll"><table>
+    title = "Подключения" if any(c.id.startswith("max:") for c in conns) else "Подключения Telegram"
+    return f"""<div class="card"><h2>{title}</h2>{hint}<div class="scroll"><table>
 <tr><th>Менеджер</th><th>Статус</th><th>Режим</th></tr>{"".join(row(c) for c in conns)}</table></div></div>"""
 
 
