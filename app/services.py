@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 
 import datetime as dt
+import json
 import logging
 import os
 import re
@@ -18,8 +19,10 @@ from .core.assistant import GREETING_MESSAGE, HOLDING_MESSAGE, Assistant
 from .core import candidates, versions
 from .core.candidate_review import NOTE_PREFIX, review_candidate
 from .core.knowledge import KnowledgeBase, format_rub
+from .core.pii import mask_pd
 from .core.price_guard import unknown_amounts
-from .db import Database
+from .core.waits import wait_summary
+from .db import MODE_ALIASES, Database
 from .llm import make_provider
 from .llm.base import LLMProvider
 
@@ -90,6 +93,8 @@ def validate(values: dict[str, str]) -> tuple[dict[str, str], list[str]]:
         if field is None:
             continue
         raw = raw.strip().replace(",", ".") if field.kind is not str else raw.strip()
+        if key == "default_mode":
+            raw = MODE_ALIASES.get(raw, raw)  # «watch» — прежнее имя наблюдения
         if key == "model" and raw not in MODELS:
             errors.append("Неизвестная модель.")
         elif key == "auto_schedule" and raw not in ("always", "off_hours"):
@@ -148,12 +153,15 @@ class Services:
         self.llm = llm or make_provider(self.settings)
         # База знаний: data/kb — черновик менеджера, бот отвечает по опубликованному снимку
         self.versions_dir = settings.db_path.parent / "kb_versions"
+        # Переписка из режима наблюдения: строка на сообщение, только на этом компьютере (data/watch в .gitignore)
+        self.watch_log = settings.db_path.parent / "watch" / "messages.jsonl"
         self._exam_cache: tuple[int, frozenset[str], dict[str, list[str]]] | None = None
         self.kb_version = self._ensure_version()
         self.kb = KnowledgeBase.load(self.version_dir(self.kb_version))
         self.assistant = self._make_assistant()
         # Заполняется при запуске бота: {ok, username, business} или {ok: False, error}
         self.bot_status: dict | None = None
+        self.max_status: dict | None = None  # то же для MAX: {ok, username, name} или {ok: False, error}
         self._chat_locks: dict[tuple[str, int], asyncio.Lock] = {}
         # Лента «что делает бот» для админки и имена чатов (только в памяти, в базу не пишутся)
         self.events: deque[tuple[str, str]] = deque(maxlen=80)
@@ -424,6 +432,27 @@ class Services:
         """Подпись менеджера под сообщением бота клиенту, если она задана в настройках."""
         signature = self.current()["signature"].strip()
         return f"{text}\n\n{signature}" if signature and text else text
+
+    def log_watch_message(self, connection_id: str, chat_id: int, author: str, text: str, ts: float) -> None:
+        """Наблюдение: сообщение клиента («client») или менеджера («manager») — в файл переписки. Имён нет,
+        телефоны, почты и карты скрыты; время местное, как в выгрузке Telegram Desktop, — файл читает тот же импорт."""
+        when = dt.datetime.fromtimestamp(ts, self.local_now().tzinfo).replace(tzinfo=None).isoformat(timespec="seconds")
+        self.watch_log.parent.mkdir(parents=True, exist_ok=True)
+        with self.watch_log.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"conn": connection_id, "chat": chat_id, "date": when, "from": author,
+                                "text": mask_pd(text)}, ensure_ascii=False) + "\n")
+
+    def watch_stats(self) -> dict | None:
+        """Как было до бота по режиму наблюдения: сколько клиент ждал первого ответа менеджера.
+        Считается так же, как по выгрузке переписки; рабочее время — из настроек расписания."""
+        rows = self.db.watch_rows()
+        if not rows:
+            return None
+        tz, cur = self.local_now().tzinfo, self.current()
+        waits = [(dt.datetime.fromtimestamp(r["created_at"], tz), r["reply_after_s"] / 60)
+                 for r in rows if r["reply_after_s"] is not None]
+        unanswered = sum(r["reply_after_s"] is None for r in rows)
+        return {"source": "watch", **wait_summary(waits, unanswered, cur["work_start"], cur["work_end"], cur["work_days"])}
 
     def local_now(self) -> dt.datetime:
         return dt.datetime.now(ZoneInfo(os.environ.get("TIMEZONE", "Asia/Yekaterinburg")))

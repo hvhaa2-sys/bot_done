@@ -66,15 +66,43 @@ async def check_telegram(settings: Settings) -> bool:
     return ok
 
 
+async def check_max(settings: Settings) -> bool:
+    """MAX — второй канал и необязателен: без токена просто пропускаем."""
+    if not settings.max_bot_token:
+        line(None, "MAX", "MAX_BOT_TOKEN не задан — второй канал выключен")
+        return True
+    from .channels.max_api import MaxApi, MaxError
+
+    api = MaxApi(settings.max_bot_token, settings.max_api_url)
+    try:
+        me = await api.me()
+        hooks = (await api.request("GET", "/subscriptions")).get("subscriptions") or []
+    except MaxError as exc:
+        line(False, "MAX", "токен не принят — скопируйте его заново на dev.max.ru" if exc.status == 401 else str(exc))
+        return False
+    except Exception as exc:  # noqa: BLE001
+        line(False, "MAX", f"нет связи ({type(exc).__name__}) — проверьте интернет")
+        return False
+    finally:
+        await api.close()
+    line(True, "Бот MAX", me.get("username") or me.get("first_name") or str(me.get("user_id")))
+    if hooks:
+        # Бот получает события долгим опросом; подписка-вебхук, скорее всего, перехватит их
+        line(False, "Вебхук MAX", f"у бота есть подписка {hooks[0].get('url')} — удалите её (DELETE /subscriptions)")
+        return False
+    return True
+
+
 async def main() -> int:
     settings = Settings.load()
     services = Services(settings)
     print("Проверка перед запуском\n")
     ok = await check_model(services)
     ok = await check_telegram(settings) and ok
+    ok = await check_max(settings) and ok
     conns = services.db.connections()
     if conns:
-        modes = ", ".join("автоответ" if c.mode == "auto" else "черновики" for c in conns)
+        modes = ", ".join({"auto": "автоответ", "watch": "наблюдение"}.get(c.mode, "черновики") for c in conns)
         line(True, "Подключения", f"{len(conns)} ({modes})")
     else:
         line(None, "Подключения", "пока нет — после запуска добавьте бота: Настройки → Автоматизация чатов")
@@ -83,7 +111,9 @@ async def main() -> int:
     if settings.admin_token == "change-me":
         line(False, "Админка", "смените ADMIN_TOKEN в .env на свой")
     await services.llm.close()
-    print(f"\nАдминка после запуска: http://localhost:{settings.admin_port}/ — токен для входа в .env (ADMIN_TOKEN)")
+    how = (f"вход по логину «{settings.admin_login}»" if settings.admin_login and settings.admin_password_hash
+           else "токен для входа в .env (ADMIN_TOKEN)")
+    print(f"\nАдминка после запуска: http://localhost:{settings.admin_port}/ — {how}")
     print("Запуск: .venv/bin/python -m app" if ok else "Сначала поправьте пункты с ✗.")
     return 0 if ok else 1
 

@@ -11,7 +11,9 @@ from ..services import Services
 log = logging.getLogger(__name__)
 
 
-async def observe(message: Message, services: Services, conn: Connection, text: str) -> None:
+async def observe(message: Message, services: Services, conn: Connection, text: str) -> bool:
+    """Сохранить сообщение в журнал наблюдения и, если это ответ менеджера, собрать кандидатов.
+    Возвращает, новое ли это сообщение (False — повторная доставка без изменений)."""
     # Модель может работать несколько секунд: порядок сообщений и пересборка кандидатов — под одним замком.
     async with services.chat_lock(conn.id, message.chat.id):
         manager = bool(message.from_user and message.from_user.id == conn.owner_user_id)
@@ -20,10 +22,10 @@ async def observe(message: Message, services: Services, conn: Connection, text: 
             role="manager" if manager else "client", text=text, sent_at=message.date.timestamp(),
             reply_to_message_id=message.reply_to_message.message_id if message.reply_to_message else None)
         if not changed:
-            return
+            return False
         services.event("Наблюдение: сохранено сообщение менеджера" if manager else "Наблюдение: сохранено сообщение клиента")
         if not manager or not (message.text or message.caption):
-            return
+            return True
         context = services.db.observation_context(conn.id, message.chat.id, message.message_id)
         if context:
             anchor, question, answer, sources = context
@@ -34,3 +36,4 @@ async def observe(message: Message, services: Services, conn: Connection, text: 
                                                   observation_id=anchor, source_message_ids=sources)
             except Exception:  # noqa: BLE001 — сообщение уже сохранено, сбор знаний не мешает переписке
                 log.exception("Не удалось выделить кандидатов из наблюдения")
+        return True

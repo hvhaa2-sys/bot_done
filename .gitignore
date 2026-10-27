@@ -11,6 +11,7 @@ __pycache__/
 *.sqlite3-*
 eval/results_*.csv
 data/import/
+data/watch/
 *.json
 !eval/simulation/clients.json
 !eval/simulation/manager.json

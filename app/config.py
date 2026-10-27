@@ -52,6 +52,10 @@ class Settings:
     db_path: Path
     kb_dir: Path
     exam_files: str = "eval/questions*.csv"  # контрольные вопросы перед публикацией базы; пусто — без них
+    max_bot_token: str = ""  # второй канал — бот организации в MAX; пусто — MAX выключен
+    max_api_url: str = ""    # пусто — штатный адрес MAX Bot API
+    admin_login: str = ""          # вход в админку по логину и паролю (python -m app.password); пусто — по токену
+    admin_password_hash: str = ""
 
     @classmethod
     def load(cls) -> "Settings":
@@ -85,4 +89,8 @@ class Settings:
             db_path=path("DB_PATH", "data/app.db"),
             kb_dir=path("KB_DIR", "data/kb"),
             exam_files=env("EXAM_FILES", "eval/questions*.csv"),
+            max_bot_token=env("MAX_BOT_TOKEN", ""),
+            max_api_url=env("MAX_API_URL", ""),
+            admin_login=env("ADMIN_LOGIN", ""),
+            admin_password_hash=env("ADMIN_PASSWORD_HASH", ""),
         )

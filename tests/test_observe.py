@@ -83,7 +83,8 @@ def test_observe_never_answers_or_generates_drafts(env):
             caption="Требования к этому макету?")
     assert not env.sent and not env.llm.calls
     assert env.db.observation_stats()["messages"] == 6
-    assert env.db.stats()["total"] == 0
+    # В журнале только обращение для замера времени ответа менеджера — ни ответов бота, ни черновиков
+    assert {r["status"] for r in env.db.recent_dialogs(50)} == {D.WATCH}
 
 
 def test_collects_followups_even_on_existing_pause(env):
@@ -203,11 +204,13 @@ def test_old_draft_button_and_manager_edit_cannot_send(env):
     assert not env.sent and env.db.get_dialog(did)["status"] == D.DRAFT_PENDING
 
 
-def test_no_automatic_summaries_or_candidate_cards(env):
+def test_observe_summary_goes_only_to_owner(env):
+    # Наблюдение (общий режим с 28.10): клиенту — ни слова, владельцу — итоги дня и время своего ответа
     env.msg("Какая длина ролика?", 1)
     env.msg("Ролик до 15 секунд, без звука.", 2, owner=True)
     asyncio.run(maybe_send_summaries(env.bot, env.services))
-    assert not env.sent
+    assert env.sent and all(m["chat_id"] == OWNER for m in env.sent)
+    assert "Наблюдение за день: обращений клиентов — 1, вы ответили на 1" in env.sent[0]["text"]
 
 
 def test_observe_works_without_reply_permission(env):
