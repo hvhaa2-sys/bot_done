@@ -9,7 +9,7 @@ from app import db as D
 from app.channels.flow import process_client_message
 from app.config import ROOT, Settings
 from app.core.assistant import ANSWER, ESCALATE, HOLDING_MESSAGE, Assistant, parse_model_output
-from app.core.knowledge import KnowledgeBase, PriceRow, format_rub, parse_faq, parse_prices
+from app.core.knowledge import KnowledgeBase, PriceRow, SearchHit, format_rub, parse_faq, parse_prices
 from app.core.price_guard import extract_amounts, unknown_amounts
 from app.llm.base import LLMProvider
 from app.services import Services
@@ -683,6 +683,18 @@ def test_client_budget_repeated_in_answer_is_not_a_format_price():
     wrong = "В ДЕПО цифровой экран на фуд-корте — 30 000 ₽ в месяц."
     r = run(Assistant(kb, FakeLLM(wrong), min_score=0).answer("Сколько стоит экран в ДЕПО?"))
     assert r.decision == ESCALATE and r.reason == "format_mismatch:[30000]", "без бюджета в вопросе проверка та же"
+
+
+def test_without_sound_does_not_name_the_sound_screen():
+    """Pro 28.10: «Без звука: 26 250 ₽, со звуком: 20 000 ₽» — верно, а проверка формата считала «без звука» названием
+    строки «экран со звуком»."""
+    rows = [PriceRow("Цифровой экран со звуком", "ДЕПО, Нижний Тагил — фуд-корт", "1 месяц", 20000, ""),
+            PriceRow("Цифровой экран", "ДЕПО, Нижний Тагил — фуд-корт, экран Инцентра", "1 месяц", 26250, "")]
+    kb = KnowledgeBase([], rows, [])
+    hits = [SearchHit(c, 1.0) for c in kb.chunks]
+    ok = "Экран на фуд-корте ДЕПО:\n- Без звука: 26 250 ₽ за месяц\n- Со звуком: 20 000 ₽ за месяц"
+    assert kb.mismatched_formats(ok, hits) == []
+    assert kb.mismatched_formats("Экран на фуд-корте ДЕПО:\n- Со звуком: 26 250 ₽ за месяц", hits) == [26250]
 
 
 def test_weekday_price_named_for_weekend_goes_to_manager():
