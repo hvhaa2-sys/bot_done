@@ -354,7 +354,9 @@ class KnowledgeBase:
         for sentence in re.findall(r"[^.!?\n]+", answer):
             named: frozenset[str] = frozenset()
             for clause in re.findall(r"[^,;:—–]+", sentence):
-                named = vocab.intersection(_VENUE_ALIASES.get(t, t) for t in self.normalize(clause)) or named
+                # «Без звука: 26 250 ₽» не называет формат «экран со звуком» — слово после «без» не считаем
+                said = re.sub(r"\bбез\s+\w+", " ", clause, flags=re.I)
+                named = vocab.intersection(_VENUE_ALIASES.get(t, t) for t in self.normalize(said)) or named
                 for amount in extract_amounts(clause):
                     found = owners.get(amount)
                     if found and named and amount != budget and not any(w & named for w in found) and amount not in bad:
