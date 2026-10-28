@@ -327,6 +327,24 @@ border-bottom:1px solid var(--line)}
 /* движение: короткое и со смыслом — переходы между разделами, новое в списках, ход ожидания; без него всё на месте */
 @view-transition{navigation:auto}
 .side{view-transition-name:side}
+/* жёлтая табличка меню переезжает к новому разделу, а не перескакивает */
+nav a.on{view-transition-name:nav-on}::view-transition-group(nav-on){animation-duration:.3s;animation-timing-function:var(--ease)}
+/* разговор сменяется плавно, без сдвига всей страницы */
+.thread-body{view-transition-name:thread}
+::view-transition-old(thread){animation:vt-out .12s ease-in both}
+::view-transition-new(thread){animation:swap .24s var(--ease) both}
+:root.soft::view-transition-old(root){animation:vt-out .14s ease-in both}
+:root.soft::view-transition-new(root){animation:fade .18s ease-out both}
+/* «Обучение»: карточка уходит влево, следующая приезжает справа — как колода */
+.queue .current{view-transition-name:queue-card}
+::view-transition-old(queue-card){animation:card-out .22s ease-in both}
+::view-transition-new(queue-card){animation:card-in .32s var(--ease) both}
+@keyframes card-out{to{opacity:0;transform:translateX(-28px)}}
+@keyframes card-in{from{opacity:0;transform:translateX(36px)}}
+/* цифры, которые поменялись, откидываются, как на табло */
+@keyframes flip{0%{transform:perspective(320px) rotateX(-90deg);opacity:.3}65%{transform:perspective(320px) rotateX(14deg)}
+100%{transform:none}}
+.flip{transform-origin:50% 0;animation:flip .5s var(--ease) backwards}
 ::view-transition-old(root){animation:vt-out .12s ease-in both}
 ::view-transition-new(root){animation:vt-in .24s var(--ease) both}
 @keyframes vt-out{to{opacity:0}}
@@ -335,7 +353,6 @@ border-bottom:1px solid var(--line)}
 @keyframes swap{from{opacity:0;transform:translateY(4px)}}
 @keyframes fade{from{opacity:0}}
 @keyframes flash{from{background-color:var(--warn-bg)}}
-@keyframes pop{0%{transform:scale(.6)}60%{transform:scale(1.15)}}
 @keyframes grow-y{from{transform:scaleY(0)}}
 @keyframes spin{to{transform:rotate(1turn)}}
 @keyframes blink{0%,80%,100%{opacity:.25}40%{opacity:1}}
@@ -346,7 +363,7 @@ border-bottom:1px solid var(--line)}
 .item.fresh{animation:flash 1.8s var(--ease)}
 .turn.fresh,.chat .msg.fresh,.todo li.fresh{animation:rise .35s var(--ease)}
 .turn:target .msg.me .bubble{animation:flash 1.8s var(--ease)}
-nav .n.fresh{animation:pop .4s var(--ease)}
+
 .note{animation:rise .25s var(--ease)}
 .inbox.to-thread .thread-body>.chat{animation:swap .2s var(--ease)}
 @media(max-width:860px){.inbox.open.to-thread .thread{animation:slide-in .26s var(--ease)}
@@ -444,9 +461,11 @@ const changed = el => $$("input, textarea, select", el).some(f =>
   f.type === "checkbox" || f.type === "radio" ? f.checked !== f.defaultChecked
   : f.tagName === "SELECT" ? [...f.options].some(o => o.selected !== o.defaultSelected)
   : f.value !== f.defaultValue) || !!$("details[data-opened]", el);
-document.addEventListener("toggle", e => {
-  if (e.target.matches?.("main details")) e.target.toggleAttribute("data-opened", e.target.open);
-}, true);
+// Отмечаем только то, что открыл или закрыл человек: браузер шлёт toggle и для блоков, открытых с сервера,
+// и тогда живое обновление вставало бы, пока на экране разговор с формой ответа
+document.addEventListener("click", e => {
+  e.target.closest?.("main details > summary")?.parentElement.setAttribute("data-opened", "");
+});
 async function load(url) {
   const res = await fetch(url, {credentials: "same-origin"});
   if (res.status === 401 || res.status === 403) throw new Error("auth");
@@ -467,10 +486,19 @@ function restore(el, s) {
   if (items && s.items != null) items.scrollTop = s.items;
   if (body) body.scrollTop = s.bottom ? body.scrollHeight : s.body;
 }
+// Цифры, которые поменялись, откидываются, как на табло: счётчики меню, вкладок, числа «Обзора»
+const NUMBERS = ".big, .stat .val, .kpi, .days7 b, .tabs .c, .list-head, .qpos";
+function flipNumbers(old, next) {
+  const before = $$(NUMBERS, old);
+  $$(NUMBERS, next).forEach((el, i) => { if (before[i] && before[i].textContent !== el.textContent) el.classList.add("flip"); });
+}
 function swapNav(doc) {
   const old = $("nav"), next = $("nav", doc);
   if (!old || !next || old.innerHTML === next.innerHTML) return;
-  markFresh(old, next);
+  for (const a of $$("a", next)) {
+    const badge = $(".n", a), was = $(`a[href="${a.getAttribute("href")}"] .n`, old);
+    if (badge && badge.textContent !== was?.textContent) badge.classList.add("flip");
+  }
   old.replaceWith(document.adoptNode(next));
 }
 
@@ -485,11 +513,12 @@ async function poll() {
   if (polling) return;
   if (document.hidden || typing()) return schedule();
   polling = true;
-  const url = location.href;
+  const here = location.href, ask = new URL(here), shown = $(".inbox")?.dataset.chat;
+  if (shown && !ask.searchParams.has("conn")) ask.searchParams.set("keep", shown);  // не перескакивать на новый разговор
   let doc;
-  try { doc = await load(url); } catch (e) { polling = false; if (e.message !== "auth") schedule(); return; }
+  try { doc = await load(ask.href); } catch (e) { polling = false; if (e.message !== "auth") schedule(); return; }
   polling = false;
-  if (url !== location.href || typing()) return schedule();
+  if (here !== location.href || typing()) return schedule();
   const main = $("main"), next = $("main", doc);
   if (!main || !next) return;
   swapNav(doc);
@@ -506,6 +535,7 @@ async function poll() {
     const s = keep(o), bar = $("[data-progress]", o), nbar = $("[data-progress]", n);
     if (bar && nbar) nbar.style.setProperty("--from", bar.dataset.progress);
     markFresh(o, n);
+    flipNumbers(o, n);
     n.setAttribute("data-replaced", "");
     o.replaceWith(document.adoptNode(n));
     restore(n, s);
@@ -513,7 +543,7 @@ async function poll() {
   schedule();
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden && $("main")?.dataset.poll) poll(); });
-document.addEventListener("animationend", e => e.target.classList?.remove("fresh"));
+document.addEventListener("animationend", e => e.target.classList?.remove("fresh", "flip"));
 
 // Ящики «Диалогов» и «Наблюдения»: разговор открывается без перезагрузки, список остаётся на месте
 async function go(url, push = true) {
@@ -522,22 +552,32 @@ async function go(url, push = true) {
   const main = $("main"), next = $("main", doc);
   if (!main || !next) { location.href = url; return; }
   const was = $(".inbox")?.classList.contains("open"), s = keep(main), focused = main.contains(document.activeElement);
+  // На компьютере смену разговора ведёт браузер (View Transitions): переписка плавно сменяется, остальное стоит
+  const smooth = !!document.startViewTransition && !narrow() && !matchMedia("(prefers-reduced-motion: reduce)").matches;
   if (push) history.pushState(null, "", url);
-  document.title = titled(doc.title);
-  swapNav(doc);
-  main.replaceWith(document.adoptNode(next));
-  const inbox = $(".inbox");
-  if (inbox) {
+  const update = () => {
+    document.title = titled(doc.title);
+    swapNav(doc);
+    flipNumbers(main, next);
+    main.replaceWith(document.adoptNode(next));
+    const inbox = $(".inbox");
+    if (!inbox) return;
     const items = $(".items", inbox), on = $(".items .on", inbox);
     if (items && s.items != null) items.scrollTop = s.items;
     if (on && (on.offsetTop < items.scrollTop || on.offsetTop + on.offsetHeight > items.scrollTop + items.clientHeight))
       items.scrollTop = on.offsetTop - 60;
     toLatest(inbox);
     const open = inbox.classList.contains("open");
-    inbox.classList.add(open ? "to-thread" : "to-list");
+    if (!smooth) inbox.classList.add(open ? "to-thread" : "to-list");
     if (narrow() && was !== open) scrollTo({top: Math.max(0, inbox.getBoundingClientRect().top + scrollY - 120)});
     if (focused) (on || $("h1"))?.focus({preventScroll: true});
-  }
+  };
+  if (smooth) {
+    document.documentElement.classList.add("soft");
+    const transition = document.startViewTransition(update);
+    transition.ready.catch(() => {});
+    transition.finished.finally(() => document.documentElement.classList.remove("soft"));
+  } else update();
   schedule();
 }
 document.addEventListener("click", e => {
@@ -726,6 +766,17 @@ palette.addEventListener("click", e => { if (e.target === palette || e.target.cl
 $$("[data-palette]").forEach(b => b.addEventListener("click", openPalette));
 if (!/mac|iphone|ipad/i.test(navigator.userAgentData?.platform || navigator.platform))
   $$("[data-palette] kbd").forEach(k => k.textContent = "Ctrl K");
+
+// «Обзор» при первом открытии за сеанс: цифры недели откидываются по очереди, как на табло
+try {
+  if ($(".week") && !sessionStorage.getItem("board-shown")) {
+    sessionStorage.setItem("board-shown", "1");
+    $$(".week .big, .week .stat .val, .days7 b").forEach((el, i) => {
+      el.style.animationDelay = `${120 + i * 45}ms`;
+      el.classList.add("flip");
+    });
+  }
+} catch {}
 
 settle();
 schedule();
@@ -1062,15 +1113,17 @@ def create_app(services: Services) -> FastAPI:
 
     # --- журнал ---
     @app.get("/dialogs", dependencies=[Depends(auth)])
-    async def dialogs(f: str = "", q: str = "", conn: str = "", chat: str = "", done: str = "") -> Response:
+    async def dialogs(f: str = "", q: str = "", conn: str = "", chat: str = "", done: str = "",
+                      keep: str = "") -> Response:
         if f in ("observe", "watch"):  # раньше наблюдение жило вкладками «Диалогов»
             return RedirectResponse("/observe" + (f"?{urlencode({'q': q})}" if q else ""), status_code=303)
-        return page("Диалоги", dialogs_html(services, f, q, conn, chat, DRAFT_RESULTS.get(done, "")), "/dialogs",
+        return page("Диалоги", dialogs_html(services, f, q, conn, chat, DRAFT_RESULTS.get(done, ""), keep), "/dialogs",
                     wide=True, poll=LIVE_SECONDS)
 
     @app.get("/observe", dependencies=[Depends(auth)])
-    async def observe_page(conn: str = "", chat: str = "", q: str = "") -> HTMLResponse:
-        return page("Наблюдение", observe_html(services, conn, chat, q), "/observe", wide=True, poll=LIVE_SECONDS)
+    async def observe_page(conn: str = "", chat: str = "", q: str = "", keep: str = "") -> HTMLResponse:
+        return page("Наблюдение", observe_html(services, conn, chat, q, keep=keep), "/observe", wide=True,
+                    poll=LIVE_SECONDS)
 
     @app.post("/dialogs/{dialog_id}/flag", dependencies=[Depends(auth)])
     async def flag(dialog_id: int, flagged: int = Form(...), back: str = Form("/dialogs")) -> RedirectResponse:
@@ -1427,7 +1480,8 @@ def import_dir(services: Services) -> Path:
     return services.settings.db_path.parent / "import"
 
 
-def observe_html(services: Services, conn_id: str = "", chat_id: str = "", q: str = "", msg: str = "") -> str:
+def observe_html(services: Services, conn_id: str = "", chat_id: str = "", q: str = "", msg: str = "",
+                 keep: str = "") -> str:
     """Раздел «Наблюдение»: включено ли, главные числа, чаты и переписка по порядку с временем ответа менеджера."""
     conns = [c for c in services.db.connections() if c.approved and not c.id.startswith("max:")]
     if any(c.mode == D.OBSERVE for c in conns):
@@ -1470,7 +1524,7 @@ def observe_html(services: Services, conn_id: str = "", chat_id: str = "", q: st
         body = '<div class="card muted">Сообщений пока нет. Они появятся, когда клиенты напишут в чаты, где подключён бот.</div>'
     else:
         chosen = next((c for c in chats if c["connection_id"] == conn_id and str(c["chat_id"]) == chat_id), None)
-        picked = chosen or chats[0]
+        picked = chosen or next((c for c in chats if f"{c['connection_id']}|{c['chat_id']}" == keep), chats[0])
         items = "".join(
             f"<a class='item{' on' if c is picked else ''}' href='{escape(link(c))}' data-key='{c['chat_id']}:{c['n']}'>"
             f"<span class='nm'>{escape(name(c['chat_id']))}</span>"
@@ -1488,7 +1542,8 @@ def observe_html(services: Services, conn_id: str = "", chat_id: str = "", q: st
             lines.append(f"<div class='msg{' me' if mine else ''}' data-key='{m['id']}'>"
                          f"<div class='muted'>{'Вы' if mine else 'Клиент'} · "
                          f"{when(m['sent_at'])}{note_text}</div><div class='bubble'>{escape(m['text'])}</div></div>")
-        body = f"""<div class="inbox{' open' if chosen else ''}" data-live="inbox">
+        body = f"""<div class="inbox{' open' if chosen else ''}" data-live="inbox"
+data-chat="{escape(f"{picked['connection_id']}|{picked['chat_id']}")}">
 <div class="list"><div class="list-head">Чаты · {len(chats)}</div><div class="items">{items}</div></div>
 <div class="thread"><div class="thread-head"><a class="back" href="/observe">← Все чаты</a>
 <h2>{escape(name(picked['chat_id']))}</h2>
@@ -2123,7 +2178,8 @@ def draft_form_html(r, back: str) -> str:
             f"{skip}</form>")
 
 
-def dialogs_html(services: Services, f: str, q: str, conn: str = "", chat: str = "", msg: str = "") -> str:
+def dialogs_html(services: Services, f: str, q: str, conn: str = "", chat: str = "", msg: str = "",
+                 keep: str = "") -> str:
     """«Диалоги» как ящик поддержки: слева разговоры по чатам, справа переписка выбранного с решениями бота."""
     f, q = (f if f in FILTERS else ""), q.strip()
     tabs = "".join(
@@ -2141,7 +2197,8 @@ def dialogs_html(services: Services, f: str, q: str, conn: str = "", chat: str =
                  "Здесь появятся разговоры, в которых участвует бот. Проверить его можно на «Обзоре».")
         return f'{head}<div class="card empty">{empty}</div>'
     chosen = next((k for k in chats if k[0] == conn and str(k[1]) == chat), None)
-    picked = chosen or next(iter(chats))
+    # keep — разговор, который уже на экране: живое обновление не перескакивает на новый
+    picked = chosen or next((k for k in chats if f"{k[0]}|{k[1]}" == keep), None) or next(iter(chats))
     items = []
     for key, rows in chats.items():
         last, name = rows[0], chat_title(services, *key)
@@ -2160,7 +2217,8 @@ def dialogs_html(services: Services, f: str, q: str, conn: str = "", chat: str =
     to_list = "/dialogs" + (f"?{urlencode({k: v for k, v in (('f', f), ('q', q)) if v})}" if f or q else "")
     export = ('<p><a class="btn light" href="/dialogs/flagged.csv">Скачать для экзамена (CSV)</a> '
               '<span class="muted">только проверенные примеры</span></p>' if f == "flagged" else "")
-    return f"""{head}{export}<div class="inbox{" open" if chosen else ""}" data-live="inbox">
+    return f"""{head}{export}<div class="inbox{" open" if chosen else ""}" data-live="inbox"
+data-chat="{escape(f"{picked[0]}|{picked[1]}")}">
 <div class="list"><div class="list-head">Разговоры · {len(chats)}</div><div class="items">{"".join(items)}</div></div>
 <div class="thread"><div class="thread-head"><a class="back" href="{escape(to_list)}">← Все разговоры</a>
 <h2>{escape(chat_title(services, *picked))}</h2>
