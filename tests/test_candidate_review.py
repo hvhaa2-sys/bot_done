@@ -215,7 +215,8 @@ def test_ui_keeps_similar_questions_of_different_scopes_in_separate_forms(servic
     for question, answer in SCOPED_FACTS:
         add(services, question, answer, source=SCOPED_SOURCE)
     response = client_for(services).get("/learn")
-    assert response.text.count('action="/candidates/approve"') == 3
+    # «Обучение» — очередь: один факт с формой, остальные — строками справа; группы не склеились в одну
+    assert "1 из 3" in response.text and response.text.count('class="qitem"') == 2
     assert 'name="source_reviewed"' not in response.text
 
 

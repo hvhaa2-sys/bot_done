@@ -3,6 +3,8 @@
 !requirements.lock
 !app/
 !app/**/*.py
+!app/static/
+!app/static/**
 !eval/
 !eval/*.py
 !eval/questions*.csv
