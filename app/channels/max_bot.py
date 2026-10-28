@@ -440,6 +440,7 @@ async def run_max(api: MaxApi, services: Services) -> None:
         delay = min(delay * 2, 60)
 
     bot = MaxBot(api, services, me.get("user_id", 0))
+    services.client_senders["max"] = lambda _conn_id, chat_id, text: bot.send(chat_id, text)
     services.max_status = {"ok": True, "username": me.get("username") or "", "name": me.get("first_name") or ""}
     log.info("Бот MAX %s запущен", me.get("username") or me.get("first_name") or me.get("user_id"))
     summary = asyncio.create_task(summary_loop(bot))
