@@ -125,3 +125,16 @@ def test_brand_is_the_business_and_week_compares_in_words(tmp_path):
     assert 'class="logo" aria-hidden="true"></span><span>Инцентр' in page and "помощник менеджера" in page
     assert '<rect class="bar today"' in page and 'class="was"' in page, "сегодня выделено, неделя назад — чертой"
     assert "Передано вам" in page and "неделей раньше 0" in page and "неделей раньше 100%" in page
+
+
+def test_live_update_keeps_the_conversation_on_screen(tmp_path):
+    client, services = make_client(tmp_path)
+    services.chat_names.update({5: "Анна К.", 6: "Ильдар"})
+    log(services, 5, "Сколько стоит экран?", D.SENT_AUTO, ago=60)
+    page = client.get("/dialogs").text
+    assert 'data-chat="tg:1|5"' in page and 'class="inbox"' in page
+    log(services, 6, "Новый вопрос", D.ESCALATED, "escalate")  # пришёл новый разговор, он теперь первый
+    polled = client.get("/dialogs?keep=tg:1|5").text
+    assert polled.split('class="thread"')[1].count("Сколько стоит экран?") and 'class="inbox"' in polled, \
+        "на экране тот же разговор, на телефоне по-прежнему список"
+    assert "Новый вопрос" in client.get("/dialogs").text.split('class="thread"')[1], "без keep — свежий"
