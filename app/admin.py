@@ -67,6 +67,7 @@ IMPORT_FILES = {"faq_draft.md": "text/markdown", "questions_real.csv": "text/csv
 EXAM_KEY = "exam_last"
 # ₽ за 1000 токенов по тарифам GigaChat API для юрлиц (октябрь 2026) — для оценки расхода в админке
 PRICE_PER_1K = {"GigaChat": 0.065, "GigaChat-Pro": 0.5, "GigaChat-Max": 0.65}
+LIVE_SECONDS = 15  # раз в сколько секунд «Обзор», «Диалоги» и «Наблюдение» подтягивают новое без перезагрузки
 LOGIN_TRIES, LOGIN_WINDOW = 5, 600  # не больше 5 неверных токенов за 10 минут с одного адреса
 
 CSS = """
@@ -159,7 +160,7 @@ button.small{min-height:34px;padding:5px 12px;font-size:13.5px}
 button:disabled{opacity:.45;cursor:not-allowed;transform:none}
 @media(pointer:coarse){button.small{min-height:40px}}
 @media(max-width:640px){textarea,input,select{font-size:16px}main{padding:18px 12px 48px}.card{padding:16px}}
-@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+[hidden]{display:none!important}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 .days{display:flex;gap:6px;flex-wrap:wrap}.days label{margin:0;font-weight:400;border:1px solid var(--line-strong);
 border-radius:var(--radius-sm);padding:8px 12px;cursor:pointer;min-height:40px}.days input{margin-right:6px}
@@ -275,6 +276,54 @@ border-bottom:1px solid var(--line)}
 .todo b{flex:none;white-space:nowrap}
 .todo .q{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 @media(max-width:860px){.week{grid-template-columns:1fr;gap:20px}}
+/* движение: короткое и со смыслом — переходы между разделами, новое в списках, ход ожидания; без него всё на месте */
+@view-transition{navigation:auto}
+.side{view-transition-name:side}
+::view-transition-old(root){animation:vt-out .12s ease-in both}
+::view-transition-new(root){animation:vt-in .24s var(--ease) both}
+@keyframes vt-out{to{opacity:0}}
+@keyframes vt-in{from{opacity:0;transform:translateY(6px)}}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}}
+@keyframes swap{from{opacity:0;transform:translateY(4px)}}
+@keyframes fade{from{opacity:0}}
+@keyframes flash{from{background-color:var(--warn-bg)}}
+@keyframes pop{0%{transform:scale(.6)}60%{transform:scale(1.15)}}
+@keyframes draw{from{stroke-dashoffset:1}}
+@keyframes spin{to{transform:rotate(1turn)}}
+@keyframes blink{0%,80%,100%{opacity:.25}40%{opacity:1}}
+@keyframes slide-in{from{opacity:0;transform:translateX(24px)}}
+@keyframes slide-back{from{opacity:0;transform:translateX(-24px)}}
+@keyframes grow{from{transform:scaleX(var(--from,0))}}
+.item{transition:background-color .15s var(--ease)}
+.item.fresh{animation:flash 1.8s var(--ease)}
+.turn.fresh,.chat .msg.fresh,.todo li.fresh{animation:rise .35s var(--ease)}
+nav .n.fresh{animation:pop .4s var(--ease)}
+.note{animation:rise .25s var(--ease)}
+.inbox.to-thread .thread-body>.chat{animation:swap .2s var(--ease)}
+@media(max-width:860px){.inbox.open.to-thread .thread{animation:slide-in .26s var(--ease)}
+.inbox.to-list .list{animation:slide-back .26s var(--ease)}.inbox.to-thread .thread-body>.chat{animation:none}}
+.chart .line,.spark polyline{stroke-dasharray:1;animation:draw 1s var(--ease) .15s both}
+.spark polyline{animation-duration:.8s;animation-delay:.35s}
+.chart .prev{animation:fade .6s ease-out .2s both}.chart .area{animation:fade .6s ease-out .6s both}
+.chart circle{transform-box:fill-box;transform-origin:center;animation:pop .35s var(--ease) 1.05s both}
+[data-replaced] .chart *,[data-replaced] .spark *{animation:none}
+button[aria-busy="true"]{cursor:progress}button[aria-busy="true"]:disabled{opacity:.85}
+button[aria-busy="true"]::before{content:"";width:14px;height:14px;flex:none;border-radius:50%;border:2px solid currentColor;
+border-right-color:transparent;animation:spin .7s linear infinite}
+.typing{display:inline-flex;align-items:center;gap:6px;margin-top:12px;padding:10px 14px;border:1px solid var(--line);
+border-radius:14px 14px 14px 4px;background:var(--bg);color:var(--muted);font-size:14px;animation:rise .25s var(--ease)}
+.typing i{width:6px;height:6px;border-radius:50%;background:currentColor;animation:blink 1.2s infinite both}
+.typing i:nth-child(2){animation-delay:.2s}.typing i:nth-child(3){animation-delay:.4s;margin-right:4px}
+.progress{height:8px;margin:12px 0 4px;border-radius:99px;background:var(--bg);overflow:hidden}
+.progress i{display:block;height:100%;background:var(--accent);transform-origin:left;transform:scaleX(var(--p));
+animation:grow .5s var(--ease)}
+.savebar{position:sticky;bottom:12px;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:12px;
+margin-top:16px;padding:8px 8px 8px 18px;border-radius:var(--radius);background:var(--ink);color:var(--on-ink);
+box-shadow:0 10px 28px -8px rgb(0 0 0/.35);animation:rise .2s var(--ease)}
+.savebar button{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.keys{display:none;margin-left:8px;opacity:.8}@media(hover:hover) and (pointer:fine){.keys{display:inline}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important}
+::view-transition-group(*),::view-transition-old(*),::view-transition-new(*){animation:none!important}.typing i{opacity:.7}}
 """
 
 NAV = [("/", "Обзор"), ("/dialogs", "Диалоги"), ("/observe", "Наблюдение"), ("/learn", "Обучение"), ("/kb", "База знаний"),
@@ -305,28 +354,219 @@ def _icon_rule(href: str, paths: str) -> str:
 CSS += "".join(_icon_rule(href, paths) for href, paths in NAV_ICONS.items())
 
 
+# Поведение страниц без перезагрузки: живые блоки (data-live), переходы в ящиках, ожидание после отправки,
+# Enter в проверке бота, клавиши, напоминание о несохранённых настройках. Без JavaScript всё работает ссылками и формами.
+JS = """(() => {
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const narrow = () => matchMedia("(max-width: 860px)").matches;
+const typing = () => document.activeElement?.matches("main input, main textarea, main select");
+// Плавный переход между разделами браузер пропускает, если быстро нажать ещё раз, — это не ошибка
+for (const type of ["pageswap", "pagereveal"]) addEventListener(type, e => e.viewTransition?.ready.catch(() => {}));
+
+function settle() {
+  $("nav .on")?.scrollIntoView({inline: "center", block: "nearest"});
+  $$(".thread-body").forEach(e => e.scrollTop = e.scrollHeight);
+  const on = $(".items .on");
+  if (on) on.parentElement.scrollTop = on.offsetTop - 60;
+}
+async function load(url) {
+  const res = await fetch(url, {credentials: "same-origin"});
+  if (res.status === 401 || res.status === 403) throw new Error("auth");
+  if (!res.ok || new URL(res.url).pathname !== new URL(url, location.href).pathname) throw new Error("other");
+  return new DOMParser().parseFromString(await res.text(), "text/html");
+}
+function markFresh(old, next) {
+  const seen = new Set($$("[data-key]", old).map(e => e.dataset.key));
+  $$("[data-key]", next).forEach(e => { if (!seen.has(e.dataset.key)) e.classList.add("fresh"); });
+}
+function keep(el) {
+  const items = $(".items", el), body = $(".thread-body", el);
+  return {items: items?.scrollTop, body: body?.scrollTop,
+          bottom: !body || body.scrollHeight - body.scrollTop - body.clientHeight < 60};
+}
+function restore(el, s) {
+  const items = $(".items", el), body = $(".thread-body", el);
+  if (items && s.items != null) items.scrollTop = s.items;
+  if (body) body.scrollTop = s.bottom ? body.scrollHeight : s.body;
+}
+function swapNav(doc) {
+  const old = $("nav"), next = $("nav", doc);
+  if (!old || !next || old.innerHTML === next.innerHTML) return;
+  markFresh(old, next);
+  old.replaceWith(document.adoptNode(next));
+}
+
+// Живое обновление: новые разговоры, сообщения и счётчики появляются сами, пока вкладка открыта
+let timer, polling = false;
+function schedule() {
+  clearTimeout(timer);
+  const s = Number($("main")?.dataset.poll);
+  if (s) timer = setTimeout(poll, s * 1000);
+}
+async function poll() {
+  if (polling) return;
+  if (document.hidden || typing()) return schedule();
+  polling = true;
+  const url = location.href;
+  let doc;
+  try { doc = await load(url); } catch (e) { polling = false; if (e.message !== "auth") schedule(); return; }
+  polling = false;
+  if (url !== location.href || typing()) return schedule();
+  const main = $("main"), next = $("main", doc);
+  if (!main || !next) return;
+  swapNav(doc);
+  const keys = el => $$("[data-live]", el).map(e => e.dataset.live).join();
+  if (!next.dataset.poll || keys(main) !== keys(next)) {  // экзамен закончился или появился новый блок
+    main.replaceWith(document.adoptNode(next));
+    settle();
+    return schedule();
+  }
+  for (const n of $$("[data-live]", next)) {
+    const o = $(`[data-live="${n.dataset.live}"]`, main);
+    if (!o || o.innerHTML === n.innerHTML) continue;
+    const s = keep(o), bar = $("[data-progress]", o), nbar = $("[data-progress]", n);
+    if (bar && nbar) nbar.style.setProperty("--from", bar.dataset.progress);
+    markFresh(o, n);
+    n.setAttribute("data-replaced", "");
+    o.replaceWith(document.adoptNode(n));
+    restore(n, s);
+  }
+  schedule();
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden && $("main")?.dataset.poll) poll(); });
+document.addEventListener("animationend", e => e.target.classList?.remove("fresh"));
+
+// Ящики «Диалогов» и «Наблюдения»: разговор открывается без перезагрузки, список остаётся на месте
+async function go(url, push = true) {
+  let doc;
+  try { doc = await load(url); } catch { location.href = url; return; }
+  const main = $("main"), next = $("main", doc);
+  if (!main || !next) { location.href = url; return; }
+  const was = $(".inbox")?.classList.contains("open"), s = keep(main), focused = main.contains(document.activeElement);
+  if (push) history.pushState(null, "", url);
+  document.title = doc.title;
+  swapNav(doc);
+  main.replaceWith(document.adoptNode(next));
+  const inbox = $(".inbox");
+  if (inbox) {
+    const items = $(".items", inbox), on = $(".items .on", inbox);
+    if (items && s.items != null) items.scrollTop = s.items;
+    if (on && (on.offsetTop < items.scrollTop || on.offsetTop + on.offsetHeight > items.scrollTop + items.clientHeight))
+      items.scrollTop = on.offsetTop - 60;
+    $$(".thread-body", inbox).forEach(e => e.scrollTop = e.scrollHeight);
+    const open = inbox.classList.contains("open");
+    inbox.classList.add(open ? "to-thread" : "to-list");
+    if (narrow() && was !== open) scrollTo({top: Math.max(0, inbox.getBoundingClientRect().top + scrollY - 120)});
+    if (focused) (on || $("h1"))?.focus({preventScroll: true});
+  }
+  schedule();
+}
+document.addEventListener("click", e => {
+  const a = e.target.closest("a[href]");
+  if (!a || e.defaultPrevented || e.button || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  if (!a.closest(".inbox, .toolbar") || a.origin !== location.origin || a.pathname !== location.pathname) return;
+  e.preventDefault();
+  go(a.href);
+});
+addEventListener("popstate", () => go(location.href, false));
+
+// Отправка форм: поиск — без перезагрузки, остальное — с ожиданием на кнопке и без двойного нажатия
+document.addEventListener("submit", e => {
+  const form = e.target;
+  if (e.defaultPrevented) return;
+  if (form.method === "get" && form.closest(".toolbar")) {
+    const url = new URL(form.action);
+    if (url.pathname === location.pathname) {
+      e.preventDefault();
+      url.search = new URLSearchParams(new FormData(form));
+      go(url.href);
+    }
+    return;
+  }
+  if (form.method !== "post") return;
+  if (form.dataset.sending) { e.preventDefault(); return; }
+  form.dataset.sending = "1";
+  const button = e.submitter || $("button:not([type=button])", form);
+  if (button) {
+    button.setAttribute("aria-busy", "true");
+    setTimeout(() => { button.disabled = true; });
+  }
+  if (form.hasAttribute("data-typing") && !e.submitter?.hasAttribute("formaction"))
+    form.insertAdjacentHTML("afterend", '<div class="typing" role="status"><i></i><i></i><i></i>Бот думает…</div>');
+});
+addEventListener("pageshow", e => {  // вернулись кнопкой «Назад» — кнопки снова доступны
+  if (!e.persisted) return;
+  $$("[aria-busy=true]").forEach(b => { b.removeAttribute("aria-busy"); b.disabled = false; });
+  $$("form[data-sending]").forEach(f => delete f.dataset.sending);
+  $$(".typing").forEach(t => t.remove());
+});
+
+// Клавиши: Enter — спросить бота, / — поиск, ↑ ↓ — соседний разговор, Esc — к списку на телефоне
+document.addEventListener("keydown", e => {
+  const t = e.target;
+  if (t.matches?.("textarea[data-enter-send]") && e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    if (t.value.trim()) t.form.requestSubmit();
+    return;
+  }
+  if (t.closest?.("input, textarea, select, [contenteditable]") || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === "/") {
+    const search = $("main input[type=search]");
+    if (search) { e.preventDefault(); search.focus(); search.select(); }
+  } else if (["ArrowDown", "ArrowUp", "j", "k"].includes(e.key) && $(".items")) {
+    const items = $$(".items .item"), i = items.findIndex(x => x.classList.contains("on"));
+    const next = items[i + (e.key === "ArrowDown" || e.key === "j" ? 1 : -1)];
+    if (next) { e.preventDefault(); go(next.href); }
+  } else if (e.key === "Escape") {
+    const back = $(".inbox.open .back");
+    if (back && narrow()) go(back.href);
+  }
+});
+
+// Настройки: изменили и не сохранили — внизу появляется полоса «Сохранить», уйти без неё браузер не даст молча
+$$("form[data-dirty]").forEach(form => {
+  const bar = document.createElement("div");
+  bar.className = "savebar";
+  bar.hidden = true;
+  bar.setAttribute("role", "status");
+  bar.innerHTML = '<span>Есть несохранённые изменения</span><button type="button">Сохранить</button>';
+  bar.querySelector("button").addEventListener("click", () => form.requestSubmit());
+  form.append(bar);
+  const state = () => new URLSearchParams(new FormData(form)).toString(), start = state();
+  const check = () => { bar.hidden = state() === start; };
+  form.addEventListener("input", check);
+  form.addEventListener("change", check);
+  addEventListener("beforeunload", e => { if (!bar.hidden && !form.dataset.sending) e.preventDefault(); });
+});
+
+settle();
+schedule();
+})();"""
+
+
 def render_page(title: str, body: str, active: str = "/", refresh: int | None = None, *,
-                wide: bool = False, badges: dict[str, int] | None = None) -> HTMLResponse:
-    """Страница админки: меню слева, справа раздел. wide — для ящиков «Диалогов» и «Наблюдения» во всю ширину."""
+                wide: bool = False, badges: dict[str, int] | None = None, poll: int | None = None) -> HTMLResponse:
+    """Страница админки: меню слева, справа раздел. wide — для ящиков «Диалогов» и «Наблюдения» во всю ширину.
+    poll — раз в сколько секунд скрипт подтягивает блоки с data-live (новые сообщения, счётчики) без перезагрузки;
+    refresh — то же для страниц, которые меняются целиком (экзамен), а без JavaScript — обычное обновление."""
     current = ' class="on" aria-current="page"'
     links = []
     for href, name in NAV:
         if href in NAV_GROUPS:
             links.append(f'<span class="grp">{NAV_GROUPS[href]}</span>')
         count = (badges or {}).get(href)
-        badge = f'<span class="n" title="ждут вас">{count}</span>' if count else ""
+        badge = f'<span class="n" data-key="{href}:{count}" title="ждут вас">{count}</span>' if count else ""
         links.append(f'<a href="{href}"{current if href == active else ""}>{name}{badge}</a>')
-    meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
+    meta = f'<noscript><meta http-equiv="refresh" content="{refresh}"></noscript>' if refresh else ""
+    poll = poll or refresh
     return HTMLResponse(f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">{meta}<title>{escape(title)}</title>
 <style>{CSS}</style></head><body><a class="skip" href="#main">К содержимому</a><div class="shell"><aside class="side">
 <a class="brand" href="/"><span class="logo" aria-hidden="true">ИИ</span>Помощник менеджера</a>
-<nav aria-label="Разделы">{"".join(links)}</nav><a class="logout" href="/logout">Выйти</a></aside>
-<main id="main"{' class="wide"' if wide else ""}>{body}</main></div>
-<script>document.querySelector("nav .on")?.scrollIntoView({{inline:"center",block:"nearest"}});
-document.querySelectorAll(".thread-body").forEach(e => e.scrollTop = e.scrollHeight);
-const picked = document.querySelector(".items .on");
-if (picked) picked.parentElement.scrollTop = picked.offsetTop - 60;</script></body></html>""")
+<nav aria-label="Разделы" data-live="nav">{"".join(links)}</nav><a class="logout" href="/logout">Выйти</a></aside>
+<main id="main"{' class="wide"' if wide else ""}{f' data-poll="{poll}"' if poll else ""}>{body}</main></div>
+<script>{JS}</script></body></html>""")
 
 
 def nav_badges(services: Services) -> dict[str, int]:
@@ -370,8 +610,8 @@ def create_app(services: Services) -> FastAPI:
     onboarding_lock = asyncio.Lock()
 
     def page(title: str, body: str, active: str = "/", refresh: int | None = None, *,
-             wide: bool = False) -> HTMLResponse:
-        return render_page(title, body, active, refresh, wide=wide, badges=nav_badges(services))
+             wide: bool = False, poll: int | None = None) -> HTMLResponse:
+        return render_page(title, body, active, refresh, wide=wide, badges=nav_badges(services), poll=poll)
 
     failures: dict[str, list[float]] = {}
 
@@ -544,7 +784,7 @@ def create_app(services: Services) -> FastAPI:
     # --- обзор и тестовый чат ---
     @app.get("/", dependencies=[Depends(auth)])
     async def dashboard() -> HTMLResponse:
-        return page("Обзор", dashboard_html(services))
+        return page("Обзор", dashboard_html(services), poll=LIVE_SECONDS)
 
     @app.post("/sandbox", dependencies=[Depends(auth)])
     async def sandbox(request: Request, question: str = Form(...)) -> HTMLResponse:
@@ -615,11 +855,11 @@ def create_app(services: Services) -> FastAPI:
     async def dialogs(f: str = "", q: str = "", conn: str = "", chat: str = "") -> Response:
         if f in ("observe", "watch"):  # раньше наблюдение жило вкладками «Диалогов»
             return RedirectResponse("/observe" + (f"?{urlencode({'q': q})}" if q else ""), status_code=303)
-        return page("Диалоги", dialogs_html(services, f, q, conn, chat), "/dialogs", wide=True)
+        return page("Диалоги", dialogs_html(services, f, q, conn, chat), "/dialogs", wide=True, poll=LIVE_SECONDS)
 
     @app.get("/observe", dependencies=[Depends(auth)])
     async def observe_page(conn: str = "", chat: str = "", q: str = "") -> HTMLResponse:
-        return page("Наблюдение", observe_html(services, conn, chat, q), "/observe", wide=True)
+        return page("Наблюдение", observe_html(services, conn, chat, q), "/observe", wide=True, poll=LIVE_SECONDS)
 
     @app.post("/dialogs/{dialog_id}/flag", dependencies=[Depends(auth)])
     async def flag(dialog_id: int, flagged: int = Form(...), back: str = Form("/dialogs")) -> RedirectResponse:
@@ -963,7 +1203,7 @@ def observe_html(services: Services, conn_id: str = "", chat_id: str = "", q: st
                  "или /mode observe в чате с ботом.</p>")
     stats, waits = services.db.observation_stats(), services.watch_stats() or {}
     median = waits.get("median_wait_min")
-    kpis = f"""<div class="kpis">
+    kpis = f"""<div class="kpis" data-live="kpis">
 <div class="card"><div class="muted">Сообщений</div><div class="kpi">{stats['messages']}</div></div>
 <div class="card"><div class="muted">Чатов</div><div class="kpi">{stats['chats']}</div></div>
 <div class="card"><div class="muted">Обычно вы отвечаете через</div><div class="kpi">{minutes_text(median) if median is not None else "—"}</div></div>
@@ -997,7 +1237,7 @@ def observe_html(services: Services, conn_id: str = "", chat_id: str = "", q: st
         chosen = next((c for c in chats if c["connection_id"] == conn_id and str(c["chat_id"]) == chat_id), None)
         picked = chosen or chats[0]
         items = "".join(
-            f"<a class='item{' on' if c is picked else ''}' href='{escape(link(c))}'>"
+            f"<a class='item{' on' if c is picked else ''}' href='{escape(link(c))}' data-key='{c['chat_id']}:{c['n']}'>"
             f"{avatar(name(c['chat_id']), str(c['chat_id']))}<span class='nm'>{escape(name(c['chat_id']))}</span>"
             f"<span class='tm'>{short_time(c['last_at'])}</span>"
             f"<span class='pv'>{plural(c['n'], 'сообщение', 'сообщения', 'сообщений')}</span></a>"
@@ -1010,9 +1250,10 @@ def observe_html(services: Services, conn_id: str = "", chat_id: str = "", q: st
                 waiting = m["sent_at"]  # обращение — первое сообщение клиента после вашего ответа
             elif mine and waiting is not None:
                 note_text, waiting = f" · ответ через {minutes_text((m['sent_at'] - waiting) / 60)}", None
-            lines.append(f"<div class='msg{' me' if mine else ''}'><div class='muted'>{'Вы' if mine else 'Клиент'} · "
+            lines.append(f"<div class='msg{' me' if mine else ''}' data-key='{m['id']}'>"
+                         f"<div class='muted'>{'Вы' if mine else 'Клиент'} · "
                          f"{when(m['sent_at'])}{note_text}</div><div class='bubble'>{escape(m['text'])}</div></div>")
-        body = f"""<div class="inbox{' open' if chosen else ''}">
+        body = f"""<div class="inbox{' open' if chosen else ''}" data-live="inbox">
 <div class="list"><div class="list-head">Чаты · {len(chats)}</div><div class="items">{items}</div></div>
 <div class="thread"><div class="thread-head"><a class="back" href="/observe">← Все чаты</a>
 <h2>{escape(name(picked['chat_id']))}</h2>
@@ -1077,7 +1318,7 @@ def chart_svg(week: list[int], before: list[int]) -> str:
     label = ", ".join(f"{WEEKDAYS[i]} {v}" for i, v in enumerate(week))
     return (f'<svg class="chart" viewBox="0 0 {w} 146" role="img" aria-label="Обращения за 7 дней по дням: {label}">'
             f'{grid}<polyline class="prev" points="{" ".join(f"{x:.1f},{y:.1f}" for x, y in prev)}"/>'
-            f'<path class="area" d="{area}"/><polyline class="line" points="{line}"/>'
+            f'<path class="area" d="{area}"/><polyline class="line" pathLength="1" points="{line}"/>'
             f'<circle cx="{now[-1][0]:.1f}" cy="{now[-1][1]:.1f}" r="4.5"/></svg>')
 
 
@@ -1087,7 +1328,7 @@ def spark_svg(values: list[float]) -> str:
     span = (hi - lo) or 1
     pts = " ".join(f"{2 + i * (w - 4) / (len(values) - 1):.1f},{h - 3 - (v - lo) / span * (h - 6):.1f}"
                    for i, v in enumerate(values))
-    return f'<svg class="spark" viewBox="0 0 {w} {h}" aria-hidden="true"><polyline points="{pts}"/></svg>'
+    return f'<svg class="spark" viewBox="0 0 {w} {h}" aria-hidden="true"><polyline pathLength="1" points="{pts}"/></svg>'
 
 
 def week_html(services: Services) -> str:
@@ -1119,7 +1360,7 @@ def week_html(services: Services) -> str:
     side = "".join(f'<div class="stat"><div class="lbl">{name}</div><div class="val">{value}</div>{spark}{hint}</div>'
                    for name, value, spark, hint in stats)
     s = services.db.stats()
-    return f"""<div class="card"><div class="week"><div>
+    return f"""<div class="card" data-live="week"><div class="week"><div>
 <div class="muted">Обращения клиентов за 7 дней</div><div class="big">{total}{delta}</div>
 <div class="legend"><span><i></i>эта неделя</span><span><i class="prev"></i>прошлая · {was}</span></div>
 {chart_svg([d["questions"] for d in week], [d["questions"] for d in before])}<div class="days7">{labels}</div></div>
@@ -1134,7 +1375,8 @@ def attention_html(services: Services) -> str:
     for c in services.db.connections():
         if not c.approved:
             who = escape(services.owner_names.get(c.owner_user_id, f"id {c.owner_user_id}"))
-            rows.append(f'<li><span class="pill warn">Подключение</span><a href="#connections"><b>{who}</b>'
+            rows.append(f'<li data-key="conn:{escape(c.id)}"><span class="pill warn">Подключение</span>'
+                        f'<a href="#connections"><b>{who}</b>'
                         f'<span class="q">ждёт разрешения</span></a><span></span></li>')
     for r in services.db.attention():
         if r["flagged"] and not r["reviewed"]:
@@ -1142,26 +1384,27 @@ def attention_html(services: Services) -> str:
         else:
             tag = "Черновик" if r["status"] == D.DRAFT_PENDING else "Менеджеру"
             href = chat_link(r["connection_id"], r["chat_id"])
-        rows.append(f'<li><span class="pill warn">{tag}</span><a href="{escape(href)}">'
+        rows.append(f'<li data-key="{r["id"]}:{tag}"><span class="pill warn">{tag}</span><a href="{escape(href)}">'
                     f'<b>{escape(chat_title(services, r["connection_id"], r["chat_id"]))}</b>'
                     f'<span class="q">{escape(r["question"])}</span></a>'
                     f'<span class="muted">{short_time(r["created_at"])}</span></li>')
     body = (f'<ul class="todo">{"".join(rows)}</ul>' if rows else
             '<p class="muted">Ничего не ждёт: черновиков без решения и передач за сутки нет.</p>')
-    return f'<div class="card"><h2>Требуют внимания</h2>{body}</div>'
+    return f'<div class="card" data-live="todo"><h2>Требуют внимания</h2>{body}</div>'
 
 
 def dashboard_html(services: Services, question: str = "", result: str = "") -> str:
     sandbox = f"""<div class="card"><h2>Проверить бота</h2>
 <p class="muted">Напишите вопрос как клиент — бот ответит здесь, клиенту ничего не уйдёт.</p>
-<form method="post" action="/sandbox"><textarea name="question" rows="2" required
+<form method="post" action="/sandbox" data-typing><textarea name="question" rows="2" required data-enter-send
+aria-label="Вопрос как от клиента"
 placeholder="Сколько стоит экран на фуд-корте в ВЕЕР Молл?">{escape(question)}</textarea>
 <p class="row"><button>Спросить</button>
 <button class="light" formaction="/sandbox/reset" formnovalidate>Новый разговор</button></p></form>{result}</div>"""
 
     return f"""<h1>Обзор</h1>{onboarding.banner(services)}{connect_guide_html(services)}{week_html(services)}
 <div class="cols"><div>{attention_html(services)}{sandbox}</div>
-<div class="card"><h2>Состояние</h2>{status_html(services)}</div></div>{before_after_html(services)}{growth_html(services)}
+<div class="card" data-live="status"><h2>Состояние</h2>{status_html(services)}</div></div>{before_after_html(services)}{growth_html(services)}
 {activity_html(services)}{connections_html(services)}"""
 
 
@@ -1301,8 +1544,8 @@ def activity_html(services: Services) -> str:
                    for t, text in reversed(list(services.events)[-20:]))
     table = (f"<div class='scroll'><table>{rows}</table></div>" if rows
              else "<p class='muted'>Пока ничего не происходило.</p>")
-    return f"""<div class="card"><h2>Что делает бот</h2>{paused}{table}
-<p class="muted">Обновите страницу, чтобы увидеть новые события. Полный журнал — в «Диалогах».</p></div>"""
+    return f"""<div class="card" data-live="activity"><h2>Что делает бот</h2>{paused}{table}
+<p class="muted">Новые события появляются сами, пока страница открыта. Полный журнал — в «Диалогах».</p></div>"""
 
 
 def silent_options(c) -> str:
@@ -1538,7 +1781,7 @@ def turn_html(r, back: str, titles: dict[str, str]) -> str:
                  f"<input type='hidden' name='flagged' value='{0 if flagged else 1}'>"
                  f"<input type='hidden' name='back' value='{escape(back)}'>"
                  f"<button class='small {'' if flagged else 'light'}'>{'Снять' if flagged else 'Ошибка'}</button></form>")
-    return (f"<div class='turn{' flag' if flagged else ''}'>"
+    return (f"<div class='turn{' flag' if flagged else ''}' data-key='{r['id']}:{status}:{int(flagged)}'>"
             f"<div class='msg'><div class='muted'>Клиент · {when}</div><div class='bubble'>{escape(r['question'])}</div></div>"
             f"<div class='msg me'><div class='muted'>Бот · {status_pill(status)}</div>{text}</div>"
             f"<div class='why'>{f'<span>{why}</span>' if why else ''}{review_link(r)}{flag_form}</div></div>")
@@ -1553,7 +1796,7 @@ def dialogs_html(services: Services, f: str, q: str, conn: str = "", chat: str =
     search = f"""<form method="get" action="/dialogs" role="search"><input type="hidden" name="f" value="{f}">
 <input type="search" name="q" value="{escape(q)}" placeholder="Поиск по вопросам и ответам" aria-label="Поиск по вопросам и ответам">
 <button class="light">Найти</button></form>"""
-    head = f'<h1>Диалоги</h1><div class="toolbar"><div class="tabs">{tabs}</div>{search}</div>'
+    head = f'<h1>Диалоги</h1><div class="toolbar"><div class="tabs" data-live="tabs">{tabs}</div>{search}</div>'
     chats: dict[tuple[str, int], list] = {}
     for r in services.db.recent_dialogs(500, query=q, **FILTERS[f][1]):
         chats.setdefault((r["connection_id"] or "", r["chat_id"] or 0), []).append(r)
@@ -1568,7 +1811,8 @@ def dialogs_html(services: Services, f: str, q: str, conn: str = "", chat: str =
         last, name = rows[0], chat_title(services, *key)
         mark = '<span class="pill warn">ошибка</span>' if any(r["flagged"] for r in rows) else ""
         items.append(
-            f'<a class="item{" on" if key == picked else ""}" href="{escape(chat_link(*key, f, q))}">'
+            f'<a class="item{" on" if key == picked else ""}" href="{escape(chat_link(*key, f, q))}" '
+            f'data-key="{key[0]}:{key[1]}:{last["id"]}:{last["status"]}">'
             f'{avatar(name, f"{key[0]}:{key[1]}")}<span class="nm">{escape(name)}</span>'
             f'<span class="tm">{short_time(last["created_at"])}</span><span class="pv">{escape(last["question"])}</span>'
             f'<span class="st">{status_pill(last["status"])}{mark}</span></a>')
@@ -1580,13 +1824,14 @@ def dialogs_html(services: Services, f: str, q: str, conn: str = "", chat: str =
     to_list = "/dialogs" + (f"?{urlencode({k: v for k, v in (('f', f), ('q', q)) if v})}" if f or q else "")
     export = ('<p><a class="btn light" href="/dialogs/flagged.csv">Скачать для экзамена (CSV)</a> '
               '<span class="muted">только проверенные примеры</span></p>' if f == "flagged" else "")
-    return f"""{head}{export}<div class="inbox{" open" if chosen else ""}">
+    return f"""{head}{export}<div class="inbox{" open" if chosen else ""}" data-live="inbox">
 <div class="list"><div class="list-head">Разговоры · {len(chats)}</div><div class="items">{"".join(items)}</div></div>
 <div class="thread"><div class="thread-head"><a class="back" href="{escape(to_list)}">← Все разговоры</a>
 <h2>{escape(chat_title(services, *picked))}</h2>
 <span class="muted">{channel} · {plural(len(turns), "вопрос", "вопроса", "вопросов")}</span></div>
 <div class="thread-body"><div class="chat">{"".join(turn_html(r, back, titles) for r in turns)}</div></div>
-<div class="thread-foot">«Ошибка» — если бот ответил неверно или зря передал вопрос. После разбора пример попадёт в экзамен.</div>
+<div class="thread-foot">«Ошибка» — если бот ответил неверно или зря передал вопрос. После разбора пример попадёт в экзамен.
+<span class="keys">↑ ↓ — соседний разговор · / — поиск</span></div>
 </div></div>"""
 
 
@@ -1775,7 +2020,10 @@ def exam_html(services: Services, state: dict) -> str:
     title = escape(model_title(services.settings))
     if state["running"]:
         done, total = state["done"], state["total"] or "…"
-        head = f"""<div class="card"><h2>Идёт экзамен: {done} из {total}</h2>
+        share = done / state["total"] if state["total"] else 0
+        head = f"""<div class="card" data-live="exam"><h2>Идёт экзамен: {done} из {total}</h2>
+<div class="progress" role="progressbar" aria-label="Ход экзамена" aria-valuemin="0" aria-valuemax="{state['total'] or 0}"
+aria-valuenow="{done}" data-progress="{share:.3f}" style="--p:{share:.3f}"><i></i></div>
 <p class="muted">Модель {title}. Страница обновится сама, это займёт около минуты.</p></div>"""
     else:
         err = note(f"Экзамен не прошёл: {state['error']}") if state["error"] else ""
@@ -1827,7 +2075,7 @@ def settings_html(services: Services, msg: str = "", form: dict | None = None) -
     days = "".join(f'<label><input type="checkbox" name="work_day" value="{i}" '
                    f'{"checked" if str(i) in v["work_days"] else ""}>{name}</label>'
                    for i, name in enumerate(DAY_NAMES, 1))
-    return f"""<h1>Настройки</h1>{note(msg)}<form method="post" action="/settings">
+    return f"""<h1>Настройки</h1>{note(msg)}<form method="post" action="/settings" data-dirty>
 <div class="card"><h2>Модель и режим</h2>
 <label for="model">Нейросеть</label><select id="model" name="model">{models}</select>{key_warn}
 <p class="hint">Lite отвечает быстрее, Pro точнее: на экзамене у Pro не было опасных ответов.</p>

@@ -22,7 +22,8 @@ def test_sidebar_groups_sections_and_counts_waiting_drafts(tmp_path):
     side = page.split('<main id="main"')[0]
     assert '<span class="grp">Разговоры</span>' in side and '<span class="grp">Бот</span>' in side
     assert 'href="/kb" class="on" aria-current="page">База знаний' in side
-    assert 'href="/dialogs">Диалоги<span class="n" title="ждут вас">1</span>' in side, "черновик ждёт решения"
+    assert 'href="/dialogs">Диалоги<span class="n" data-key="/dialogs:1" title="ждут вас">1</span>' in side, \
+        "черновик ждёт решения"
     assert 'nav a[href="/observe"]{--icon:url("data:image/svg+xml,' in page, "у каждого раздела своя иконка"
 
 
@@ -87,3 +88,28 @@ def test_daily_counts_by_local_day_without_sandbox(tmp_path):
     today = days[-1]
     assert (today["questions"], today["bot"], today["auto"], today["escalated"]) == (3, 2, 1, 1)
     assert days[-2]["questions"] == 1 and today["latency_ms"] == 900
+
+
+def test_live_pages_poll_and_tag_blocks_that_update_themselves(tmp_path):
+    client, services = make_client(tmp_path)
+    dialog_id = log(services, 5, "Сколько стоит экран?", D.SENT_AUTO)
+    home = client.get("/").text
+    assert 'data-poll="15"' in home and 'data-live="nav"' in home
+    assert all(f'data-live="{key}"' in home for key in ("week", "todo", "status")), "блоки «Обзора» обновляются сами"
+    dialogs = client.get("/dialogs").text
+    assert 'data-poll="15"' in dialogs and 'data-live="inbox"' in dialogs and 'data-live="tabs"' in dialogs
+    assert f"data-key='{dialog_id}:{D.SENT_AUTO}:0'" in dialogs, "по ключу скрипт подсвечивает только новое"
+    assert 'data-poll' not in client.get("/kb").text, "страницы с формами не обновляются под рукой"
+    answered = client.post("/sandbox", data={"question": "Сколько стоит экран в атриуме?"}).text
+    assert 'data-poll' not in answered, "ответ тестового чата пришёл POST-запросом — его не перезапрашиваем"
+
+
+def test_pages_wire_waiting_keys_and_unsaved_settings(tmp_path):
+    from app.admin import exam_html
+    client, services = make_client(tmp_path)
+    home = client.get("/").text
+    assert 'action="/sandbox" data-typing' in home and "data-enter-send" in home, "Enter спрашивает, видно «Бот думает…»"
+    assert '<form method="post" action="/settings" data-dirty>' in client.get("/settings").text
+    running = exam_html(services, {"running": True, "done": 3, "total": 12, "error": ""})
+    assert 'data-progress="0.250"' in running and 'aria-valuenow="3"' in running
+    assert "prefers-reduced-motion:reduce" in home and "@view-transition" in home, "движение отключается по настройке"
