@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import sys
 
+from . import db as D
 from .config import Settings
 from .services import Services, model_title
 
@@ -93,6 +94,12 @@ async def check_max(settings: Settings) -> bool:
     return True
 
 
+def connection_modes(conns) -> str:
+    """Режимы подключений словами. Раньше «наблюдение» и «выключен» показывались как «черновики»."""
+    names = {"off": "выключен", "observe": "наблюдение", "draft": "черновики", "auto": "автоответ"}
+    return ", ".join(names.get(D.MODE_ALIASES.get(c.mode, c.mode), c.mode) for c in conns)
+
+
 async def main() -> int:
     settings = Settings.load()
     services = Services(settings)
@@ -102,8 +109,7 @@ async def main() -> int:
     ok = await check_max(settings) and ok
     conns = services.db.connections()
     if conns:
-        modes = ", ".join({"auto": "автоответ", "watch": "наблюдение"}.get(c.mode, "черновики") for c in conns)
-        line(True, "Подключения", f"{len(conns)} ({modes})")
+        line(True, "Подключения", f"{len(conns)} ({connection_modes(conns)})")
     else:
         line(None, "Подключения", "пока нет — после запуска добавьте бота: Настройки → Автоматизация чатов")
     kb = services.kb

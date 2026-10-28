@@ -334,10 +334,11 @@ class KnowledgeBase:
                     bad.append(amount)
         return bad
 
-    def mismatched_formats(self, answer: str, hits: list[SearchHit]) -> list[int]:
+    def mismatched_formats(self, answer: str, hits: list[SearchHit], budget: int | None = None) -> list[int]:
         """«Экран на фуд-корте — 25 000 ₽»: ТЦ тот же, сумма есть в контексте, но это цена баннера.
         Формат ищется в той же части фразы, иначе раньше в том же предложении. Ответ про формат
-        засчитывается и по месту строки («на фуд-корте — 42 000 ₽») и по её доплатам («печать — 14 000 ₽»)."""
+        засчитывается и по месту строки («на фуд-корте — 42 000 ₽») и по её доплатам («печать — 14 000 ₽»).
+        Бюджет клиента («за 30 000 ₽ в месяц доступны…») — его число, а не цена формата: не проверяем."""
         rows = [h.chunk for h in hits if h.chunk.kind == "price"]
         if not rows:
             return []
@@ -356,7 +357,7 @@ class KnowledgeBase:
                 named = vocab.intersection(_VENUE_ALIASES.get(t, t) for t in self.normalize(clause)) or named
                 for amount in extract_amounts(clause):
                     found = owners.get(amount)
-                    if found and named and not any(w & named for w in found) and amount not in bad:
+                    if found and named and amount != budget and not any(w & named for w in found) and amount not in bad:
                         bad.append(amount)
         return bad
 
