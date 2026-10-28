@@ -113,3 +113,10 @@ def test_old_greeting_and_stale_answer_are_not_glued():
     add(31, "manager", "Нет, без звука.", 60)  # через 30 часов и без «ответить» — уже не про этот вопрос
     assert db.observation_context("c", 1, 31) is None
     db.conn.close()
+
+
+def test_launch_check_names_every_mode():
+    from types import SimpleNamespace
+    from app.check import connection_modes
+    conns = [SimpleNamespace(mode=m) for m in ("off", "observe", "watch", "draft", "auto")]
+    assert connection_modes(conns) == "выключен, наблюдение, наблюдение, черновики, автоответ"

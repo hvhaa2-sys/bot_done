@@ -672,6 +672,19 @@ def test_price_of_another_format_in_same_mall_goes_to_manager():
         assert run(Assistant(kb, FakeLLM(ok), min_score=0).answer(q)).decision == ANSWER, ok
 
 
+def test_client_budget_repeated_in_answer_is_not_a_format_price():
+    """GigaChat Pro 28.10: «за 30 000 ₽ в месяц доступны…» — это бюджет клиента, а не цена промо-акции."""
+    rows = [PriceRow("Цифровой экран", "ДЕПО, Нижний Тагил — фуд-корт", "1 месяц", 26250, ""),
+            PriceRow("Промо-акция", "ДЕПО, Нижний Тагил — атриум", "1 месяц", 30000, "")]
+    kb = KnowledgeBase([], rows, [])
+    q = "Хотим рекламу в ДЕПО, бюджет 30 тысяч в месяц, что есть?"
+    echo = "В ДЕПО за 30 000 ₽ в месяц доступны рекламные места: цифровой экран на фуд-корте — 26 250 ₽."
+    assert run(Assistant(kb, FakeLLM(echo), min_score=0).answer(q)).decision == ANSWER
+    wrong = "В ДЕПО цифровой экран на фуд-корте — 30 000 ₽ в месяц."
+    r = run(Assistant(kb, FakeLLM(wrong), min_score=0).answer("Сколько стоит экран в ДЕПО?"))
+    assert r.decision == ESCALATE and r.reason == "format_mismatch:[30000]", "без бюджета в вопросе проверка та же"
+
+
 def test_weekday_price_named_for_weekend_goes_to_manager():
     rows = [PriceRow("Промо-акция с 1 промоутером", "ВЕЕР Молл, Екатеринбург", "1 день в будни (понедельник–четверг)",
                      12000, "с НДС 5%"),

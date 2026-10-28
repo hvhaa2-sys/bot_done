@@ -346,7 +346,7 @@ class Database:
     def count_dialogs(self, *, statuses: tuple[str, ...] = (), flagged: bool = False) -> int:
         """Сколько строк журнала в папке «Диалогов» — счётчик на вкладке."""
         where, args = self._dialog_filter(statuses, flagged)
-        return self.conn.execute("SELECT COUNT(*) FROM dialogs" + where, args).fetchone()[0]  # nosec — как в recent_dialogs
+        return self.conn.execute("SELECT COUNT(*) FROM dialogs" + where, args).fetchone()[0]  # nosec — условия те же, что у выборки журнала выше
 
     def chat_dialogs(self, connection_id: str, chat_id: int, statuses: tuple[str, ...],
                      limit: int = 100) -> list[sqlite3.Row]:

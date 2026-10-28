@@ -348,7 +348,7 @@ class Assistant:
         if hits and (wrong := self.kb.mismatched_amounts(text, hits, question)):
             # «Экран в ДЕПО — 31 500 ₽»: сумма настоящая, но из строки другого ТЦ
             return Reply(ESCALATE, text, confidence, f"{R_VENUE}:{wrong}", sources, raw=raw)
-        if hits and (wrong := self.kb.mismatched_formats(text, hits)):
+        if hits and (wrong := self.kb.mismatched_formats(text, hits, parse_budget(question.lower()))):
             # «Экран на фуд-корте — 25 000 ₽»: ТЦ тот же, но сумма из строки баннера
             return Reply(ESCALATE, text, confidence, f"{R_FORMAT}:{wrong}", sources, raw=raw)
         if hits and (wrong := self.kb.wrong_tier_amounts(text, hits, question) or self.kb.wrong_day_amounts(text, hits)):

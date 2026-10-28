@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .knowledge import KnowledgeBase, SearchHit, _CITY_TOKENS
+from .knowledge import KnowledgeBase, SearchHit, _CITY_TOKENS, parse_budget
 from .price_guard import amount_spans, extract_amounts
 from .text import tokenize
 
@@ -33,7 +33,11 @@ _FAMILIES = (
 _PLACE_SKIP = set(tokenize("центральный главный этаж место размещение экран инцентр выход показ сторона шт медиа куб"))
 _PRIMARY_PLACES = set(tokenize("атриум вход фуд корт парковка фасад эскалатор галерея витрина"))
 _FMT_SKIP = set(tokenize("цифровой рекламный размещение реклама ролик видеоролик видео макет стоимость цена "
-                         "печатный печать монтаж производство изготовление для арендатор месяц день неделя"))
+                         "печатный печать монтаж производство изготовление для арендатор месяц день неделя "
+                         # Слова из названий строк, которые о формате ничего не говорят и уводили проверку к чужому
+                         # формату (GigaChat Pro, 28.10): «оплачиваются дополнительно» («Дополнительный пост охраны»),
+                         # «печать одного флага» («…, одна сторона» у тейбл-тентов), «1,45×2,4 м» (метры в размерах)
+                         "дополнительный один одна одно одного одной одну м см мм шт штука"))
 _PERIOD = re.compile(r"(?<!\w)(?:(\d{1,2}|один|одна|одну|два|две|три|четыре|пять|шесть)\s*)?"
                      r"(месяц\w*|мес\.?|недел\w*|день|дня|дней|сут\w*|год\w*)\b|полгода|пол года|квартал", re.I)
 _COUNTS = {"один": 1, "одна": 1, "одну": 1, "два": 2, "две": 2, "три": 3, "четыре": 4, "пять": 5, "шесть": 6}
@@ -58,12 +62,23 @@ class Scope:
     format_words: frozenset[str] = frozenset()
 
 
+_LIGHTBOX = frozenset(tokenize("лайтбокс короб"))
+# «Не входят в цену», «входит в стоимость» — глагол, а основа та же, что у места «вход»: без этого доплаты
+# к коробу над банкоматами проверялись как цены у входа (GigaChat Pro, 28.10)
+_ENTER_VERB = re.compile(r"\bвход(?:ит|ят|ить|ил[аио]?)\b", re.I)
+
+
 def scope(kb: KnowledgeBase, text: str, previous: Scope = Scope()) -> Scope:
+    text = _ENTER_VERB.sub(" ", text)
     venues = kb._venues_in(text) - _CITY_TOKENS
     formats = families(text)
-    places = frozenset(kb.normalize(text)) & kb._place_tokens - _PLACE_SKIP
+    # «на входе» и «входная группа» — одно место, хотя основы разные («вход» и «входн»)
+    places = frozenset("вход" if p.startswith("вход") else p
+                       for p in frozenset(kb.normalize(text)) & kb._place_tokens - _PLACE_SKIP)
     format_words = frozenset(w for w in kb.normalize(text) if not w.isdigit()) & kb._format_tokens \
         - _FMT_SKIP - kb._place_tokens - kb._all_venues
+    if format_words & _LIGHTBOX:  # «световой короб с тканевым полотном» и «лайтбокс» — один формат
+        format_words |= _LIGHTBOX
     changed = bool(venues and venues != previous.venues)
     if places and not places & _PRIMARY_PLACES and not changed:
         places |= previous.places  # «фуд-корт, 2 уровень, у лифтов» остаётся одной площадкой
@@ -118,7 +133,10 @@ def property_issues(kb: KnowledgeBase, answer: str, hits: list[SearchHit], quest
         if chunk.venue:
             current = Scope(chunk.venue - _CITY_TOKENS, current.formats, current.places, current.format_words)
         if chunk.kind == "price":
-            current = scope(kb, chunk.text)
+            # Строка прайса — одно место целиком: «траволатор, вход в ОКЕЙ … ролик 10 сек» — про траволатор тоже.
+            # По кусочкам через запятую к длительности относился только «вход» (GigaChat Pro, 28.10)
+            evidence += [(scope(kb, chunk.text), value) for value in properties(chunk.text)]
+            continue
         for part, current in clauses(kb, body if sep else chunk.text, current):
             evidence += [(current, value) for value in properties(part, title if sep else "")]
     issues = []
@@ -150,6 +168,7 @@ def price_period_issues(kb: KnowledgeBase, answer: str, hits: list[SearchHit], q
     if not rows:
         return []
     current = scope(kb, question)
+    budget = parse_budget(question.lower())  # бюджет клиента, повторённый в ответе, — не цена формата
     bad = []
     for part in _SENTENCES.split(answer):
         current = scope(kb, part, current)
@@ -165,12 +184,17 @@ def price_period_issues(kb: KnowledgeBase, answer: str, hits: list[SearchHit], q
         for i, (amount, start, end) in enumerate(spans):
             right = spans[i + 1][1] if i + 1 < len(spans) else len(part)
             left = spans[i - 1][2] if i else 0
-            if re.search(r"(?:бюджет|лимит|потолок|располагаете)[^,;:.]{0,40}$", part[max(left, start - 60):start], re.I):
+            if amount == budget or re.search(r"(?:бюджет|лимит|потолок|располагаете)[^,;:.]{0,40}$",
+                                             part[max(left, start - 60):start], re.I):
                 continue  # повторение бюджета клиента не является ценой услуги
             after = [(p, a - end) for p, a, b in mentioned if end <= a < right]
             before = [(p, start - b) for p, a, b in mentioned if left <= b <= start]
-            billing = min(after, key=lambda x: x[1])[0] if after else \
-                min(before, key=lambda x: x[1])[0] if before else None
+            # «день — 6 000 ₽, неделя — 18 000 ₽»: срок подписью перед ценой относится к ней, а не к следующей.
+            # Но «на полгода — 18 000 ₽ за месяц»: срок сразу после цены в той же части фразы важнее подписи
+            near = [x for x in after if not re.search(r"[,;]", part[end:end + x[1]])]
+            label = [p for p, a, b in mentioned if left <= b <= start and re.fullmatch(r"\s*[-–—:]\s*", part[b:start])]
+            billing = min(near, key=lambda x: x[1])[0] if near else label[0] if label else \
+                min(after, key=lambda x: x[1])[0] if after else min(before, key=lambda x: x[1])[0] if before else None
             # Чужой формат с такой же суммой не подтверждает цену запрошенного экрана.
             candidates = [r for r in rows if amount == r.price_rub or amount in extract_amounts(r.notes)]
             matching = [r for r in candidates if compatible(current, scope(kb, f"{r.format}, {r.placement}"), price=True)]
