@@ -22,6 +22,7 @@ from .core.knowledge import KnowledgeBase, format_rub
 from .core.pii import mask_pd
 from .core.price_guard import unknown_amounts
 from .core.waits import wait_summary
+from . import db as D
 from .db import MODE_ALIASES, Database
 from .llm import make_provider
 from .llm.base import LLMProvider
@@ -167,8 +168,61 @@ class Services:
         self.events: deque[tuple[str, str]] = deque(maxlen=80)
         self.chat_names: dict[int, str] = {}
         self.owner_names: dict[int, str] = {}
+        # Отправка клиенту из админки: канал при запуске кладёт сюда свою функцию (conn_id, chat_id, text) → bool:
+        # «telegram» — __main__, «max» — run_max. Без неё ответить с сайта нельзя — админка так и скажет
+        self.client_senders: dict = {}
+        self._background: set[asyncio.Task] = set()
         if self.draft_changed():  # заметки правили в Obsidian или файлы заменили, пока бот был выключен
             logging.getLogger(__name__).info(self.kb_changed("Правка файлов базы вне админки"))
+
+    def in_background(self, coro) -> None:
+        """Долгая работа после ответа админки (кандидаты в базу из ответа менеджера): сбой — только в лог."""
+        async def run() -> None:
+            try:
+                await coro
+            except Exception:  # noqa: BLE001
+                logging.getLogger(__name__).exception("Фоновая задача админки не удалась")
+
+        task = asyncio.create_task(run())
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def decide_draft(self, dialog_id: int, action: str, text: str = "") -> str:
+        """Решение по вопросу из админки — как кнопки и ответ на карточку в мессенджере. send — отправить черновик,
+        edit — отправить свой текст (из него, как из ответа на карточку, собираются кандидаты в базу), skip — пропустить.
+        Возвращает код итога для админки: sent, skipped, handled, no_conn, off, observe, empty, no_channel,
+        cant_reply, failed."""
+        dialog = self.db.get_dialog(dialog_id)
+        if not dialog or dialog["status"] not in (D.DRAFT_PENDING, D.ESCALATED):
+            return "handled"
+        conn = self.db.get_connection(dialog["connection_id"])
+        if not conn or not conn.approved:
+            return "no_conn"
+        if action == "skip":
+            return "skipped" if self.db.claim_dialog(dialog_id, D.DRAFT_REJECTED) else "handled"
+        if conn.mode in D.SILENT_MODES:
+            return "off" if conn.mode == "off" else "observe"
+        draft = action == "send" and dialog["status"] == D.DRAFT_PENDING
+        text = self.sign(dialog["answer"]) if draft else text.strip() if action == "edit" else ""
+        if not text:
+            return "empty"
+        sender = self.client_senders.get("max" if conn.id.startswith("max:") else "telegram")
+        if not sender:
+            return "no_channel"
+        if not conn.can_reply:
+            return "cant_reply"
+        # Сначала закрываем вопрос, потом шлём: второе нажатие, пока идёт отправка, ничего не сделает
+        if not self.db.claim_dialog(dialog_id, D.DRAFT_SENT if draft else D.DRAFT_EDITED, answer=None if draft else text):
+            return "handled"
+        if not await sender(conn.id, dialog["chat_id"], text):
+            self.db.set_dialog_status(dialog_id, dialog["status"], answer=dialog["answer"])
+            return "failed"
+        if not draft:
+            self.in_background(self.collect_candidates(
+                source="card", connection_id=conn.id, chat_id=dialog["chat_id"], dialog_id=dialog_id,
+                client_question=dialog["question"], manager_text=text))
+        self.event("Ответ клиенту отправлен из админки")
+        return "sent"
 
     def event(self, text: str) -> None:
         """Записать решение бота: видно в админке на «Обзоре» и в логе."""

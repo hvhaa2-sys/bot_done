@@ -67,6 +67,45 @@ IMPORT_FILES = {"faq_draft.md": "text/markdown", "questions_real.csv": "text/csv
 EXAM_KEY = "exam_last"
 # ₽ за 1000 токенов по тарифам GigaChat API для юрлиц (октябрь 2026) — для оценки расхода в админке
 PRICE_PER_1K = {"GigaChat": 0.065, "GigaChat-Pro": 0.5, "GigaChat-Max": 0.65}
+# Поиск ⌘K: разделы и места, куда можно перейти, — название, адрес, слова, по которым их ищут
+SEARCH_PLACES = [
+    ("Обзор", "/", "главная неделя график статистика"),
+    ("Проверить бота", "/#sandbox", "тестовый чат спросить песочница"),
+    ("Подключения", "/#connections", "менеджеры разрешить режим черновики автоответ"),
+    ("Диалоги", "/dialogs", "разговоры журнал переписка"),
+    ("Черновики", "/dialogs?f=drafts", "ждут решения отправить"),
+    ("Передано менеджеру", "/dialogs?f=manager", "эскалации"),
+    ("Ошибки", "/dialogs?f=flagged", "отмеченные разбор экзамен"),
+    ("Наблюдение", "/observe", "переписка менеджера время ответа"),
+    ("Обучение", "/learn", "научить вопросы без ответа кандидаты факты"),
+    ("Прайс", "/kb#prices", "цены позиции база знаний"),
+    ("Заметки", "/kb#notes", "база знаний obsidian"),
+    ("Частые вопросы", "/kb#faq", "faq база знаний"),
+    ("Стоп-темы", "/kb#stops", "темы для менеджера скидки договор"),
+    ("Импорт переписки", "/kb#import", "загрузить telegram выгрузка"),
+    ("Экзамен", "/exam", "проверка точность опасные"),
+    ("Настройки: модель и режим", "/settings#model", "gigachat нейросеть pro lite режим новых подключений"),
+    ("Настройки: изменения базы знаний", "/settings#publish", "публикация версии"),
+    ("Настройки: когда бот отвечает сам", "/settings#auto", "расписание рабочее время автоответ"),
+    ("Настройки: защита от лишних трат", "/settings#limits", "лимит обращений в день в час"),
+    ("Настройки: вечерняя сводка", "/settings#summary", "итоги дня время"),
+    ("Настройки: тексты бота", "/settings#texts", "обращение вы ты подпись приветствие уточню и вернусь"),
+    ("Настройки: паузы", "/settings#pauses", "менеджер пишет сам молчит"),
+    ("Внедрение", "/onboarding", "мастер запуск бизнес"),
+]
+# Итог ответа клиенту с сайта (коды — Services.decide_draft): показываем над перепиской
+DRAFT_RESULTS = {
+    "sent": "Отправлено клиенту.",
+    "skipped": "Черновик пропущен: клиенту ничего не ушло.",
+    "handled": "Этот вопрос уже обработан — возможно, вы ответили в Telegram.",
+    "no_conn": "Подключение не найдено или не разрешено.",
+    "off": "Бот выключен: ответьте клиенту в его чате.",
+    "observe": "Включено наблюдение: бот не пишет клиентам, ответьте в его чате.",
+    "empty": "Напишите текст ответа.",
+    "no_channel": "Бот сейчас не подключён к мессенджеру, поэтому отправить с сайта нельзя. Ответьте в чате.",
+    "cant_reply": "У бота нет права отвечать: Telegram → Настройки → Автоматизация чатов → бот → «Отвечать на сообщения».",
+    "failed": "Не отправлено: нет связи с мессенджером или клиент писал больше суток назад. Ответьте ему сами в чате.",
+}
 LIVE_SECONDS = 15  # раз в сколько секунд «Обзор», «Диалоги» и «Наблюдение» подтягивают новое без перезагрузки
 LOGIN_TRIES, LOGIN_WINDOW = 5, 600  # не больше 5 неверных токенов за 10 минут с одного адреса
 
@@ -102,14 +141,23 @@ nav a:hover,.logout:hover{background:var(--bg)}
 nav a.on{background:var(--accent-bg);color:var(--accent);font-weight:600}nav a.on::before{opacity:1}
 nav .n{margin-left:auto;min-width:22px;padding:1px 7px;border-radius:99px;background:var(--warn-bg);color:var(--warn);
 font-size:12px;font-weight:600;text-align:center;font-variant-numeric:tabular-nums}
-.logout{margin-top:auto;color:var(--muted)}
+.logout{color:var(--muted)}.side-foot{margin-top:auto;display:flex;flex-direction:column;gap:6px}
+.find{justify-content:flex-start;gap:10px;width:100%;min-height:38px;margin:0 0 8px;padding:6px 10px;
+background:var(--bg);color:var(--muted);border:1px solid var(--line);font-size:14px;font-weight:400}
+.find::before{content:"";width:16px;height:16px;flex:none;background:currentColor;-webkit-mask:var(--icon) center/contain no-repeat;
+mask:var(--icon) center/contain no-repeat}
+.find kbd{margin-left:auto;padding:0 5px;border:1px solid var(--line-strong);border-radius:4px;font:12px ui-monospace,Menlo,monospace}
+.find:hover{opacity:1;color:var(--text);border-color:var(--line-strong)}
+.notify{width:100%;min-height:38px;padding:6px 10px;background:transparent;color:var(--muted);border:1px dashed var(--line-strong);
+font-size:13.5px;font-weight:400}.notify:hover{opacity:1;color:var(--text)}
 main{width:100%;max-width:1160px;margin:0 auto;padding:28px 32px 56px;min-width:0}
 main.wide{max-width:none}
 @media(max-width:860px){.shell{display:block}
 .side{z-index:20;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center;gap:0;padding:0 12px;border-right:0;
 border-bottom:1px solid var(--line)}
-.brand{flex:1;padding:12px 4px 6px}.logout{order:1;margin:0;min-height:36px;padding:6px 4px;font-size:14px}
-.logout::before{display:none}
+.brand{flex:1;padding:12px 4px 6px}.side-foot{order:1;margin:0;flex-direction:row}.notify{display:none!important}
+.find{order:0;width:auto;min-height:36px;margin:0 4px 0 0;padding:6px 10px}.find kbd{display:none}
+.logout{min-height:36px;padding:6px 4px;font-size:14px}.logout::before{display:none}
 nav{order:2;flex-direction:row;width:calc(100% + 24px);margin:0 -12px;padding:0 8px;overflow-x:auto;scrollbar-width:none;
 -webkit-overflow-scrolling:touch}nav::-webkit-scrollbar{display:none}nav .grp{display:none}
 nav a{flex:none;min-height:0;padding:10px 10px 12px;border-radius:0;border-bottom:2px solid transparent}
@@ -297,6 +345,7 @@ border-bottom:1px solid var(--line)}
 .item{transition:background-color .15s var(--ease)}
 .item.fresh{animation:flash 1.8s var(--ease)}
 .turn.fresh,.chat .msg.fresh,.todo li.fresh{animation:rise .35s var(--ease)}
+.turn:target .msg.me .bubble{animation:flash 1.8s var(--ease)}
 nav .n.fresh{animation:pop .4s var(--ease)}
 .note{animation:rise .25s var(--ease)}
 .inbox.to-thread .thread-body>.chat{animation:swap .2s var(--ease)}
@@ -322,6 +371,34 @@ margin-top:16px;padding:8px 8px 8px 18px;border-radius:var(--radius);background:
 box-shadow:0 10px 28px -8px rgb(0 0 0/.35);animation:rise .2s var(--ease)}
 .savebar button{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
 .keys{display:none;margin-left:8px;opacity:.8}@media(hover:hover) and (pointer:fine){.keys{display:inline}}
+/* ответ клиенту и разбор ошибки — прямо в переписке */
+.reply{align-self:flex-end;width:min(100%,560px);display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;align-items:flex-start}
+.reply button,.reply summary.btn{min-height:36px;padding:6px 14px;font-size:14px}
+.reply summary{list-style:none;cursor:pointer}.reply summary::-webkit-details-marker{display:none}
+.reply details[open]{order:5;flex-basis:100%;text-align:right}
+.reply details[open]>summary{min-height:0;padding:0 2px 6px;border:0;background:none;color:var(--muted);font-size:13px}
+.reply .opened,.reply details[open] .closed{display:none}.reply details[open] .opened{display:inline}
+.reply:has(details[open])>button{display:none}  /* правите текст — «Отправить черновик» убран, чтобы не нажать мимо */
+.reply textarea{background:var(--card);text-align:left}.reply details button{margin-top:8px}
+.review{align-self:flex-end;width:min(100%,560px);padding:4px 16px 12px;border:1px solid var(--line);border-radius:var(--radius);
+background:var(--card)}
+.review summary{padding:8px 0;cursor:pointer;font-weight:600;color:var(--warn)}.review[open] summary{margin-bottom:-6px}
+.review label{margin-top:12px}.review p:last-child{margin-bottom:4px}
+/* поиск ⌘K */
+.palette{width:min(640px,calc(100vw - 32px));max-height:min(560px,calc(100dvh - 64px));margin:10vh auto auto;padding:0;
+border:1px solid var(--line);border-radius:var(--radius);background:var(--card);color:var(--text);
+box-shadow:0 24px 64px -16px rgb(0 0 0/.35);overflow:hidden;display:flex;flex-direction:column}
+.palette:not([open]){display:none}.palette[open]{animation:pal-in .18s var(--ease)}
+.palette::backdrop{background:rgb(0 0 0/.45)}
+@keyframes pal-in{from{opacity:0;transform:translateY(-8px) scale(.98)}}
+.palette input[type=search]{border:0;border-bottom:1px solid var(--line);border-radius:0;min-height:56px;padding:0 20px;
+font-size:17px;background:var(--card)}.palette input[type=search]:focus{box-shadow:none;border-color:var(--line)}
+.palette .results{overflow-y:auto;padding:6px 8px 8px;flex:1}
+.palette .grp{padding:10px 12px 4px;font-size:11.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.palette .hit{display:flex;flex-direction:column;gap:1px;padding:8px 12px;border-radius:var(--radius-sm);color:var(--text);
+text-decoration:none}.palette .hit span{font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.palette .hit.on{background:var(--accent-bg)}.palette .none{padding:18px 12px;color:var(--muted)}
+.palette .keys{display:block;margin:0;padding:8px 16px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important}
 ::view-transition-group(*),::view-transition-old(*),::view-transition-new(*){animation:none!important}.typing i{opacity:.7}}
 """
@@ -341,11 +418,12 @@ NAV_ICONS = {
                  'M3.5 12.5l1.4-1.4M11.1 4.9l1.4-1.4"/>',
     "/onboarding": '<path d="M3.5 14V2.5M3.5 3h8l-1.6 2.8 1.6 2.8h-8"/>',
     "/logout": '<path d="M6.5 2.5h-4v11h4M10.5 5l3 3-3 3M13.5 8H6"/>',
+    "find": '<circle cx="7" cy="7" r="4.2"/><path d="m10.2 10.2 3.3 3.3"/>',
 }
 
 
 def _icon_rule(href: str, paths: str) -> str:
-    selector = ".logout" if href == "/logout" else f'nav a[href="{href}"]'
+    selector = {"/logout": ".logout", "find": ".find"}.get(href, f'nav a[href="{href}"]')
     svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="#000" stroke-width="1.4" '
            f'stroke-linecap="round" stroke-linejoin="round">{paths}</svg>')
     return f'{selector}{{--icon:url("data:image/svg+xml,{quote(svg)}")}}'
@@ -356,7 +434,7 @@ CSS += "".join(_icon_rule(href, paths) for href, paths in NAV_ICONS.items())
 
 # Поведение страниц без перезагрузки: живые блоки (data-live), переходы в ящиках, ожидание после отправки,
 # Enter в проверке бота, клавиши, напоминание о несохранённых настройках. Без JavaScript всё работает ссылками и формами.
-JS = """(() => {
+JS = r"""(() => {
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const narrow = () => matchMedia("(max-width: 860px)").matches;
@@ -364,12 +442,26 @@ const typing = () => document.activeElement?.matches("main input, main textarea,
 // Плавный переход между разделами браузер пропускает, если быстро нажать ещё раз, — это не ошибка
 for (const type of ["pageswap", "pagereveal"]) addEventListener(type, e => e.viewTransition?.ready.catch(() => {}));
 
+function toLatest(root = document) {
+  // Переписка открывается на последних сообщениях, а ссылка с #d12 — на нужном ответе
+  $$(".thread-body", root).forEach(e => e.scrollTop = e.scrollHeight);
+  const target = location.hash.length > 1 && document.getElementById(location.hash.slice(1));
+  if (target && target.closest(".thread-body")) target.scrollIntoView({block: "center"});
+}
 function settle() {
   $("nav .on")?.scrollIntoView({inline: "center", block: "nearest"});
-  $$(".thread-body").forEach(e => e.scrollTop = e.scrollHeight);
+  toLatest();
   const on = $(".items .on");
   if (on) on.parentElement.scrollTop = on.offsetTop - 60;
 }
+// Начатый ответ или открытый разбор живое обновление не трогает
+const changed = el => $$("input, textarea, select", el).some(f =>
+  f.type === "checkbox" || f.type === "radio" ? f.checked !== f.defaultChecked
+  : f.tagName === "SELECT" ? [...f.options].some(o => o.selected !== o.defaultSelected)
+  : f.value !== f.defaultValue) || !!$("details[data-opened]", el);
+document.addEventListener("toggle", e => {
+  if (e.target.matches?.("main details")) e.target.toggleAttribute("data-opened", e.target.open);
+}, true);
 async function load(url) {
   const res = await fetch(url, {credentials: "same-origin"});
   if (res.status === 401 || res.status === 403) throw new Error("auth");
@@ -418,13 +510,14 @@ async function poll() {
   swapNav(doc);
   const keys = el => $$("[data-live]", el).map(e => e.dataset.live).join();
   if (!next.dataset.poll || keys(main) !== keys(next)) {  // экзамен закончился или появился новый блок
+    if (changed(main)) return schedule();
     main.replaceWith(document.adoptNode(next));
     settle();
     return schedule();
   }
   for (const n of $$("[data-live]", next)) {
     const o = $(`[data-live="${n.dataset.live}"]`, main);
-    if (!o || o.innerHTML === n.innerHTML) continue;
+    if (!o || o.innerHTML === n.innerHTML || changed(o)) continue;
     const s = keep(o), bar = $("[data-progress]", o), nbar = $("[data-progress]", n);
     if (bar && nbar) nbar.style.setProperty("--from", bar.dataset.progress);
     markFresh(o, n);
@@ -445,7 +538,7 @@ async function go(url, push = true) {
   if (!main || !next) { location.href = url; return; }
   const was = $(".inbox")?.classList.contains("open"), s = keep(main), focused = main.contains(document.activeElement);
   if (push) history.pushState(null, "", url);
-  document.title = doc.title;
+  document.title = titled(doc.title);
   swapNav(doc);
   main.replaceWith(document.adoptNode(next));
   const inbox = $(".inbox");
@@ -454,7 +547,7 @@ async function go(url, push = true) {
     if (items && s.items != null) items.scrollTop = s.items;
     if (on && (on.offsetTop < items.scrollTop || on.offsetTop + on.offsetHeight > items.scrollTop + items.clientHeight))
       items.scrollTop = on.offsetTop - 60;
-    $$(".thread-body", inbox).forEach(e => e.scrollTop = e.scrollHeight);
+    toLatest(inbox);
     const open = inbox.classList.contains("open");
     inbox.classList.add(open ? "to-thread" : "to-list");
     if (narrow() && was !== open) scrollTo({top: Math.max(0, inbox.getBoundingClientRect().top + scrollY - 120)});
@@ -502,9 +595,20 @@ addEventListener("pageshow", e => {  // вернулись кнопкой «На
   $$(".typing").forEach(t => t.remove());
 });
 
-// Клавиши: Enter — спросить бота, / — поиск, ↑ ↓ — соседний разговор, Esc — к списку на телефоне
+// Клавиши: ⌘K — поиск по всему, Enter — спросить бота, ⌘Enter — отправить свой ответ клиенту,
+// / — поиск на странице, ↑ ↓ — соседний разговор, Esc — к списку на телефоне
 document.addEventListener("keydown", e => {
   const t = e.target;
+  if ((e.metaKey || e.ctrlKey) && e.code === "KeyK") {
+    e.preventDefault();
+    palette.open ? palette.close() : openPalette();
+    return;
+  }
+  if (t.matches?.(".reply textarea") && e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    t.form.requestSubmit($("[value=edit]", t.form));
+    return;
+  }
   if (t.matches?.("textarea[data-enter-send]") && e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     if (t.value.trim()) t.form.requestSubmit();
@@ -540,8 +644,107 @@ $$("form[data-dirty]").forEach(form => {
   addEventListener("beforeunload", e => { if (!bar.hidden && !form.dataset.sending) e.preventDefault(); });
 });
 
+// Уведомления: бот передал вопрос или подготовил черновик — всплывает уведомление браузера,
+// а в заголовке вкладки видно, сколько вопросов ждёт
+let waiting = 0, seen = null;
+const titled = text => (waiting ? `(${waiting}) ` : "") + text.replace(/^\(\d+\) /, "");
+try { const raw = sessionStorage.getItem("seen-waiting"); seen = raw ? new Set(JSON.parse(raw)) : null; } catch {}
+async function watchWaiting() {
+  try {
+    const res = await fetch("/live/waiting", {credentials: "same-origin"});
+    if (res.status === 401) return;
+    const {items} = await res.json();
+    waiting = items.length;
+    document.title = titled(document.title);
+    const fresh = seen ? items.filter(i => !seen.has(i.id)) : [];
+    seen = new Set(items.map(i => i.id));
+    try { sessionStorage.setItem("seen-waiting", JSON.stringify([...seen])); } catch {}
+    if (fresh.length && "Notification" in window && Notification.permission === "granted"
+        && (document.hidden || !document.hasFocus()))
+      for (const i of fresh.slice(0, 3)) {
+        const n = new Notification(i.kind === "Черновик" ? "Черновик ждёт решения" : "Бот передал вопрос вам",
+                                   {body: `${i.name}: ${i.text}`, tag: `d${i.id}`});
+        n.onclick = () => { window.focus(); location.href = i.url; n.close(); };
+      }
+  } catch {}
+  setTimeout(watchWaiting, 30000);
+}
+const notify = $(".notify");
+if (notify && "Notification" in window && Notification.permission === "default") {
+  notify.hidden = false;
+  notify.addEventListener("click", async () => {
+    await Notification.requestPermission();
+    notify.hidden = Notification.permission !== "default";
+  });
+}
+
+// Поиск ⌘K: разделы и настройки, разговоры, переписка и база знаний — с клавиатуры, без мыши
+const palette = document.createElement("dialog");
+palette.className = "palette";
+palette.setAttribute("aria-label", "Поиск по админке");
+palette.innerHTML = '<input type="search" placeholder="Разговор, цена, раздел или настройка" aria-label="Что найти" '
+  + 'autocomplete="off"><div class="results" role="listbox"></div>'
+  + '<p class="keys">↑ ↓ — выбрать · Enter — открыть · Esc — закрыть</p>';
+document.body.append(palette);
+const field = $("input", palette), results = $(".results", palette);
+let hits = [], current = 0, asked = null, findTimer;
+function mark(i) {
+  hits.forEach((h, j) => h.classList.toggle("on", j === i));
+  current = i;
+  hits[i]?.scrollIntoView({block: "nearest"});
+}
+async function find() {
+  const q = field.value.trim();
+  if (q === asked) return;
+  asked = q;
+  let data;
+  try { data = await (await fetch("/search?" + new URLSearchParams({q}), {credentials: "same-origin"})).json(); }
+  catch { asked = null; return; }
+  if (q !== field.value.trim()) return;  // пока ждали ответ, набрали дальше
+  results.replaceChildren();
+  for (const group of data.groups) {
+    const head = document.createElement("div");
+    head.className = "grp";
+    head.textContent = group.title;
+    results.append(head);
+    for (const item of group.items) {  // текст из переписки — только textContent, без разметки
+      const a = document.createElement("a"), b = document.createElement("b");
+      a.className = "hit";
+      a.href = item.url;
+      a.setAttribute("role", "option");
+      b.textContent = item.title;
+      a.append(b);
+      if (item.sub) { const s = document.createElement("span"); s.textContent = item.sub; a.append(s); }
+      results.append(a);
+    }
+  }
+  hits = $$(".hit", results);
+  if (!hits.length) results.innerHTML = '<div class="none">Ничего не нашлось</div>';
+  mark(0);
+}
+function openPalette() {
+  if (!palette.open) palette.showModal();
+  field.select();
+  find();
+}
+field.addEventListener("input", () => { clearTimeout(findTimer); findTimer = setTimeout(find, 150); });
+field.addEventListener("keydown", e => {
+  if ((e.key === "ArrowDown" || e.key === "ArrowUp") && hits.length) {
+    e.preventDefault();
+    mark((current + (e.key === "ArrowDown" ? 1 : -1) + hits.length) % hits.length);
+  } else if (e.key === "Enter" && hits[current]) {
+    e.preventDefault();
+    hits[current].click();
+  }
+});
+palette.addEventListener("click", e => { if (e.target === palette || e.target.closest(".hit")) palette.close(); });
+$$("[data-palette]").forEach(b => b.addEventListener("click", openPalette));
+if (!/mac|iphone|ipad/i.test(navigator.userAgentData?.platform || navigator.platform))
+  $$("[data-palette] kbd").forEach(k => k.textContent = "Ctrl K");
+
 settle();
 schedule();
+watchWaiting();
 })();"""
 
 
@@ -564,7 +767,10 @@ def render_page(title: str, body: str, active: str = "/", refresh: int | None = 
 <meta name="viewport" content="width=device-width,initial-scale=1">{meta}<title>{escape(title)}</title>
 <style>{CSS}</style></head><body><a class="skip" href="#main">К содержимому</a><div class="shell"><aside class="side">
 <a class="brand" href="/"><span class="logo" aria-hidden="true">ИИ</span>Помощник менеджера</a>
-<nav aria-label="Разделы" data-live="nav">{"".join(links)}</nav><a class="logout" href="/logout">Выйти</a></aside>
+<button type="button" class="find" data-palette aria-keyshortcuts="Meta+K Control+K">Поиск<kbd>⌘K</kbd></button>
+<nav aria-label="Разделы" data-live="nav">{"".join(links)}</nav>
+<div class="side-foot"><button type="button" class="notify" hidden>Уведомлять о новых вопросах</button>
+<a class="logout" href="/logout">Выйти</a></div></aside>
 <main id="main"{' class="wide"' if wide else ""}{f' data-poll="{poll}"' if poll else ""}>{body}</main></div>
 <script>{JS}</script></body></html>""")
 
@@ -852,10 +1058,11 @@ def create_app(services: Services) -> FastAPI:
 
     # --- журнал ---
     @app.get("/dialogs", dependencies=[Depends(auth)])
-    async def dialogs(f: str = "", q: str = "", conn: str = "", chat: str = "") -> Response:
+    async def dialogs(f: str = "", q: str = "", conn: str = "", chat: str = "", done: str = "") -> Response:
         if f in ("observe", "watch"):  # раньше наблюдение жило вкладками «Диалогов»
             return RedirectResponse("/observe" + (f"?{urlencode({'q': q})}" if q else ""), status_code=303)
-        return page("Диалоги", dialogs_html(services, f, q, conn, chat), "/dialogs", wide=True, poll=LIVE_SECONDS)
+        return page("Диалоги", dialogs_html(services, f, q, conn, chat, DRAFT_RESULTS.get(done, "")), "/dialogs",
+                    wide=True, poll=LIVE_SECONDS)
 
     @app.get("/observe", dependencies=[Depends(auth)])
     async def observe_page(conn: str = "", chat: str = "", q: str = "") -> HTMLResponse:
@@ -867,8 +1074,26 @@ def create_app(services: Services) -> FastAPI:
             raise HTTPException(404, "Диалог не найден.")
         services.db.flag_dialog(dialog_id, bool(flagged))
         back = back if back.startswith("/dialogs") else "/dialogs"
-        target = f"/dialogs/{dialog_id}/review?" + urlencode({"back": back}) if flagged else back
-        return RedirectResponse(target, status_code=303)
+        # Разбор открывается прямо под ответом в переписке; отдельная страница осталась для старых ссылок
+        return RedirectResponse(f"{back}#d{dialog_id}", status_code=303)
+
+    @app.get("/live/waiting", dependencies=[Depends(auth)])
+    async def live_waiting() -> Response:
+        """Что ждёт менеджера — для уведомлений браузера и числа в заголовке вкладки."""
+        return Response(json.dumps(waiting_json(services), ensure_ascii=False), media_type="application/json")
+
+    @app.get("/search", dependencies=[Depends(auth)])
+    async def search(q: str = "") -> Response:
+        """Поиск ⌘K: разделы и настройки, разговоры, переписка наблюдения и база знаний."""
+        return Response(json.dumps(search_json(services, q[:200]), ensure_ascii=False), media_type="application/json")
+
+    @app.post("/dialogs/{dialog_id}/draft", dependencies=[Depends(auth)])
+    async def draft_decision(dialog_id: int, action: str = Form(...), text: str = Form(""),
+                             back: str = Form("/dialogs")) -> RedirectResponse:
+        """Ответ клиенту с сайта: отправить черновик, свой вариант или пропустить — как кнопки в Telegram."""
+        result = await services.decide_draft(dialog_id, action, text[:4096])
+        back = back if back.startswith("/dialogs") else "/dialogs"
+        return RedirectResponse(f"{back}{'&' if '?' in back else '?'}done={result}#d{dialog_id}", status_code=303)
 
     @app.get("/dialogs/{dialog_id}/review", dependencies=[Depends(auth)])
     async def review_form(dialog_id: int, back: str = "/dialogs?f=flagged") -> HTMLResponse:
@@ -1369,6 +1594,55 @@ def week_html(services: Services) -> str:
 бот ответил сам {s['auto_share']:.0%} · передано менеджеру {s['escalated_share']:.0%} · отмечено ошибок {s['flagged']}</p></div>"""
 
 
+def waiting_json(services: Services) -> dict:
+    """Черновики и передачи менеджеру, которые ждут решения: номер, кто, вопрос, куда перейти."""
+    items = [{"id": r["id"], "kind": "Черновик" if r["status"] == D.DRAFT_PENDING else "Менеджеру",
+              "name": chat_title(services, r["connection_id"], r["chat_id"]), "text": r["question"][:160],
+              "url": chat_link(r["connection_id"], r["chat_id"]) + f"#d{r['id']}"}
+             for r in services.db.attention(limit=20) if r["status"] in (D.DRAFT_PENDING, D.ESCALATED)]
+    return {"items": items}
+
+
+def search_json(services: Services, q: str) -> dict:
+    """Группы результатов для поиска ⌘K. Пустой запрос — все разделы, чтобы быстро перейти с клавиатуры."""
+    words = q.casefold().split()
+    places = [{"title": title, "sub": "", "url": url} for title, url, keys in SEARCH_PLACES
+              if all(w in f"{title} {keys}".casefold() for w in words)]
+    groups = [{"title": "Разделы", "items": places[:8 if words else len(places)]}] if places else []
+    if not words:
+        return {"groups": groups}
+    query, seen, chats = q.strip(), set(), []
+    for variant in dict.fromkeys((query, query.lower(), query[:1].upper() + query[1:])):  # LIKE в SQLite — регистр кириллицы
+        for r in services.db.recent_dialogs(20, query=variant, **FILTERS[""][1]):
+            key = (r["connection_id"] or "", r["chat_id"] or 0)
+            if key not in seen and len(chats) < 6:
+                seen.add(key)
+                text = r["question"] if query.casefold() in r["question"].casefold() else r["answer"]
+                chats.append({"title": chat_title(services, *key), "sub": text[:140],
+                              "url": chat_link(*key) + f"#d{r['id']}"})
+    observed, seen = [], set()
+    for variant in dict.fromkeys((query, query.lower(), query[:1].upper() + query[1:])):
+        for r in services.db.observations(20, query=variant):
+            key = (r["connection_id"], r["chat_id"])
+            if key not in seen and len(observed) < 4:
+                seen.add(key)
+                observed.append({"title": services.chat_names.get(r["chat_id"]) or f"Чат {r['chat_id']}",
+                                 "sub": r["text"][:140],
+                                 "url": "/observe?" + urlencode({"conn": r["connection_id"], "chat": r["chat_id"]})})
+    kb, found = services.draft_kb(), []
+    for hit in kb.search(query, 8):
+        c = hit.chunk
+        if c.kind == "price" and c.id.removeprefix("price-").isdigit():
+            row = kb.prices[int(c.id.removeprefix("price-"))]
+            found.append({"title": f"{row.format} · {row.placement}", "sub": f"{format_rub(row.price_rub)} · {row.period}",
+                          "url": f"/kb/price/{c.id.removeprefix('price-')}"})
+        elif c.kind == "faq":
+            found.append({"title": c.title, "sub": " ".join(c.text.split())[:140], "url": "/kb#faq"})
+    groups += [{"title": title, "items": items} for title, items in
+               (("Разговоры с ботом", chats), ("Наблюдение", observed), ("База знаний", found[:6])) if items]
+    return {"groups": groups}
+
+
 def attention_html(services: Services) -> str:
     """Что ждёт человека: новые подключения, черновики, свежие передачи менеджеру и неразобранные ошибки."""
     rows = []
@@ -1394,7 +1668,7 @@ def attention_html(services: Services) -> str:
 
 
 def dashboard_html(services: Services, question: str = "", result: str = "") -> str:
-    sandbox = f"""<div class="card"><h2>Проверить бота</h2>
+    sandbox = f"""<div class="card" id="sandbox"><h2>Проверить бота</h2>
 <p class="muted">Напишите вопрос как клиент — бот ответит здесь, клиенту ничего не уйдёт.</p>
 <form method="post" action="/sandbox" data-typing><textarea name="question" rows="2" required data-enter-send
 aria-label="Вопрос как от клиента"
@@ -1781,13 +2055,39 @@ def turn_html(r, back: str, titles: dict[str, str]) -> str:
                  f"<input type='hidden' name='flagged' value='{0 if flagged else 1}'>"
                  f"<input type='hidden' name='back' value='{escape(back)}'>"
                  f"<button class='small {'' if flagged else 'light'}'>{'Снять' if flagged else 'Ошибка'}</button></form>")
-    return (f"<div class='turn{' flag' if flagged else ''}' data-key='{r['id']}:{status}:{int(flagged)}'>"
+    review = ""
+    if flagged:  # разбор — под ответом; пока не сохранён, открыт
+        label = "Разбор сохранён" if r["reviewed"] else "Разобрать ошибку"
+        # Правильный ответ — с текстом бота: неверную цену проще поправить, чем набирать ответ заново
+        values = {**dict(r), "corrected_answer": r["corrected_answer"] or r["answer"]}
+        form = review_form_html(r, back, values, prefix=f"r{r['id']}-")
+        review = f"<details class='review'{'' if r['reviewed'] else ' open'}><summary>{label}</summary>{form}</details>"
+    return (f"<div class='turn{' flag' if flagged else ''}' id='d{r['id']}' data-key='{r['id']}:{status}:{int(flagged)}'>"
             f"<div class='msg'><div class='muted'>Клиент · {when}</div><div class='bubble'>{escape(r['question'])}</div></div>"
             f"<div class='msg me'><div class='muted'>Бот · {status_pill(status)}</div>{text}</div>"
-            f"<div class='why'>{f'<span>{why}</span>' if why else ''}{review_link(r)}{flag_form}</div></div>")
+            f"<div class='why'>{f'<span>{why}</span>' if why else ''}{flag_form}</div>{draft_form_html(r, back)}{review}</div>")
 
 
-def dialogs_html(services: Services, f: str, q: str, conn: str = "", chat: str = "") -> str:
+def draft_form_html(r, back: str) -> str:
+    """Вопрос ждёт менеджера — ответить можно прямо здесь: отправить черновик, свой вариант или пропустить.
+    В тестовом чате отвечать некому."""
+    if r["status"] not in (D.DRAFT_PENDING, D.ESCALATED) or (r["connection_id"] or "").startswith("sandbox:"):
+        return ""
+    has_draft = r["status"] == D.DRAFT_PENDING and r["answer"]
+    send = "<button name='action' value='send'>Отправить клиенту</button>" if has_draft else ""
+    skip = "<button class='light' name='action' value='skip'>Пропустить</button>" if has_draft else ""
+    return (f"<form class='reply' method='post' action='/dialogs/{r['id']}/draft' data-reply>"
+            f"<input type='hidden' name='back' value='{escape(back)}'>{send}"
+            f"<details{'' if has_draft else ' open'}><summary class='btn light'>"
+            f"<span class='closed'>{'Исправить' if has_draft else 'Ответить клиенту'}</span>"
+            f"<span class='opened'>{'Отменить правку' if has_draft else 'Свернуть'}</span></summary>"
+            f"<textarea name='text' rows='3' maxlength='4096' aria-label='Ваш ответ клиенту' "
+            f"placeholder='Ответ уйдёт клиенту от вашего имени'>{escape(r['answer']) if has_draft else ''}</textarea>"
+            f"<button name='action' value='edit'>Отправить {'свой вариант' if has_draft else 'ответ'}</button></details>"
+            f"{skip}</form>")
+
+
+def dialogs_html(services: Services, f: str, q: str, conn: str = "", chat: str = "", msg: str = "") -> str:
     """«Диалоги» как ящик поддержки: слева разговоры по чатам, справа переписка выбранного с решениями бота."""
     f, q = (f if f in FILTERS else ""), q.strip()
     tabs = "".join(
@@ -1796,7 +2096,7 @@ def dialogs_html(services: Services, f: str, q: str, conn: str = "", chat: str =
     search = f"""<form method="get" action="/dialogs" role="search"><input type="hidden" name="f" value="{f}">
 <input type="search" name="q" value="{escape(q)}" placeholder="Поиск по вопросам и ответам" aria-label="Поиск по вопросам и ответам">
 <button class="light">Найти</button></form>"""
-    head = f'<h1>Диалоги</h1><div class="toolbar"><div class="tabs" data-live="tabs">{tabs}</div>{search}</div>'
+    head = f'<h1>Диалоги</h1>{note(msg)}<div class="toolbar"><div class="tabs" data-live="tabs">{tabs}</div>{search}</div>'
     chats: dict[tuple[str, int], list] = {}
     for r in services.db.recent_dialogs(500, query=q, **FILTERS[f][1]):
         chats.setdefault((r["connection_id"] or "", r["chat_id"] or 0), []).append(r)
@@ -1844,16 +2144,19 @@ def flagged_csv_text(services: Services) -> str:
     return "﻿" + out.getvalue()  # BOM, чтобы Excel открыл кириллицу
 
 
-def review_link(dialog) -> str:
-    if not dialog["flagged"]:
-        return ""
-    label = "Разбор сохранён" if dialog["reviewed"] else "Разобрать"
-    return f'<a href="/dialogs/{dialog["id"]}/review">{label}</a>'
-
-
 def dialog_review_html(dialog, back: str, msg: str = "", values: dict[str, str] | None = None) -> str:
-    values = dict(dialog) if values is None else values
     back = back if back.startswith("/dialogs") else "/dialogs?f=flagged"
+    return f"""<h1>Разбор ответа</h1><p><a href="{escape(back)}">← Диалоги</a></p>{note(msg)}
+<div class="card"><div class="muted">Вопрос клиента</div><div class="bubble">{escape(dialog['question'])}</div>
+<div class="muted">Ответ бота</div><div class="bubble">{escape(dialog['answer'])}</div>
+{f'<p class="muted">Бот отвечал по версии базы {dialog["kb_version"]}.</p>' if dialog["kb_version"] else ""}</div>
+<div class="card">{review_form_html(dialog, back, values)}</div>"""
+
+
+def review_form_html(dialog, back: str, values: dict | None = None, prefix: str = "") -> str:
+    """Форма разбора ошибки: что было неверно, как правильно и что проверить. prefix — чтобы id полей
+    не повторялись, когда в переписке открыто несколько разборов."""
+    values = dict(dialog) if values is None else values
 
     def options(key: str, choices: tuple[tuple[str, str], ...]) -> str:
         return '<option value="">Выберите</option>' + "".join(
@@ -1862,22 +2165,18 @@ def dialog_review_html(dialog, back: str, msg: str = "", values: dict[str, str] 
 
     types = options("error_type", (("facts", "Неверные факты"), ("decision", "Неверное решение")))
     decisions = options("expected_decision", (("answer", "Ответить клиенту"), ("escalate", "Передать менеджеру")))
-    return f"""<h1>Разбор ответа</h1><p><a href="{escape(back)}">← Диалоги</a></p>{note(msg)}
-<div class="card"><div class="muted">Вопрос клиента</div><div class="bubble">{escape(dialog['question'])}</div>
-<div class="muted">Ответ бота</div><div class="bubble">{escape(dialog['answer'])}</div>
-{f'<p class="muted">Бот отвечал по версии базы {dialog["kb_version"]}.</p>' if dialog["kb_version"] else ""}</div>
-<div class="card"><form method="post" action="/dialogs/{dialog['id']}/review">
+    return f"""<form method="post" action="/dialogs/{dialog['id']}/review">
 <input type="hidden" name="back" value="{escape(back)}">
-<label for="error-type">Что было неверно</label><select id="error-type" name="error_type" required>{types}</select>
-<label for="expected-decision">Как правильно поступить</label>
-<select id="expected-decision" name="expected_decision" required>{decisions}</select>
-<label for="corrected-answer">Правильный ответ</label>
-<textarea id="corrected-answer" name="corrected_answer" rows="4" maxlength="4096">{escape(values.get('corrected_answer', ''))}</textarea>
-<label for="must-contain">Что проверить в ответе</label>
-<input id="must-contain" type="text" name="must_contain" maxlength="1000" value="{escape(values.get('must_contain', ''))}">
+<label for="{prefix}error-type">Что было неверно</label><select id="{prefix}error-type" name="error_type" required>{types}</select>
+<label for="{prefix}expected-decision">Как правильно поступить</label>
+<select id="{prefix}expected-decision" name="expected_decision" required>{decisions}</select>
+<label for="{prefix}corrected-answer">Правильный ответ</label>
+<textarea id="{prefix}corrected-answer" name="corrected_answer" rows="4" maxlength="4096">{escape(values.get('corrected_answer') or '')}</textarea>
+<label for="{prefix}must-contain">Что проверить в ответе</label>
+<input id="{prefix}must-contain" type="text" name="must_contain" maxlength="1000" value="{escape(values.get('must_contain') or '')}">
 <p class="hint">Если бот должен ответить, укажите текст и факты через «;», например: 31500;экран.
 Варианты — экран|монитор, запрет — !бесплатно.</p>
-<p><button>Подтвердить для экзамена</button></p></form></div>"""
+<p><button>Подтвердить для экзамена</button></p></form>"""
 
 
 def kb_html(services: Services, msg: str = "") -> str:
@@ -2076,7 +2375,7 @@ def settings_html(services: Services, msg: str = "", form: dict | None = None) -
                    f'{"checked" if str(i) in v["work_days"] else ""}>{name}</label>'
                    for i, name in enumerate(DAY_NAMES, 1))
     return f"""<h1>Настройки</h1>{note(msg)}<form method="post" action="/settings" data-dirty>
-<div class="card"><h2>Модель и режим</h2>
+<div class="card" id="model"><h2>Модель и режим</h2>
 <label for="model">Нейросеть</label><select id="model" name="model">{models}</select>{key_warn}
 <p class="hint">Lite отвечает быстрее, Pro точнее: на экзамене у Pro не было опасных ответов.</p>
 <label for="mode">Режим для новых подключений</label>
@@ -2085,14 +2384,14 @@ def settings_html(services: Services, msg: str = "", form: dict | None = None) -
 <option value="auto" {"selected" if mode == "auto" else ""}>Автоответ — бот отвечает клиенту сам</option></select>
 <p class="hint">У уже подключённых менеджеров режим меняется на странице «Обзор» или командой /mode в боте.</p></div>
 
-<div class="card"><h2>Изменения базы знаний</h2>
+<div class="card" id="publish"><h2>Изменения базы знаний</h2>
 <label for="publish">Публиковать изменения</label>
 <select id="publish" name="kb_publish"><option value="auto" {"selected" if v["kb_publish"] == "auto" else ""}>Сразу, если проверка пройдена</option>
 <option value="manual" {"selected" if v["kb_publish"] == "manual" else ""}>Вручную — кнопкой на странице «База знаний»</option></select>
 <p class="hint">Перед публикацией бот проверяет черновик: находит ли он по-прежнему ответы на контрольные вопросы
 и нет ли противоречий. Если проверка нашла проблему, изменения ждут вашего решения в любом режиме.</p></div>
 
-<div class="card"><h2>Когда бот отвечает сам</h2>
+<div class="card" id="auto"><h2>Когда бот отвечает сам</h2>
 <label for="sched">Автоответ</label>
 <select id="sched" name="auto_schedule"><option value="always" {"selected" if v["auto_schedule"] == "always" else ""}>Всегда</option>
 <option value="off_hours" {"selected" if v["auto_schedule"] == "off_hours" else ""}>Только в нерабочее время — днём бот готовит черновики</option></select>
@@ -2101,7 +2400,7 @@ def settings_html(services: Services, msg: str = "", form: dict | None = None) -
 <label>Рабочие дни</label><div class="days">{days}</div>
 <p class="hint">Действует для подключений в режиме «Автоответ». Время екатеринбургское.</p></div>
 
-<div class="card"><h2>Защита от лишних трат</h2>
+<div class="card" id="limits"><h2>Защита от лишних трат</h2>
 <label for="daily">Обращений к модели в день, не больше</label>
 <input id="daily" type="number" name="daily_llm_limit" min="0" max="100000" value="{text("daily_llm_limit")}">
 <p class="hint">После лимита бот до полуночи передаёт вопросы менеджеру и не тратит токены. 0 — без лимита.
@@ -2110,13 +2409,13 @@ def settings_html(services: Services, msg: str = "", form: dict | None = None) -
 <input id="hourly" type="number" name="chat_hourly_limit" min="0" max="1000" value="{text("chat_hourly_limit")}">
 <p class="hint">Если клиент или чужой бот засыпает сообщениями, бот замолкает в этом чате на час и сообщает менеджеру.</p></div>
 
-<div class="card"><h2>Вечерняя сводка</h2>
+<div class="card" id="summary"><h2>Вечерняя сводка</h2>
 <label for="summary">Присылать менеджеру итоги дня в Telegram, время</label>
 <div class="time"><input id="summary" type="time" name="summary_time" value="{text("summary_time")}"></div>
 <p class="hint">Сколько вопросов было, на что бот ответил сам — и кнопки «Ошибка» под его ответами.
 Очистите поле, чтобы не присылать.</p></div>
 
-<div class="card"><h2>Тексты бота</h2>
+<div class="card" id="texts"><h2>Тексты бота</h2>
 <label for="addr">Обращение к клиентам</label>
 <select id="addr" name="address"><option value="вы" {"selected" if v["address"] == "вы" else ""}>На «вы»</option>
 <option value="ты" {"selected" if v["address"] == "ты" else ""}>На «ты»</option></select>
@@ -2129,7 +2428,7 @@ def settings_html(services: Services, msg: str = "", form: dict | None = None) -
 <textarea id="greet" name="greeting_message" rows="2">{text("greeting_message")}</textarea>
 <p class="hint">Пишите так, как обычно пишет менеджер: на «вы» или на «ты», с подписью или без.</p></div>
 
-<div class="card"><h2>Паузы</h2>
+<div class="card" id="pauses"><h2>Паузы</h2>
 <label for="pause">Молчать в чате после того, как менеджер написал сам, минут</label>
 <input id="pause" type="number" name="manager_pause_minutes" min="0" max="1440" value="{text("manager_pause_minutes")}">
 <label for="stale">Не отвечать на сообщения старше, минут</label>

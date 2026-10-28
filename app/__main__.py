@@ -111,9 +111,11 @@ async def main() -> None:
     if settings.telegram_bot_token:
         from aiogram import Bot
 
-        from .channels.telegram_business import build_dispatcher
+        from .channels.telegram_business import build_dispatcher, send_to_client
 
         bot, dp = Bot(settings.telegram_bot_token), build_dispatcher(services)
+        services.client_senders["telegram"] = lambda conn_id, chat_id, text: send_to_client(
+            bot, services, conn_id, chat_id, text)
         polling = asyncio.create_task(run_bot(bot, dp, services))
         polling.add_done_callback(_log_crash)
         tasks.append(polling)
