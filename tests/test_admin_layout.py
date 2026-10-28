@@ -24,7 +24,7 @@ def test_sidebar_groups_sections_and_counts_waiting_drafts(tmp_path):
     assert 'href="/kb" class="on" aria-current="page">База знаний' in side
     assert 'href="/dialogs">Диалоги<span class="n" data-key="/dialogs:1" title="ждут вас">1</span>' in side, \
         "черновик ждёт решения"
-    assert 'nav a[href="/observe"]{--icon:url("data:image/svg+xml,' in page, "у каждого раздела своя иконка"
+    assert "ИИ</span>" not in side and "--icon" not in page, "без значка «ИИ» и одинаковых иконок у разделов"
 
 
 def test_dialogs_group_turns_by_chat_and_open_picked_conversation(tmp_path):
@@ -69,7 +69,7 @@ def test_overview_shows_week_chart_and_what_needs_attention(tmp_path):
     log(services, 8, "проверка", D.SANDBOX, conn="sandbox:x")
 
     page = client.get("/").text
-    assert "Обращения клиентов за 7 дней" in page and '<div class="big">4<span class="delta">+300% к прошлой неделе' in page
+    assert "Обращения клиентов за 7 дней" in page and '<div class="big">4<span class="delta">на 300% больше, чем неделей раньше' in page
     assert 'class="chart"' in page and "<b>4</b>сегодня" in page, "тестовый чат в обращения не входит"
     assert "Бот ответил сам" in page and ">75%<" in page
     todo = page.split("Требуют внимания")[1].split("</ul>")[0]
@@ -113,3 +113,15 @@ def test_pages_wire_waiting_keys_and_unsaved_settings(tmp_path):
     running = exam_html(services, {"running": True, "done": 3, "total": 12, "error": ""})
     assert 'data-progress="0.250"' in running and 'aria-valuenow="3"' in running
     assert "prefers-reduced-motion:reduce" in home and "@view-transition" in home, "движение отключается по настройке"
+
+
+def test_brand_is_the_business_and_week_compares_in_words(tmp_path):
+    from app import onboarding
+    client, services = make_client(tmp_path)
+    onboarding.save(services, business_name="Инцентр")
+    log(services, 5, "Сколько стоит экран?", D.SENT_AUTO, ago=7 * 86400 + 60)
+    log(services, 5, "Сколько стоит экран?", D.ESCALATED, "escalate")
+    page = client.get("/").text
+    assert 'class="logo" aria-hidden="true"></span><span>Инцентр' in page and "помощник менеджера" in page
+    assert '<rect class="bar today"' in page and 'class="was"' in page, "сегодня выделено, неделя назад — чертой"
+    assert "Передано вам" in page and "неделей раньше 0" in page and "неделей раньше 100%" in page
