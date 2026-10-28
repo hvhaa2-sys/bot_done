@@ -16,7 +16,7 @@ import tempfile
 import time
 from pathlib import Path
 from html import escape, unescape as html_unescape
-from urllib.parse import quote, urlencode
+from urllib.parse import urlencode
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exception_handlers import http_exception_handler
@@ -110,67 +110,70 @@ LIVE_SECONDS = 15  # раз в сколько секунд «Обзор», «Д�
 LOGIN_TRIES, LOGIN_WINDOW = 5, 600  # не больше 5 неверных токенов за 10 минут с одного адреса
 
 CSS = """
-:root{--bg:#f5f2eb;--card:#fffdf9;--text:#14171f;--muted:#5d6270;--line:#e3ded3;--line-strong:#cbc4b5;
---accent:#c2410c;--accent-bg:#fdebe1;--ok:#15803d;--ok-bg:#e5f3e9;--warn:#a2470b;--warn-bg:#fcefdc;
---ink:#14171f;--on-ink:#f5f2eb;--on-accent:#fff;--radius:12px;--radius-sm:8px;--ease:cubic-bezier(.2,.7,.3,1)}
-@media (prefers-color-scheme:dark){:root{--bg:#111419;--card:#191e28;--text:#eef0f4;--muted:#a9b0be;--line:#2a3140;
---line-strong:#3b4354;--accent:#ff7a45;--accent-bg:#3a2218;--ok:#4ade80;--ok-bg:#15301f;--warn:#fbbf24;--warn-bg:#382c11;
---ink:#eef0f4;--on-ink:#111419;--on-accent:#1b0f08}}
+/* Табло торгового центра: графитовое меню, как указатель на этаже, бетонно-серый фон, один сигнальный жёлтый —
+только для того, что ждёт вас; углы почти прямые, цифры и время — моноширинные, как на табло */
+:root{--bg:#eef0ed;--card:#fcfcfa;--text:#151719;--muted:#5d6468;--line:#d9dcd7;--line-strong:#b5bab4;
+--accent:#ffd23f;--accent-bg:#fff3c4;--on-accent:#151719;--ok:#1f7a4d;--ok-bg:#e1f0e7;--warn:#a63d12;--warn-bg:#fbe5d8;
+--ink:#151719;--on-ink:#fcfcfa;--side:#1a1c1e;--side-text:#e7e9e5;--side-muted:#8d948f;--side-hover:#26292c;
+--radius:4px;--radius-sm:3px;--ease:cubic-bezier(.2,.7,.3,1);
+--font:"Onest",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;--mono:"JetBrains Mono",ui-monospace,Menlo,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#121416;--card:#1a1d20;--text:#eceeea;--muted:#9aa19c;--line:#2a2e31;
+--line-strong:#40464a;--accent:#ffd23f;--accent-bg:#3a3214;--on-accent:#151719;--ok:#5cc48d;--ok-bg:#163223;
+--warn:#f2994a;--warn-bg:#3a2414;--ink:#eceeea;--on-ink:#121416;--side:#0d0f10;--side-hover:#1c1f22}}
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
-body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-a{color:var(--accent);text-underline-offset:2px}
-:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 var(--font)}
+a{color:var(--text);text-decoration-color:var(--line-strong);text-underline-offset:3px}a:hover{text-decoration-color:currentColor}
+:focus-visible{outline:2px solid var(--text);outline-offset:2px;border-radius:2px}
 .skip{position:absolute;left:-999px;top:8px;background:var(--ink);color:var(--on-ink);padding:8px 12px;border-radius:8px;z-index:30}
 .skip:focus{left:8px}
-/* меню слева: разделы с иконками и счётчиками того, что ждёт вас; на телефоне — строка сверху, листается вбок */
-.shell{display:grid;grid-template-columns:236px minmax(0,1fr);min-height:100vh;min-height:100dvh}
-.side{position:sticky;top:0;height:100vh;height:100dvh;overflow-y:auto;display:flex;flex-direction:column;gap:2px;
-padding:16px 12px;background:var(--card);border-right:1px solid var(--line)}
-.brand{display:flex;align-items:center;gap:10px;padding:4px 10px 14px;font-weight:700;font-size:14.5px;line-height:1.25;
-color:var(--text);text-decoration:none}
-.logo{display:grid;place-items:center;width:28px;height:28px;flex:none;border-radius:8px;background:var(--accent);
-color:var(--on-accent);font-size:13px;font-weight:700}
-nav{display:flex;flex-direction:column;gap:2px}
-nav .grp{padding:16px 10px 6px;font-size:11.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
-nav a,.logout{display:flex;align-items:center;gap:10px;min-height:40px;padding:8px 10px;border-radius:var(--radius-sm);
-color:var(--text);text-decoration:none;font-size:14.5px;transition:background-color .15s var(--ease),color .15s var(--ease)}
-nav a::before,.logout::before{content:"";width:18px;height:18px;flex:none;background:currentColor;opacity:.7;
--webkit-mask:var(--icon) center/contain no-repeat;mask:var(--icon) center/contain no-repeat}
-nav a:hover,.logout:hover{background:var(--bg)}
-nav a.on{background:var(--accent-bg);color:var(--accent);font-weight:600}nav a.on::before{opacity:1}
-nav .n{margin-left:auto;min-width:22px;padding:1px 7px;border-radius:99px;background:var(--warn-bg);color:var(--warn);
-font-size:12px;font-weight:600;text-align:center;font-variant-numeric:tabular-nums}
-.logout{color:var(--muted)}.side-foot{margin-top:auto;display:flex;flex-direction:column;gap:6px}
-.find{justify-content:flex-start;gap:10px;width:100%;min-height:38px;margin:0 0 8px;padding:6px 10px;
-background:var(--bg);color:var(--muted);border:1px solid var(--line);font-size:14px;font-weight:400}
-.find::before{content:"";width:16px;height:16px;flex:none;background:currentColor;-webkit-mask:var(--icon) center/contain no-repeat;
-mask:var(--icon) center/contain no-repeat}
-.find kbd{margin-left:auto;padding:0 5px;border:1px solid var(--line-strong);border-radius:4px;font:12px ui-monospace,Menlo,monospace}
-.find:hover{opacity:1;color:var(--text);border-color:var(--line-strong)}
-.notify{width:100%;min-height:38px;padding:6px 10px;background:transparent;color:var(--muted);border:1px dashed var(--line-strong);
-font-size:13.5px;font-weight:400}.notify:hover{opacity:1;color:var(--text)}
+/* меню слева — как указатель на этаже: разделы и счётчики того, что ждёт вас; на телефоне — строка сверху */
+.shell{display:grid;grid-template-columns:232px minmax(0,1fr);min-height:100vh;min-height:100dvh}
+.side{position:sticky;top:0;height:100vh;height:100dvh;overflow-y:auto;display:flex;flex-direction:column;gap:1px;
+padding:18px 12px 14px;background:var(--side);color:var(--side-text)}
+.side :focus-visible{outline-color:var(--accent)}
+.brand{display:flex;align-items:flex-start;gap:10px;padding:2px 10px 18px;color:var(--side-text);text-decoration:none;
+font-weight:700;font-size:16px;line-height:1.2}
+.brand small{display:block;margin-top:3px;font-size:12.5px;font-weight:400;color:var(--side-muted)}
+.logo{width:11px;height:11px;flex:none;margin-top:5px;background:var(--accent)}
+nav{display:flex;flex-direction:column;gap:1px}
+nav .grp{padding:18px 10px 6px;font-size:12.5px;color:var(--side-muted)}
+nav a,.logout{display:flex;align-items:center;gap:10px;min-height:38px;padding:7px 10px;border-radius:var(--radius-sm);
+color:var(--side-text);text-decoration:none;font-size:15px;transition:background-color .15s var(--ease),color .15s var(--ease)}
+nav a:hover,.logout:hover{background:var(--side-hover)}
+nav a.on{background:var(--accent);color:var(--on-accent);font-weight:600}
+nav .n{margin-left:auto;min-width:22px;padding:0 6px;border-radius:2px;background:var(--accent);color:var(--on-accent);
+font:600 12px/20px var(--mono);text-align:center}
+nav a.on .n{background:var(--on-accent);color:var(--accent)}
+.logout{color:var(--side-muted)}.side-foot{margin-top:auto;display:flex;flex-direction:column;gap:6px}
+.find{justify-content:flex-start;gap:10px;width:100%;min-height:36px;margin:0 0 6px;padding:6px 10px;
+background:var(--side-hover);color:var(--side-muted);border:1px solid transparent;font-size:14px;font-weight:400}
+.find kbd{margin-left:auto;padding:0 5px;border:1px solid var(--side-muted);border-radius:2px;font:12px var(--mono)}
+.find:hover{opacity:1;color:var(--side-text)}
+.notify{width:100%;min-height:36px;padding:6px 10px;background:transparent;color:var(--side-muted);
+border:1px dashed var(--side-muted);font-size:13.5px;font-weight:400}.notify:hover{opacity:1;color:var(--side-text)}
 main{width:100%;max-width:1160px;margin:0 auto;padding:28px 32px 56px;min-width:0}
 main.wide{max-width:none}
 @media(max-width:860px){.shell{display:block}
-.side{z-index:20;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center;gap:0;padding:0 12px;border-right:0;
-border-bottom:1px solid var(--line)}
-.brand{flex:1;padding:12px 4px 6px}.side-foot{order:1;margin:0;flex-direction:row}.notify{display:none!important}
-.find{order:0;width:auto;min-height:36px;margin:0 4px 0 0;padding:6px 10px}.find kbd{display:none}
-.logout{min-height:36px;padding:6px 4px;font-size:14px}.logout::before{display:none}
+.side{z-index:20;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center;gap:0;padding:0 12px}
+.brand{flex:1;padding:12px 4px 6px;font-size:15px}.brand small{display:none}.logo{margin-top:4px}
+.side-foot{order:1;margin:0;flex-direction:row}.notify{display:none!important}
+.find{order:0;width:auto;min-height:34px;margin:0 4px 0 0;padding:4px 10px}.find kbd{display:none}
+.logout{min-height:34px;padding:6px 4px;font-size:14px}
 nav{order:2;flex-direction:row;width:calc(100% + 24px);margin:0 -12px;padding:0 8px;overflow-x:auto;scrollbar-width:none;
 -webkit-overflow-scrolling:touch}nav::-webkit-scrollbar{display:none}nav .grp{display:none}
 nav a{flex:none;min-height:0;padding:10px 10px 12px;border-radius:0;border-bottom:2px solid transparent}
-nav a::before{display:none}nav a:hover{background:none}
-nav a.on{background:none;color:var(--text);border-color:var(--accent)}
+nav a:hover{background:none}
+nav a.on{background:none;color:var(--side-text);border-color:var(--accent)}nav a.on .n{background:var(--accent);color:var(--on-accent)}
 main{padding:20px 16px 48px}}
-h1{font-size:24px;line-height:1.25;margin:0 0 18px;letter-spacing:-.01em}h2{font-size:17px;margin:0 0 12px}
+h1{font-size:30px;line-height:1.1;margin:0 0 20px;letter-spacing:-.025em;font-weight:700}
+h2{font-size:17px;margin:0 0 12px;font-weight:650;letter-spacing:-.01em}
 h3{font-size:15px;margin:16px 0 8px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:20px;margin-bottom:16px}
 .card>:last-child{margin-bottom:0}.card>p:first-child,.card>h2:first-child{margin-top:0}
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
 .kpis .card{margin:0;padding:14px 16px}
-.kpi{font-size:28px;font-weight:700;line-height:1.15;margin-top:4px;font-variant-numeric:tabular-nums}
+.kpi{font:600 28px/1.15 var(--mono);margin-top:4px;letter-spacing:-.02em}
 .muted{color:var(--muted);font-size:13px}
 .cols{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:16px;align-items:start}
 @media(max-width:860px){.cols{grid-template-columns:1fr}}
@@ -189,17 +192,17 @@ textarea,input[type=text],input[type=password],input[type=email],input[type=numb
 input[type=time],input[type=date],input[type=url],select{width:100%;min-height:42px;padding:10px 12px;
 border:1px solid var(--line-strong);border-radius:var(--radius-sm);background:var(--card);color:var(--text);font:inherit;
 transition:border-color .15s var(--ease),box-shadow .15s var(--ease)}
-textarea:focus,input:focus,select:focus{outline:none;border-color:var(--accent);
-box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent)}
+textarea:focus,input:focus,select:focus{outline:none;border-color:var(--text);
+box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 70%,transparent)}
 ::placeholder{color:var(--muted);opacity:.8}
-textarea.code{font:13px/1.55 ui-monospace,Menlo,monospace}
+textarea.code{font:13px/1.55 var(--mono)}
 input[type=file]{font:inherit;font-size:14px;color:var(--muted);max-width:100%}
 input[type=file]::file-selector-button{font:inherit;font-size:14px;margin-right:10px;padding:8px 14px;min-height:40px;
 border:1px solid var(--line-strong);border-radius:var(--radius-sm);background:transparent;color:var(--text);cursor:pointer}
 label{display:block;margin:16px 0 6px;font-weight:600}.hint{color:var(--muted);font-size:13px;margin-top:6px}
 button,.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:42px;padding:9px 18px;
 background:var(--ink);color:var(--on-ink);border:1px solid var(--ink);border-radius:var(--radius-sm);font:inherit;
-font-weight:500;cursor:pointer;text-decoration:none;transition:background-color .15s var(--ease),
+font-weight:600;cursor:pointer;text-decoration:none;transition:background-color .15s var(--ease),
 border-color .15s var(--ease),opacity .15s var(--ease),transform .1s var(--ease)}
 button:hover,.btn:hover{opacity:.88}button:active,.btn:active{transform:scale(.98)}
 button.light,.btn.light{background:transparent;color:var(--text);border-color:var(--line-strong)}
@@ -214,32 +217,33 @@ button:disabled{opacity:.45;cursor:not-allowed;transform:none}
 border-radius:var(--radius-sm);padding:8px 12px;cursor:pointer;min-height:40px}.days input{margin-right:6px}
 .time{display:flex;gap:10px;align-items:center}.time input{width:130px}
 .ok{color:var(--ok)}.warn{color:var(--warn)}
-.pill{display:inline-block;padding:2px 10px;border-radius:99px;border:1px solid var(--line);font-size:12.5px;
-white-space:nowrap;background:var(--bg)}
-.pill.ok{background:var(--ok-bg);border-color:transparent;color:var(--ok)}
-.pill.warn{background:var(--warn-bg);border-color:transparent;color:var(--warn)}
-.tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
-.tabs a{display:inline-flex;align-items:center;min-height:36px;padding:6px 14px;border-radius:99px;
-border:1px solid var(--line-strong);text-decoration:none;color:var(--text);font-size:14px;
-transition:background-color .15s var(--ease)}
-.tabs a:hover{background:var(--card)}.tabs a.on{background:var(--ink);color:var(--on-ink);border-color:var(--ink)}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);white-space:nowrap}
+.pill::before{content:"";width:8px;height:8px;flex:none;background:var(--line-strong)}
+.pill.ok::before{background:var(--ok)}
+.pill.warn{padding:0 7px;border-radius:2px;background:var(--accent);color:var(--on-accent);font-weight:600}
+.pill.warn::before{width:6px;height:6px;background:var(--on-accent)}
+.tabs{display:flex;gap:0 20px;flex-wrap:wrap;margin-bottom:14px}
+.tabs a{display:inline-flex;align-items:center;min-height:40px;padding:0 1px;border-bottom:3px solid transparent;
+text-decoration:none;color:var(--muted);font-size:15px;transition:color .15s var(--ease),border-color .15s var(--ease)}
+.tabs a:hover{color:var(--text)}.tabs a.on{color:var(--text);font-weight:600;border-color:var(--text)}
 @media(max-width:640px){.tabs{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;margin:0 -12px 14px;padding:0 12px}
 .tabs a{flex:none}}
 [id]{scroll-margin-top:20px}@media(max-width:860px){[id]{scroll-margin-top:110px}}
 .status{list-style:none;margin:0;padding:0}.status li{display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--line)}
-.status li:last-child{border:0}.dot{width:9px;height:9px;border-radius:50%;margin-top:7px;flex:none}
+.status li:last-child{border:0}.dot{width:8px;height:8px;margin-top:8px;flex:none;background:var(--line-strong)}
 .dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}
-.bubble{background:var(--bg);border:1px solid var(--line);border-radius:14px 14px 14px 4px;padding:11px 14px;
+.bubble{background:var(--bg);border:1px solid var(--line);border-radius:var(--radius);padding:10px 14px;
 white-space:pre-wrap;overflow-wrap:anywhere}
-.note{background:var(--accent-bg);border-radius:var(--radius-sm);padding:12px 16px;margin-bottom:16px}
+.note{background:var(--accent-bg);border-left:4px solid var(--accent);padding:12px 16px;margin-bottom:16px}
 tr.flag td{background:var(--accent-bg)}details summary{cursor:pointer;color:var(--muted);padding:4px 0}
 pre{white-space:pre-wrap;margin:0;font:inherit;overflow-wrap:anywhere}
 .chat{display:flex;flex-direction:column;gap:12px}.chat .msg{max-width:85%}.chat .msg.me{align-self:flex-end}
 .chat .msg .muted{margin-bottom:4px}.chat .msg.me .muted{text-align:right}
-.chat .msg.me .bubble{background:var(--accent-bg);border-color:transparent;border-radius:14px 14px 4px 14px}
+.chat .msg.me .bubble{background:var(--accent-bg);border-color:transparent}
 .chats a{display:block;padding:10px 12px;border-radius:var(--radius-sm);text-decoration:none;color:var(--text)}
 .chats a:hover{background:var(--bg)}.chats a.on{background:var(--bg);font-weight:600}
-.login{max-width:400px;margin:0 auto;padding-top:14vh}.login h1{font-size:20px}
+.login{max-width:400px;margin:0 auto;padding-top:14vh}.login h1{font-size:22px}
+.login .logo{display:inline-block;margin:0 8px 2px 0;vertical-align:middle}
 .onboarding-banner,.onboarding-head{display:flex;justify-content:space-between;gap:16px;align-items:center}
 .onboarding-banner{border-bottom:1px solid var(--line);padding:0 0 18px;margin:0 0 20px}
 .onboarding-head{margin-bottom:24px}.onboarding-head h1{margin:0}.onboarding-head p{margin:4px 0 0}
@@ -247,8 +251,8 @@ pre{white-space:pre-wrap;margin:0;font:inherit;overflow-wrap:anywhere}
 .onboarding-steps{list-style:none;margin:0;padding:0}.onboarding-steps li{margin-bottom:8px}
 .onboarding-steps a{display:flex;align-items:center;gap:10px;text-decoration:none;color:var(--muted);padding:10px 0}
 .onboarding-steps .current a{color:var(--text);font-weight:600}.step-mark{display:grid;place-items:center;
-width:27px;height:27px;border:1px solid var(--line);border-radius:50%;font-size:12px;flex:none}
-.current .step-mark{border-color:var(--accent);color:var(--accent)}.step-mark.done{color:var(--ok);border-color:var(--ok)}
+width:27px;height:27px;border:1px solid var(--line);border-radius:2px;font:12px var(--mono);flex:none}
+.current .step-mark{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}.step-mark.done{color:var(--ok);border-color:var(--ok)}
 .onboarding-panel{padding:26px}.onboarding-panel>p:first-child{margin-top:0}.onboarding-panel h2{font-size:23px}
 .onboarding-next{margin-top:20px}.onboarding-next:empty{display:none}
 .onboarding-choice{display:flex;gap:10px;align-items:baseline;font-weight:400}.onboarding-choice input{flex:none}
@@ -263,24 +267,22 @@ gap:8px;overflow-x:auto;padding-bottom:8px}.onboarding-steps li{flex:0 0 auto;ma
 /* «Диалоги» и «Наблюдение» как ящик поддержки: слева разговоры, справа переписка; на телефоне — по очереди */
 .toolbar{display:flex;gap:12px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin-bottom:14px}
 .toolbar .tabs{margin:0}.toolbar form{display:flex;gap:8px;flex:1 1 280px;max-width:440px}
-.tabs .c{opacity:.65;margin-left:6px;font-variant-numeric:tabular-nums}
+.tabs .c{margin-left:6px;font:12px var(--mono);color:var(--muted)}
 .inbox{display:grid;grid-template-columns:minmax(260px,330px) minmax(0,1fr);height:max(520px,calc(100vh - 190px));
 height:max(520px,calc(100dvh - 190px));background:var(--card);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
 .list{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line)}
 .list-head{padding:12px 16px;border-bottom:1px solid var(--line);font-weight:600}
 .items{position:relative;flex:1;overflow-y:auto}
-.item{display:grid;grid-template-columns:36px minmax(0,1fr) auto;column-gap:10px;row-gap:1px;padding:12px 16px;
+.item{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:10px;row-gap:1px;padding:12px 16px;
 border-bottom:1px solid var(--line);color:var(--text);text-decoration:none}
-.item:hover{background:var(--bg)}.item.on{background:var(--accent-bg)}
-.av{grid-row:span 3;display:grid;place-items:center;width:36px;height:36px;border-radius:50%;font-size:12.5px;font-weight:650;
-background:color-mix(in srgb,var(--hue) 24%,var(--card));color:var(--text)}
+.item:hover{background:var(--bg)}.item.on{background:var(--accent-bg);box-shadow:inset 3px 0 var(--text)}
 .item .nm{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.item .tm{font-size:12px;color:var(--muted);white-space:nowrap;padding-top:2px}
-.item .pv{grid-column:2/4;font-size:13.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.item .st{grid-column:2/4;display:flex;gap:6px;flex-wrap:wrap;margin-top:5px}
+.item .tm{font:12px var(--mono);color:var(--muted);white-space:nowrap;padding-top:3px}
+.item .pv{grid-column:1/3;font-size:14px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item .st{grid-column:1/3;display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
 .thread{display:flex;flex-direction:column;min-width:0;min-height:0}
 .thread-head{display:flex;align-items:center;flex-wrap:wrap;gap:4px 12px;padding:12px 20px;border-bottom:1px solid var(--line)}
-.thread-head h2{margin:0;font-size:16px}
+.thread-head h2{margin:0;font-size:17px}
 .thread-body{flex:1;overflow-y:auto;padding:20px 24px;background:var(--bg)}
 .thread .bubble{background:var(--card)}
 .thread-foot{padding:10px 20px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
@@ -295,34 +297,31 @@ font-size:13px;color:var(--muted);text-align:right}
 @media(max-width:860px){.inbox{grid-template-columns:1fr;height:auto}.list{border-right:0}
 .items,.thread-body{overflow:visible}.inbox.open .list,.inbox:not(.open) .thread{display:none}
 .back{display:inline-flex}.thread-body{padding:16px}.thread-head{padding:12px 16px}}
-/* «Обзор»: неделя графиком против прошлой и три показателя с мини-графиками */
-.week{display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:32px}
-.big{display:flex;align-items:center;flex-wrap:wrap;gap:10px;font-size:32px;font-weight:700;line-height:1.1;margin:4px 0 2px;
-font-variant-numeric:tabular-nums}
-.delta{padding:2px 8px;border-radius:6px;background:var(--bg);color:var(--muted);font-size:13px;font-weight:600}
-.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--muted)}
-.legend i{display:inline-block;width:18px;margin-right:6px;vertical-align:middle;border-top:2.4px solid var(--accent)}
-.legend i.prev{border-top:2px dashed var(--muted);opacity:.7}
-.chart{display:block;width:100%;height:auto;margin-top:14px}
-.chart .grid{stroke:var(--line);stroke-width:1}
-.chart .prev{fill:none;stroke:var(--muted);stroke-width:1.6;stroke-dasharray:5 5;opacity:.55}
-.chart .area{fill:var(--accent);opacity:.1}
-.chart .line{fill:none;stroke:var(--accent);stroke-width:2.4;stroke-linejoin:round;stroke-linecap:round}
-.chart circle{fill:var(--accent);stroke:var(--card);stroke-width:2}
+/* «Обзор»: неделя столбиками, как табло; сегодня — жёлтым, черта — тот же день неделей раньше */
+.week{display:grid;grid-template-columns:minmax(0,1fr) 240px;gap:36px}
+.big{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px 14px;margin:6px 0 4px;font:600 40px/1 var(--mono);
+letter-spacing:-.03em}
+.delta{font:500 14px/1.4 var(--font);letter-spacing:0;color:var(--muted)}
+.legend{display:flex;gap:18px;flex-wrap:wrap;font-size:13px;color:var(--muted)}
+.legend i{display:inline-block;width:10px;height:10px;margin-right:6px;vertical-align:-1px;background:var(--text)}
+.legend i.prev{width:16px;height:0;border-top:2px solid var(--muted);vertical-align:3px}
+.chart{display:block;width:100%;height:auto;margin-top:16px}
+.chart .grid{stroke:var(--line-strong);stroke-width:1}
+.chart .bar{fill:var(--text)}.chart .bar.today{fill:var(--accent);stroke:var(--text);stroke-width:1.5}
+.chart .was{stroke:var(--muted);stroke-width:2}
 .days7{display:grid;grid-template-columns:repeat(7,1fr);text-align:center;font-size:12.5px;color:var(--muted);margin-top:6px}
-.days7 b{display:block;color:var(--text);font-size:14px;font-variant-numeric:tabular-nums}
-.stat{display:grid;grid-template-columns:1fr auto;align-items:end;column-gap:12px;padding:14px 0;border-bottom:1px solid var(--line)}
+.days7 b{display:block;color:var(--text);font:600 14px var(--mono)}
+.stat{padding:14px 0;border-bottom:1px solid var(--line)}
 .stat:first-child{padding-top:0}.stat:last-child{border-bottom:0}
-.stat .lbl{grid-column:1/3;font-size:13px;color:var(--muted)}
-.stat .val{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums}.stat .hint{grid-column:1/3;margin:2px 0 0}
-.spark{width:88px;height:26px;fill:none;stroke:var(--accent);stroke-width:1.6;stroke-linejoin:round;stroke-linecap:round}
+.stat .lbl{font-size:13.5px;color:var(--muted)}
+.stat .val{margin-top:2px;font:600 26px/1.15 var(--mono);letter-spacing:-.02em}.stat .hint{margin:4px 0 0}
 .todo{list-style:none;margin:0;padding:0}
-.todo li{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px 0;
+.todo li{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:center;padding:11px 0;
 border-bottom:1px solid var(--line)}
 .todo li:last-child{border-bottom:0}
 .todo a{display:flex;gap:8px;min-width:0;color:var(--text);text-decoration:none}.todo a:hover b{text-decoration:underline}
 .todo b{flex:none;white-space:nowrap}
-.todo .q{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.todo .q{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.todo li>.muted{font-family:var(--mono)}
 @media(max-width:860px){.week{grid-template-columns:1fr;gap:20px}}
 /* движение: короткое и со смыслом — переходы между разделами, новое в списках, ход ожидания; без него всё на месте */
 @view-transition{navigation:auto}
@@ -336,7 +335,7 @@ border-bottom:1px solid var(--line)}
 @keyframes fade{from{opacity:0}}
 @keyframes flash{from{background-color:var(--warn-bg)}}
 @keyframes pop{0%{transform:scale(.6)}60%{transform:scale(1.15)}}
-@keyframes draw{from{stroke-dashoffset:1}}
+@keyframes grow-y{from{transform:scaleY(0)}}
 @keyframes spin{to{transform:rotate(1turn)}}
 @keyframes blink{0%,80%,100%{opacity:.25}40%{opacity:1}}
 @keyframes slide-in{from{opacity:0;transform:translateX(24px)}}
@@ -351,20 +350,18 @@ nav .n.fresh{animation:pop .4s var(--ease)}
 .inbox.to-thread .thread-body>.chat{animation:swap .2s var(--ease)}
 @media(max-width:860px){.inbox.open.to-thread .thread{animation:slide-in .26s var(--ease)}
 .inbox.to-list .list{animation:slide-back .26s var(--ease)}.inbox.to-thread .thread-body>.chat{animation:none}}
-.chart .line,.spark polyline{stroke-dasharray:1;animation:draw 1s var(--ease) .15s both}
-.spark polyline{animation-duration:.8s;animation-delay:.35s}
-.chart .prev{animation:fade .6s ease-out .2s both}.chart .area{animation:fade .6s ease-out .6s both}
-.chart circle{transform-box:fill-box;transform-origin:center;animation:pop .35s var(--ease) 1.05s both}
-[data-replaced] .chart *,[data-replaced] .spark *{animation:none}
+.chart .bar{transform-box:fill-box;transform-origin:bottom;animation:grow-y .45s var(--ease) both;
+animation-delay:calc(var(--i) * 45ms)}.chart .was{animation:fade .4s ease-out .4s both}
+[data-replaced] .chart *{animation:none}
 button[aria-busy="true"]{cursor:progress}button[aria-busy="true"]:disabled{opacity:.85}
 button[aria-busy="true"]::before{content:"";width:14px;height:14px;flex:none;border-radius:50%;border:2px solid currentColor;
 border-right-color:transparent;animation:spin .7s linear infinite}
 .typing{display:inline-flex;align-items:center;gap:6px;margin-top:12px;padding:10px 14px;border:1px solid var(--line);
-border-radius:14px 14px 14px 4px;background:var(--bg);color:var(--muted);font-size:14px;animation:rise .25s var(--ease)}
+border-radius:var(--radius);background:var(--bg);color:var(--muted);font-size:14px;animation:rise .25s var(--ease)}
 .typing i{width:6px;height:6px;border-radius:50%;background:currentColor;animation:blink 1.2s infinite both}
 .typing i:nth-child(2){animation-delay:.2s}.typing i:nth-child(3){animation-delay:.4s;margin-right:4px}
 .progress{height:8px;margin:12px 0 4px;border-radius:99px;background:var(--bg);overflow:hidden}
-.progress i{display:block;height:100%;background:var(--accent);transform-origin:left;transform:scaleX(var(--p));
+.progress i{display:block;height:100%;background:var(--text);transform-origin:left;transform:scaleX(var(--p));
 animation:grow .5s var(--ease)}
 .savebar{position:sticky;bottom:12px;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:12px;
 margin-top:16px;padding:8px 8px 8px 18px;border-radius:var(--radius);background:var(--ink);color:var(--on-ink);
@@ -394,10 +391,10 @@ box-shadow:0 24px 64px -16px rgb(0 0 0/.35);overflow:hidden;display:flex;flex-di
 .palette input[type=search]{border:0;border-bottom:1px solid var(--line);border-radius:0;min-height:56px;padding:0 20px;
 font-size:17px;background:var(--card)}.palette input[type=search]:focus{box-shadow:none;border-color:var(--line)}
 .palette .results{overflow-y:auto;padding:6px 8px 8px;flex:1}
-.palette .grp{padding:10px 12px 4px;font-size:11.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.palette .grp{padding:12px 12px 4px;font-size:12.5px;color:var(--muted)}
 .palette .hit{display:flex;flex-direction:column;gap:1px;padding:8px 12px;border-radius:var(--radius-sm);color:var(--text);
 text-decoration:none}.palette .hit span{font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.palette .hit.on{background:var(--accent-bg)}.palette .none{padding:18px 12px;color:var(--muted)}
+.palette .hit.on{background:var(--accent-bg);box-shadow:inset 3px 0 var(--text)}.palette .none{padding:18px 12px;color:var(--muted)}
 .palette .keys{display:block;margin:0;padding:8px 16px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important}
 ::view-transition-group(*),::view-transition-old(*),::view-transition-new(*){animation:none!important}.typing i{opacity:.7}}
@@ -406,30 +403,6 @@ text-decoration:none}.palette .hit span{font-size:13px;color:var(--muted);white-
 NAV = [("/", "Обзор"), ("/dialogs", "Диалоги"), ("/observe", "Наблюдение"), ("/learn", "Обучение"), ("/kb", "База знаний"),
        ("/exam", "Экзамен"), ("/settings", "Настройки"), ("/onboarding", "Внедрение")]
 NAV_GROUPS = {"/dialogs": "Разговоры", "/learn": "Бот"}  # подпись группы в меню перед этим пунктом
-# Иконки меню: контур 16×16, рисуется маской цветом текста — одна и та же в светлой и тёмной теме
-NAV_ICONS = {
-    "/": '<path d="M2.5 7.2 8 2.6l5.5 4.6v6.3h-11z"/>',
-    "/dialogs": '<path d="M2.5 3h11v8H7.2L4.5 13.5V11h-2z"/>',
-    "/observe": '<path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/>',
-    "/learn": '<path d="M8 3 1.5 6 8 9l6.5-3zM4 7.3v3.2c1.1.9 2.5 1.4 4 1.4s2.9-.5 4-1.4V7.3"/>',
-    "/kb": '<path d="M3 3.5A1.5 1.5 0 0 1 4.5 2H13v10H4.5A1.5 1.5 0 0 0 3 13.5zM3 13.5A1.5 1.5 0 0 0 4.5 15H13v-3"/>',
-    "/exam": '<path d="M2.5 2.5h11v11h-11zM5.2 8.2l1.9 1.9 3.8-4.2"/>',
-    "/settings": '<circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v2M8 12.4v2M1.6 8h2M12.4 8h2M3.5 3.5l1.4 1.4M11.1 11.1l1.4 1.4'
-                 'M3.5 12.5l1.4-1.4M11.1 4.9l1.4-1.4"/>',
-    "/onboarding": '<path d="M3.5 14V2.5M3.5 3h8l-1.6 2.8 1.6 2.8h-8"/>',
-    "/logout": '<path d="M6.5 2.5h-4v11h4M10.5 5l3 3-3 3M13.5 8H6"/>',
-    "find": '<circle cx="7" cy="7" r="4.2"/><path d="m10.2 10.2 3.3 3.3"/>',
-}
-
-
-def _icon_rule(href: str, paths: str) -> str:
-    selector = {"/logout": ".logout", "find": ".find"}.get(href, f'nav a[href="{href}"]')
-    svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="#000" stroke-width="1.4" '
-           f'stroke-linecap="round" stroke-linejoin="round">{paths}</svg>')
-    return f'{selector}{{--icon:url("data:image/svg+xml,{quote(svg)}")}}'
-
-
-CSS += "".join(_icon_rule(href, paths) for href, paths in NAV_ICONS.items())
 
 
 # Поведение страниц без перезагрузки: живые блоки (data-live), переходы в ящиках, ожидание после отправки,
@@ -748,8 +721,14 @@ watchWaiting();
 })();"""
 
 
+# Onest — русский гротеск, JetBrains Mono — цифры и время. Без сети страница возьмёт системный шрифт
+FONTS = """<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com"
+crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">"""
+
+
 def render_page(title: str, body: str, active: str = "/", refresh: int | None = None, *,
-                wide: bool = False, badges: dict[str, int] | None = None, poll: int | None = None) -> HTMLResponse:
+                wide: bool = False, badges: dict[str, int] | None = None, poll: int | None = None,
+                brand: str = "") -> HTMLResponse:
     """Страница админки: меню слева, справа раздел. wide — для ящиков «Диалогов» и «Наблюдения» во всю ширину.
     poll — раз в сколько секунд скрипт подтягивает блоки с data-live (новые сообщения, счётчики) без перезагрузки;
     refresh — то же для страниц, которые меняются целиком (экзамен), а без JavaScript — обычное обновление."""
@@ -764,9 +743,10 @@ def render_page(title: str, body: str, active: str = "/", refresh: int | None = 
     meta = f'<noscript><meta http-equiv="refresh" content="{refresh}"></noscript>' if refresh else ""
     poll = poll or refresh
     return HTMLResponse(f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">{meta}<title>{escape(title)}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">{meta}<title>{escape(title)}</title>{FONTS}
 <style>{CSS}</style></head><body><a class="skip" href="#main">К содержимому</a><div class="shell"><aside class="side">
-<a class="brand" href="/"><span class="logo" aria-hidden="true">ИИ</span>Помощник менеджера</a>
+<a class="brand" href="/"><span class="logo" aria-hidden="true"></span><span>{escape(brand) or "Помощник"}
+<small>{"помощник менеджера" if brand else "менеджера по продажам"}</small></span></a>
 <button type="button" class="find" data-palette aria-keyshortcuts="Meta+K Control+K">Поиск<kbd>⌘K</kbd></button>
 <nav aria-label="Разделы" data-live="nav">{"".join(links)}</nav>
 <div class="side-foot"><button type="button" class="notify" hidden>Уведомлять о новых вопросах</button>
@@ -800,8 +780,8 @@ def login_page(msg: str = "", status: int = 401, with_password: bool = False) ->
 <p class="hint">Он записан в файле .env в строке ADMIN_TOKEN. Вместо токена можно задать логин и пароль:
 .venv/bin/python -m app.password</p>"""
     return HTMLResponse(f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Вход</title><style>{CSS}</style></head>
-<body><main class="login"><div class="card"><h1>ИИ-помощник менеджера</h1>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Вход</title>{FONTS}<style>{CSS}</style></head>
+<body><main class="login"><div class="card"><h1><span class="logo" aria-hidden="true"></span> Помощник менеджера</h1>
 {note(msg)}<form method="post" action="/login">{fields}<p><button>Войти</button></p></form></div></main>
 </body></html>""", status_code=status)
 
@@ -817,7 +797,8 @@ def create_app(services: Services) -> FastAPI:
 
     def page(title: str, body: str, active: str = "/", refresh: int | None = None, *,
              wide: bool = False, poll: int | None = None) -> HTMLResponse:
-        return render_page(title, body, active, refresh, wide=wide, badges=nav_badges(services), poll=poll)
+        return render_page(title, body, active, refresh, wide=wide, badges=nav_badges(services), poll=poll,
+                           brand=onboarding.load(services).get("business_name", ""))
 
     failures: dict[str, list[float]] = {}
 
@@ -1463,7 +1444,7 @@ def observe_html(services: Services, conn_id: str = "", chat_id: str = "", q: st
         picked = chosen or chats[0]
         items = "".join(
             f"<a class='item{' on' if c is picked else ''}' href='{escape(link(c))}' data-key='{c['chat_id']}:{c['n']}'>"
-            f"{avatar(name(c['chat_id']), str(c['chat_id']))}<span class='nm'>{escape(name(c['chat_id']))}</span>"
+            f"<span class='nm'>{escape(name(c['chat_id']))}</span>"
             f"<span class='tm'>{short_time(c['last_at'])}</span>"
             f"<span class='pv'>{plural(c['n'], 'сообщение', 'сообщения', 'сообщений')}</span></a>"
             for c in chats)
@@ -1528,32 +1509,24 @@ WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 
 
 def chart_svg(week: list[int], before: list[int]) -> str:
-    """Обращения по дням: эта неделя линией с заливкой, прошлая — пунктиром. Точки стоят по центрам семи колонок,
-    поэтому подписи дней под графиком (сетка из 7 колонок) совпадают с ними при любой ширине."""
-    w, top, base = 700, 12, 136
+    """Обращения по дням столбиками, как на табло: сегодня — жёлтым, черта — тот же день неделей раньше.
+    Столбики стоят по центрам семи колонок, поэтому подписи дней под графиком совпадают с ними при любой ширине."""
+    w, top, base, bar = 700, 10, 136, 46
     peak = max(week + before + [1])
 
-    def points(values: list[int]) -> list[tuple[float, float]]:
-        return [((i + .5) * w / 7, base - v / peak * (base - top)) for i, v in enumerate(values)]
+    def height(v: int) -> float:
+        return v / peak * (base - top)
 
-    now, prev = points(week), points(before)
-    line = " ".join(f"{x:.1f},{y:.1f}" for x, y in now)
-    area = f"M{now[0][0]:.1f} {base} L{line.replace(' ', ' L')} L{now[-1][0]:.1f} {base}Z"
-    grid = "".join(f'<line class="grid" x1="0" x2="{w}" y1="{y}" y2="{y}"/>' for y in (top, (top + base) / 2, base))
+    parts = [f'<line class="grid" x1="0" x2="{w}" y1="{base}" y2="{base}"/>']
+    for i, (now, was) in enumerate(zip(week, before)):
+        x = (i + .5) * w / 7 - bar / 2
+        parts.append(f'<rect class="bar{" today" if i == 6 else ""}" style="--i:{i}" x="{x:.1f}" '
+                     f'y="{base - height(now):.1f}" width="{bar}" height="{height(now):.1f}"/>')
+        if was:
+            parts.append(f'<line class="was" x1="{x - 6:.1f}" x2="{x + bar + 6:.1f}" '
+                         f'y1="{base - height(was):.1f}" y2="{base - height(was):.1f}"/>')
     label = ", ".join(f"{WEEKDAYS[i]} {v}" for i, v in enumerate(week))
-    return (f'<svg class="chart" viewBox="0 0 {w} 146" role="img" aria-label="Обращения за 7 дней по дням: {label}">'
-            f'{grid}<polyline class="prev" points="{" ".join(f"{x:.1f},{y:.1f}" for x, y in prev)}"/>'
-            f'<path class="area" d="{area}"/><polyline class="line" pathLength="1" points="{line}"/>'
-            f'<circle cx="{now[-1][0]:.1f}" cy="{now[-1][1]:.1f}" r="4.5"/></svg>')
-
-
-def spark_svg(values: list[float]) -> str:
-    """Мини-график показателя по дням недели: только форма, без осей."""
-    lo, hi, w, h = min(values), max(values), 88, 26
-    span = (hi - lo) or 1
-    pts = " ".join(f"{2 + i * (w - 4) / (len(values) - 1):.1f},{h - 3 - (v - lo) / span * (h - 6):.1f}"
-                   for i, v in enumerate(values))
-    return f'<svg class="spark" viewBox="0 0 {w} {h}" aria-hidden="true"><polyline pathLength="1" points="{pts}"/></svg>'
+    return f'<svg class="chart" viewBox="0 0 {w} 146" role="img" aria-label="Обращения по дням: {label}">{"".join(parts)}</svg>'
 
 
 def week_html(services: Services) -> str:
@@ -1562,36 +1535,42 @@ def week_html(services: Services) -> str:
     before, week = days[:7], days[7:]
     total, was = sum(d["questions"] for d in week), sum(d["questions"] for d in before)
     if was and total != was:
-        delta = f'<span class="delta">{f"{(total - was) / was:+.0%}".replace("-", "−")} к прошлой неделе</span>'
+        more = "больше" if total > was else "меньше"
+        delta = f'<span class="delta">на {abs(total - was) / was:.0%} {more}, чем неделей раньше</span>'
     else:
-        delta = '<span class="delta">как на прошлой неделе</span>' if was else ""
+        delta = '<span class="delta">столько же, сколько неделей раньше</span>' if was else ""
     labels = "".join(f"<span><b>{d['questions']}</b>{'сегодня' if i == 6 else WEEKDAYS[d['day'].weekday()]}</span>"
                      for i, d in enumerate(week))
-    bot, auto = sum(d["bot"] for d in week), sum(d["auto"] for d in week)
-    escalated = sum(d["escalated"] for d in week)
-    speed = [d["latency_ms"] for d in week if d["latency_ms"]]
-    quiet = "" if bot else '<p class="muted hint">бот за неделю не отвечал клиентам</p>'
+
+    def totals(span: list[dict]) -> tuple[int, int, int, list[float]]:
+        return (sum(d["bot"] for d in span), sum(d["auto"] for d in span), sum(d["escalated"] for d in span),
+                [d["latency_ms"] for d in span if d["latency_ms"]])
+
+    def seconds(values: list[float]) -> str:
+        return f"{sum(values) / len(values) / 1000:.1f} с".replace(".", ",")
+
+    bot, auto, escalated, speed = totals(week)
+    bot0, auto0, escalated0, speed0 = totals(before)
     stats = [("Бот ответил сам", f"{auto / bot:.0%}" if bot else "—",
-              spark_svg([d["auto"] / d["bot"] if d["bot"] else 0 for d in week]), quiet),
-             ("Передано менеджеру", str(escalated), spark_svg([d["escalated"] for d in week]), "")]
+              f"неделей раньше {auto0 / bot0:.0%}" if bot0 else "" if bot else "бот за неделю не отвечал клиентам"),
+             ("Передано вам", str(escalated), f"неделей раньше {escalated0}" if bot0 else "")]
     if speed:
-        stats.append(("Бот отвечает за", f"{sum(speed) / len(speed) / 1000:.1f} с".replace(".", ","),
-                      spark_svg([d["latency_ms"] / 1000 for d in week]), ""))
+        stats.append(("Бот отвечает за", seconds(speed), f"неделей раньше {seconds(speed0)}" if speed0 else ""))
     else:
-        waits = services.watch_stats() or {}
-        median = waits.get("median_wait_min")
-        stats.append(("Вы отвечаете клиенту через", minutes_text(median) if median is not None else "—", "",
-                      '<p class="muted hint">по наблюдению</p>' if median is not None else ""))
-    side = "".join(f'<div class="stat"><div class="lbl">{name}</div><div class="val">{value}</div>{spark}{hint}</div>'
-                   for name, value, spark, hint in stats)
+        median = (services.watch_stats() or {}).get("median_wait_min")
+        stats.append(("Вы отвечаете клиенту через", minutes_text(median) if median is not None else "—",
+                      "по наблюдению" if median is not None else ""))
+    side = "".join(f'<div class="stat"><div class="lbl">{name}</div><div class="val">{value}</div>'
+                   + (f'<p class="muted hint">{hint}</p>' if hint else "") + "</div>"
+                   for name, value, hint in stats)
     s = services.db.stats()
     return f"""<div class="card" data-live="week"><div class="week"><div>
 <div class="muted">Обращения клиентов за 7 дней</div><div class="big">{total}{delta}</div>
-<div class="legend"><span><i></i>эта неделя</span><span><i class="prev"></i>прошлая · {was}</span></div>
+<div class="legend"><span><i></i>эта неделя</span><span><i class="prev"></i>тот же день неделей раньше</span></div>
 {chart_svg([d["questions"] for d in week], [d["questions"] for d in before])}<div class="days7">{labels}</div></div>
 <div>{side}</div></div>
-<p class="muted" style="margin:16px 0 0">За всё время: {plural(s['real'], 'вопрос', 'вопроса', 'вопросов')} клиентов ·
-бот ответил сам {s['auto_share']:.0%} · передано менеджеру {s['escalated_share']:.0%} · отмечено ошибок {s['flagged']}</p></div>"""
+<p class="muted" style="margin:18px 0 0">За всё время {plural(s['real'], 'вопрос', 'вопроса', 'вопросов')}: на
+{s['auto_share']:.0%} бот ответил сам, {s['escalated_share']:.0%} передал вам, ошибок отмечено — {s['flagged']}.</p></div>"""
 
 
 def waiting_json(services: Services) -> dict:
@@ -2007,21 +1986,11 @@ def growth_html(services: Services) -> str:
 <table><tr><th>Неделя с</th><th>Вопросов</th><th>Бот ответил сам</th><th>Утверждено фактов</th></tr>{rows}</table></div>"""
 
 
-AVATAR_HUES = ("#c2410c", "#2563eb", "#15803d", "#7c3aed", "#0e7490", "#b45309")
-
-
 def chat_title(services: Services, connection_id: str | None, chat_id: int | None) -> str:
     """Имя чата в списках: тестовый чат админки, имя клиента из Telegram или номер чата."""
     if (connection_id or "").startswith("sandbox:"):
         return "Тестовый чат"
     return services.chat_names.get(chat_id) or f"Чат {chat_id}"
-
-
-def avatar(name: str, key: str) -> str:
-    """Кружок с буквами имени; цвет у чата постоянный, чтобы его было легко найти глазами."""
-    letters = "".join(w[0] for w in re.findall(r"[^\W\d_]+", name)[:2]).upper() or "#"
-    hue = AVATAR_HUES[sum(map(ord, key)) % len(AVATAR_HUES)]
-    return f'<span class="av" style="--hue:{hue}" aria-hidden="true">{escape(letters)}</span>'
 
 
 def short_time(ts: float) -> str:
@@ -2048,7 +2017,7 @@ def turn_html(r, back: str, titles: dict[str, str]) -> str:
     if r["decision"] == "answer":
         sources = json.loads(r["sources"] or "[]")
         source = " ".join(titles.get(sources[0], sources[0]).split()) if sources else ""
-        why = f"Опора: {escape(source[:90])}{'…' if len(source) > 90 else ''}" if source else ""
+        why = f"Из базы: {escape(source[:90])}{'…' if len(source) > 90 else ''}" if source else ""
     else:
         why = escape(human_reason(r["reason"])) if r["reason"] else ""
     flag_form = (f"<form method='post' action='/dialogs/{r['id']}/flag'>"
@@ -2113,7 +2082,7 @@ def dialogs_html(services: Services, f: str, q: str, conn: str = "", chat: str =
         items.append(
             f'<a class="item{" on" if key == picked else ""}" href="{escape(chat_link(*key, f, q))}" '
             f'data-key="{key[0]}:{key[1]}:{last["id"]}:{last["status"]}">'
-            f'{avatar(name, f"{key[0]}:{key[1]}")}<span class="nm">{escape(name)}</span>'
+            f'<span class="nm">{escape(name)}</span>'
             f'<span class="tm">{short_time(last["created_at"])}</span><span class="pv">{escape(last["question"])}</span>'
             f'<span class="st">{status_pill(last["status"])}{mark}</span></a>')
     turns = services.db.chat_dialogs(*picked, FILTERS[""][1]["statuses"])
@@ -2130,8 +2099,8 @@ def dialogs_html(services: Services, f: str, q: str, conn: str = "", chat: str =
 <h2>{escape(chat_title(services, *picked))}</h2>
 <span class="muted">{channel} · {plural(len(turns), "вопрос", "вопроса", "вопросов")}</span></div>
 <div class="thread-body"><div class="chat">{"".join(turn_html(r, back, titles) for r in turns)}</div></div>
-<div class="thread-foot">«Ошибка» — если бот ответил неверно или зря передал вопрос. После разбора пример попадёт в экзамен.
-<span class="keys">↑ ↓ — соседний разговор · / — поиск</span></div>
+<div class="thread-foot">Разобранные ошибки попадают в экзамен.
+<span class="keys">↑ и ↓ — соседний разговор, / — поиск</span></div>
 </div></div>"""
 
 
