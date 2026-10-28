@@ -119,3 +119,23 @@ def test_sidebar_has_search_and_notifications(tmp_path):
     side = client.get("/").text.split('<main id="main"')[0]
     assert 'class="find" data-palette' in side and "<kbd>⌘K</kbd>" in side
     assert '<button type="button" class="notify" hidden>' in side, "кнопку показывает скрипт, если браузер умеет"
+
+
+def test_learn_is_a_queue_that_keeps_place_and_typed_answer(tmp_path):
+    client, services, _ = setup(tmp_path)
+    for q in ("Есть ли парковка?", "Можно ли с собакой?", "Работаете ли в праздники?"):
+        log(services, 5, q, D.ESCALATED, "escalate", reason="no_context")
+    page = client.get("/learn").text
+    assert "1 из 3" in page and page.count('action="/learn/add"') == 1, "на экране один вопрос"
+    assert page.count('class="qitem"') == 2 and "Пропустить пока" in page
+    second = client.get("/learn?tab=questions&n=1").text
+    assert "2 из 3" in second and 'name="n" value="1"' in second
+
+    ids = ",".join(str(g) for g in [r["id"] for r in services.db.to_learn() if "собак" in r["question"]])
+    bad = client.post("/learn/add", data={"ids": ids, "question": "Можно ли с собакой?", "answer": "Да, 7 777 ₽.",
+                                          "n": "1"}).text
+    assert "нет в прайсе" in bad and ">Да, 7 777 ₽.</textarea>" in bad, "написанный ответ не пропал"
+    r = client.post("/learn/hide", data={"ids": ids, "n": "1"}, follow_redirects=False)
+    assert r.headers["location"] == "/learn?tab=questions&n=1"
+    assert "2 из 2" in client.get(r.headers["location"]).text, "на место скрытого встал следующий"
+    assert "Новых фактов из переписки нет" in client.get("/learn?tab=facts").text

@@ -21,6 +21,7 @@ from urllib.parse import urlencode
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import db as D
@@ -368,6 +369,17 @@ margin-top:16px;padding:8px 8px 8px 18px;border-radius:var(--radius);background:
 box-shadow:0 10px 28px -8px rgb(0 0 0/.35);animation:rise .2s var(--ease)}
 .savebar button{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
 .keys{display:none;margin-left:8px;opacity:.8}@media(hover:hover) and (pointer:fine){.keys{display:inline}}
+/* «Обучение» очередью: один вопрос на экране, справа — что дальше */
+.lead{max-width:70ch;margin:-4px 0 18px;font-size:14px}
+.queue{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:28px;align-items:start}
+.queue .current{margin:0;padding:24px}
+.qpos{margin-bottom:8px;font:500 12.5px var(--mono);color:var(--muted)}
+.queue .current h2{font-size:22px;line-height:1.25;letter-spacing:-.015em;margin-bottom:6px}
+.upnext h3{margin:4px 0 6px;font-size:13.5px;font-weight:500;color:var(--muted)}
+.qitem{display:block;padding:10px 0;border-top:1px solid var(--line);color:var(--text);text-decoration:none}
+.qitem b{display:block;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qitem span{font-size:13px;color:var(--muted)}.qitem:hover b{text-decoration:underline}
+@media(max-width:960px){.queue{grid-template-columns:minmax(0,1fr)}}
 /* ответ клиенту и разбор ошибки — прямо в переписке */
 .reply{align-self:flex-end;width:min(100%,560px);display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;align-items:flex-start}
 .reply button,.reply summary.btn{min-height:36px;padding:6px 14px;font-size:14px}
@@ -721,9 +733,19 @@ watchWaiting();
 })();"""
 
 
-# Onest — русский гротеск, JetBrains Mono — цифры и время. Без сети страница возьмёт системный шрифт
-FONTS = """<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com"
-crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">"""
+# Шрифты лежат в проекте (app/static/fonts, лицензия OFL): админка работает без сети и ничего не запрашивает у Google.
+# Onest — гротеск с хорошей кириллицей, JetBrains Mono — цифры и время. Кириллицу грузим сразу, латиницу — по надобности
+STATIC_DIR = Path(__file__).parent / "static"
+FONTS = ('<link rel="preload" href="/static/fonts/onest-cyrillic-wght-normal.woff2" as="font" type="font/woff2" crossorigin>'
+         '<link rel="preload" href="/static/fonts/jetbrains-mono-cyrillic-wght-normal.woff2" as="font" type="font/woff2" crossorigin>')
+_CYRILLIC = "U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116,U+20BD"
+_LATIN = ("U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,"
+          "U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD")
+CSS = "".join(
+    f'@font-face{{font-family:"{family}";src:url(/static/fonts/{name}-{subset}-wght-normal.woff2) format("woff2");'
+    f"font-weight:100 900;font-style:normal;font-display:swap;unicode-range:{ranges}}}"
+    for family, name in (("Onest", "onest"), ("JetBrains Mono", "jetbrains-mono"))
+    for subset, ranges in (("cyrillic", _CYRILLIC), ("latin", _LATIN))) + CSS
 
 
 def render_page(title: str, body: str, active: str = "/", refresh: int | None = None, *,
@@ -792,6 +814,7 @@ def note(msg: str) -> str:
 
 def create_app(services: Services) -> FastAPI:
     app = FastAPI(title="AI Sales Assistant admin", docs_url=None, redoc_url=None)
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")  # шрифты; без входа — нужны и форме входа
     exam: dict = {"running": False, "done": 0, "total": 0, "error": ""}
     onboarding_lock = asyncio.Lock()
 
@@ -1105,48 +1128,54 @@ def create_app(services: Services) -> FastAPI:
 
     # --- обучение: вопросы без ответа → новые записи в FAQ ---
     @app.get("/learn", dependencies=[Depends(auth)])
-    async def learn() -> HTMLResponse:
-        return page("Обучение", learn_html(services), "/learn")
+    async def learn(tab: str = "", n: int = 0) -> HTMLResponse:
+        return page("Обучение", learn_html(services, tab=tab, n=n), "/learn")
 
     @app.post("/learn/add", dependencies=[Depends(auth)])
-    async def learn_add(ids: str = Form(...), question: str = Form(...), answer: str = Form(...)) -> HTMLResponse:
+    async def learn_add(ids: str = Form(...), question: str = Form(...), answer: str = Form(...),
+                        n: int = Form(0)) -> HTMLResponse:
         question, answer = question.strip(), answer.strip()
+        kept = ([int(i) for i in ids.split(",") if i.isdigit()], question, answer)
         if not question or not answer:
-            return page("Обучение", learn_html(services, "Нужны и вопрос, и ответ."), "/learn")
+            return page("Обучение", learn_html(services, "Нужны и вопрос, и ответ.", tab="questions", n=n,
+                                               learn_edit=kept), "/learn")
         bad = unknown_amounts(answer, services.draft_kb().allowed_amounts())
         if bad:
             sums = ", ".join(format_rub(a) for a in bad)
             return page("Обучение", learn_html(
                 services, f"В ответе сумма {sums}, которой нет в прайсе: бот не сможет её назвать. "
-                          "Добавьте позицию в прайс или уберите сумму из ответа."), "/learn")
+                          "Добавьте позицию в прайс или уберите сумму из ответа.", tab="questions", n=n,
+                learn_edit=kept), "/learn")
         path = services.settings.kb_dir / "faq.md"
         text = path.read_text(encoding="utf-8") if path.exists() else ""
         path.write_text(text.rstrip("\n") + "\n\n" + faq_entry(question, answer), encoding="utf-8")
         published = services.kb_changed(f"Обучение: ответ на «{question}»")
         services.db.mark_learned([int(i) for i in ids.split(",") if i.isdigit()])
         check = await answer_check(services, question, "Ответ добавлен")
-        return page("Обучение", learn_html(services, f"Добавлено в базу знаний. {published}", check), "/learn")
+        return page("Обучение", learn_html(services, f"Добавлено в базу знаний. {published}", check,
+                                           tab="questions", n=n), "/learn")
 
     @app.post("/candidates/approve", dependencies=[Depends(auth)])
     async def candidates_approve(ids: str = Form(...), question: str = Form(...), answer: str = Form(...),
-                                 source_reviewed: bool = Form(False)) -> HTMLResponse:
+                                 source_reviewed: bool = Form(False), n: int = Form(0)) -> HTMLResponse:
         parts = [i.strip() for i in ids.split(",")]
         id_list = [int(i) for i in parts] if all(re.fullmatch(r"[0-9]+", i) for i in parts) else []
         ok, msg = services.approve_candidates(id_list, question, answer, source_reviewed=source_reviewed)
         if not ok:
-            return page("Обучение", learn_html(services, msg, candidate_edit=(id_list, question, answer)), "/learn")
+            return page("Обучение", learn_html(services, msg, tab="facts", n=n,
+                                               candidate_edit=(id_list, question, answer)), "/learn")
         check = await answer_check(services, question.strip(), "Факт добавлен")
-        return page("Обучение", learn_html(services, f"Факт утверждён. {msg}", check), "/learn")
+        return page("Обучение", learn_html(services, f"Факт утверждён. {msg}", check, tab="facts", n=n), "/learn")
 
     @app.post("/candidates/reject", dependencies=[Depends(auth)])
-    async def candidates_reject(ids: str = Form(...)) -> RedirectResponse:
+    async def candidates_reject(ids: str = Form(...), n: int = Form(0)) -> RedirectResponse:
         services.db.decide_candidates([int(i) for i in ids.split(",") if i.isdigit()], "rejected")
-        return RedirectResponse("/learn", status_code=303)
+        return RedirectResponse(f"/learn?tab=facts&n={max(n, 0)}", status_code=303)
 
     @app.post("/learn/hide", dependencies=[Depends(auth)])
-    async def learn_hide(ids: str = Form(...)) -> RedirectResponse:
+    async def learn_hide(ids: str = Form(...), n: int = Form(0)) -> RedirectResponse:
         services.db.mark_learned([int(i) for i in ids.split(",") if i.isdigit()])
-        return RedirectResponse("/learn", status_code=303)
+        return RedirectResponse(f"/learn?tab=questions&n={max(n, 0)}", status_code=303)
 
     # --- база знаний ---
     @app.get("/kb", dependencies=[Depends(auth)])
@@ -1836,33 +1865,68 @@ def connections_html(services: Services) -> str:
 <tr><th>Менеджер</th><th>Статус</th><th>Режим</th></tr>{"".join(row(c) for c in conns)}</table></div></div>"""
 
 
-def learn_html(services: Services, msg: str = "", check: str = "", *,
-               candidate_edit: tuple[list[int], str, str] | None = None) -> str:
-    groups = group_questions(services.db.to_learn())
-    intro = """<p class="muted">Здесь вопросы, на которые у бота не нашлось ответа, и ответы, отмеченные как ошибка.
-Похожие собраны вместе, частые — сверху. Напишите ответ один раз, и в следующий раз бот ответит сам.
-Цены в ответ не пишите: бот берёт их из прайса.</p>"""
-    if not groups:
-        body = '<div class="card ok">Учить пока нечему: бот ответил на всё, что знает база.</div>'
+def learn_html(services: Services, msg: str = "", check: str = "", *, tab: str = "", n: int = 0,
+               candidate_edit: tuple[list[int], str, str] | None = None,
+               learn_edit: tuple[list[int], str, str] | None = None) -> str:
+    """«Обучение» очередью: на экране один факт из переписки или один вопрос без ответа, справа — что дальше.
+    Утвердили, ответили или скрыли — на его место встаёт следующий. Две вкладки: факты и вопросы."""
+    facts = group_candidates(services.db.candidates(), services.kb)
+    questions = group_questions(services.db.to_learn())
+    tab = tab if tab in ("facts", "questions") else "facts" if facts else "questions"
+    tabs = "".join(
+        f'<a href="/learn?tab={key}" class="{"on" if key == tab else ""}">{name}<span class="c">{count}</span></a>'
+        for key, name, count in (("facts", "Из переписки", len(facts)), ("questions", "Вопросы без ответа", len(questions))))
+    if tab == "facts":
+        intro = "Факты из ваших ответов клиентам. Пока вы их не утвердите, бот их не видит."
+        body = candidates_html(services, candidate_edit, n, groups=facts)
     else:
-        cards = []
-        for g in groups[:30]:
-            ids = ",".join(map(str, g.ids))
-            when = dt.datetime.fromtimestamp(g.last_ts).strftime("%d.%m %H:%M")
-            why = "отмечено как ошибка" if g.flagged else escape(human_reason(g.reasons[0]))
-            others = sorted(set(g.questions) - {g.question}, key=len)[:6]
-            variants = ("<details><summary>Другие формулировки</summary><ul class='muted'>"
-                        + "".join(f"<li>{escape(q)}</li>" for q in others) + "</ul></details>") if others else ""
-            cards.append(f"""<div class="card"><h2>«{escape(g.question)}»</h2>
-<p class="muted">спрашивали {plural(g.count, "раз", "раза", "раз")} · последний {when} · {why}</p>{variants}
-<form method="post" action="/learn/add"><input type="hidden" name="ids" value="{ids}">
-<label>Вопрос для базы</label><input type="text" name="question" value="{escape(g.question)}">
-<label>Ответ</label><textarea name="answer" rows="3" required placeholder="Как бы вы ответили клиенту"></textarea>
-<p class="row"><button>Добавить в базу</button></p></form>
-<form method="post" action="/learn/hide"><input type="hidden" name="ids" value="{ids}">
-<button class="light small">Скрыть — это не вопрос для бота</button></form></div>""")
-        body = "".join(cards)
-    return f"<h1>Чему научить бота</h1>{note(msg)}{check}{candidates_html(services, candidate_edit)}{intro}{body}"
+        intro = ("Вопросы, на которые у бота не нашлось ответа, и ответы с отметкой «Ошибка». Ответьте один раз, "
+                 "и дальше бот ответит сам. Цены не пишите: бот берёт их из прайса.")
+        if learn_edit:  # ответ не приняли — показываем тот же вопрос с тем, что вы написали
+            n = next((i for i, g in enumerate(questions) if set(g.ids) == set(learn_edit[0])), n)
+        body = queue_html("questions", n, questions, lambda g, i, skip: question_card(g, i, skip, learn_edit),
+                          lambda g: (g.question, f"спрашивали {plural(g.count, 'раз', 'раза', 'раз')}, "
+                                                 + ("отмечено как ошибка" if g.flagged else human_reason(g.reasons[0]))),
+                          "Учить пока нечему: бот ответил на всё, что знает база.")
+    return f"""<h1>Чему научить бота</h1>{note(msg)}{check}<div class="tabs">{tabs}</div>
+<p class="muted lead">{intro}</p>{body}"""
+
+
+def queue_html(tab: str, n: int, items: list, card, title_meta, empty: str) -> str:
+    """Один элемент очереди целиком и до восьми следующих строкой. n — позиция; «Пропустить пока» ведёт на n+1."""
+    if not items:
+        return f'<div class="card empty">{empty}</div>'
+    n = n % len(items)
+    skip = (f'<a class="btn light" href="/learn?tab={tab}&amp;n={(n + 1) % len(items)}">Пропустить пока</a>'
+            if len(items) > 1 else "")
+    upcoming = []
+    for i in [(n + k) % len(items) for k in range(1, min(len(items), 9))]:
+        title, meta = title_meta(items[i])
+        upcoming.append(f'<a class="qitem" href="/learn?tab={tab}&amp;n={i}"><b>«{escape(title)}»</b>'
+                        f'<span>{escape(meta)}</span></a>')
+    rest = f'<p class="muted">и ещё {len(items) - 9}</p>' if len(items) > 9 else ""
+    aside = f'<aside class="upnext"><h3>Дальше в очереди</h3>{"".join(upcoming)}{rest}</aside>' if upcoming else ""
+    return (f'<div class="queue"><div class="card current"><div class="qpos">{n + 1} из {len(items)}</div>'
+            f'{card(items[n], n, skip)}</div>{aside}</div>')
+
+
+def question_card(g, n: int, skip: str, edit: tuple[list[int], str, str] | None = None) -> str:
+    ids = ",".join(map(str, g.ids))
+    question, answer = (edit[1], edit[2]) if edit and set(edit[0]) == set(g.ids) else (g.question, "")
+    when = dt.datetime.fromtimestamp(g.last_ts).strftime("%d.%m %H:%M")
+    why = "отмечено как ошибка" if g.flagged else escape(human_reason(g.reasons[0]))
+    others = sorted(set(g.questions) - {g.question}, key=len)[:6]
+    variants = ("<details><summary>Другие формулировки</summary><ul class='muted'>"
+                + "".join(f"<li>{escape(q)}</li>" for q in others) + "</ul></details>") if others else ""
+    return f"""<h2>«{escape(g.question)}»</h2>
+<p class="muted">спрашивали {plural(g.count, "раз", "раза", "раз")}, последний раз {when}, {why}</p>{variants}
+<form method="post" action="/learn/add"><input type="hidden" name="ids" value="{ids}"><input type="hidden" name="n" value="{n}">
+<label for="learn-q">Вопрос для базы</label><input id="learn-q" type="text" name="question" value="{escape(question)}">
+<label for="learn-a">Ответ</label><textarea id="learn-a" name="answer" rows="4" required
+placeholder="Как бы вы ответили клиенту">{escape(answer)}</textarea>
+<p class="row"><button>Добавить в базу</button>{skip}</p></form>
+<form method="post" action="/learn/hide"><input type="hidden" name="ids" value="{ids}"><input type="hidden" name="n" value="{n}">
+<button class="light small">Это не вопрос для бота, скрыть</button></form>"""
 
 
 async def answer_check(services: Services, question: str, done: str) -> str:
@@ -1934,42 +1998,45 @@ def versions_html(services: Services) -> str:
 SOURCE_NAMES = {"card": "ответ на карточку бота", "chat": "ответ в чате клиента", "observe": "наблюдение"}
 
 
-def candidates_html(services: Services, candidate_edit: tuple[list[int], str, str] | None = None) -> str:
-    """Факты из ответов менеджера клиентам: утвердить, поправить или отклонить. До утверждения бот их не видит."""
-    groups = group_candidates(services.db.candidates(), services.kb)
-    if not groups:
-        return ""
-    cards = []
-    for items in groups[:30]:
-        top = items[0]
-        question, answer = top["question"], top["answer"]
-        if candidate_edit and set(candidate_edit[0]) == {r["id"] for r in items}:
-            _, question, answer = candidate_edit
-        ids = ",".join(str(r["id"]) for r in items)
-        when = dt.datetime.fromtimestamp(top["created_at"]).strftime("%d.%m %H:%M")
-        warnings = services.candidate_warnings(items, question, answer)
-        # Сохранённая сверка относится к исходному извлечению. После правки показываем
-        # текущие сигналы, сохраняя прежние подсказки о прайсе и похожих фактах.
-        notes = list(dict.fromkeys([line for r in items for line in r["note"].splitlines()
-                                   if line and not line.startswith(NOTE_PREFIX)] + warnings))
-        warn = "".join(f'<p class="warn">{escape(n)}</p>' for n in notes)
-        reviewed = ('<label><input type="checkbox" name="source_reviewed" value="true"> '
-                    'Сверил с исходным ответом</label>') if warnings else ""
-        sources = "".join(
-            f"<li><b>Клиент:</b> {escape(r['client_question'])}<br><b>Вы ({SOURCE_NAMES.get(r['source'], r['source'])}):</b> "
-            f"{escape(r['manager_text'])}</li>" for r in items)
-        cards.append(f"""<div class="card"><h2>«{escape(question)}»</h2>
-<p class="muted">{plural(len(items), "источник", "источника", "источников")} · последний {when}</p>{warn}
+def candidates_html(services: Services, candidate_edit: tuple[list[int], str, str] | None = None, n: int = 0, *,
+                    groups: list | None = None) -> str:
+    """Факты из ответов менеджера клиентам очередью: утвердить, поправить или отклонить. До утверждения бот их не видит."""
+    groups = group_candidates(services.db.candidates(), services.kb) if groups is None else groups
+    if candidate_edit:  # утвердить не вышло — показываем тот же факт с вашей правкой
+        n = next((i for i, items in enumerate(groups) if {r["id"] for r in items} == set(candidate_edit[0])), n)
+    return queue_html("facts", n, groups, lambda items, i, skip: candidate_card(services, items, i, skip, candidate_edit),
+                      lambda items: (items[0]["question"], plural(len(items), "источник", "источника", "источников")),
+                      "Новых фактов из переписки нет.")
+
+
+def candidate_card(services: Services, items: list, n: int, skip: str,
+                   candidate_edit: tuple[list[int], str, str] | None = None) -> str:
+    top = items[0]
+    question, answer = top["question"], top["answer"]
+    if candidate_edit and set(candidate_edit[0]) == {r["id"] for r in items}:
+        _, question, answer = candidate_edit
+    ids = ",".join(str(r["id"]) for r in items)
+    when = dt.datetime.fromtimestamp(top["created_at"]).strftime("%d.%m %H:%M")
+    warnings = services.candidate_warnings(items, question, answer)
+    # Сохранённая сверка относится к исходному извлечению. После правки показываем
+    # текущие сигналы, сохраняя прежние подсказки о прайсе и похожих фактах.
+    notes = list(dict.fromkeys([line for r in items for line in r["note"].splitlines()
+                               if line and not line.startswith(NOTE_PREFIX)] + warnings))
+    warn = "".join(f'<p class="warn">{escape(n)}</p>' for n in notes)
+    reviewed = ('<label><input type="checkbox" name="source_reviewed" value="true"> '
+                'Сверил с исходным ответом</label>') if warnings else ""
+    sources = "".join(
+        f"<li><b>Клиент:</b> {escape(r['client_question'])}<br><b>Вы ({SOURCE_NAMES.get(r['source'], r['source'])}):</b> "
+        f"{escape(r['manager_text'])}</li>" for r in items)
+    return f"""<h2>«{escape(question)}»</h2>
+<p class="muted">{plural(len(items), "источник", "источника", "источников")}, последний {when}</p>{warn}
 <details{' open' if warnings else ''}><summary>Откуда взято</summary><ul class="muted">{sources}</ul></details>
-<form method="post" action="/candidates/approve"><input type="hidden" name="ids" value="{ids}">
+<form method="post" action="/candidates/approve"><input type="hidden" name="ids" value="{ids}"><input type="hidden" name="n" value="{n}">
 <label>Вопрос</label><input type="text" name="question" value="{escape(question)}">
 <label>Ответ для базы</label><textarea name="answer" rows="3">{escape(answer)}</textarea>{reviewed}
-<p class="row"><button>Утвердить</button></p></form>
-<form method="post" action="/candidates/reject"><input type="hidden" name="ids" value="{ids}">
-<button class="light small">Отклонить</button></form></div>""")
-    return f"""<h2>Из переписки — {len(groups)}</h2>
-<p class="muted">Факты из ваших ответов клиентам. Пока вы их не утвердите, бот их не использует.
-Утверждённое попадает в заметки «Из переписки» в базе знаний.</p>{''.join(cards)}<h2>Вопросы без ответа</h2>"""
+<p class="row"><button>Утвердить</button>{skip}</p></form>
+<form method="post" action="/candidates/reject"><input type="hidden" name="ids" value="{ids}"><input type="hidden" name="n" value="{n}">
+<button class="light small">Отклонить</button></form>"""
 
 
 def growth_html(services: Services) -> str:
