@@ -60,10 +60,14 @@ class MaxApi:
         return await self.request("GET", "/updates", params={"marker": marker, "timeout": timeout, "limit": 100})
 
     async def send(self, text: str, *, chat_id: int | None = None, user_id: int | None = None,
-                   buttons: Buttons | None = None) -> dict:
-        body: dict = {"text": fit(text)}
+                   buttons: Buttons | None = None, forward: str | None = None) -> dict:
+        """{"message": {...}} — отправленное сообщение. forward — mid сообщения, которое переслать
+        (фото или голосовое клиента менеджеру); text тогда может быть пустым."""
+        body: dict = {"text": fit(text)} if text or not forward else {}
         if buttons:
             body["attachments"] = [keyboard(buttons)]
+        if forward:
+            body["link"] = {"type": "forward", "mid": forward}
         return await self.request("POST", "/messages", params={"chat_id": chat_id, "user_id": user_id}, json=body)
 
     async def answer(self, callback_id: str, *, notification: str | None = None, text: str | None = None,

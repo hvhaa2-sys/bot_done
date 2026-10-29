@@ -397,7 +397,7 @@ class Database:
             """SELECT id, question, reason, created_at, flagged FROM dialogs
                WHERE learned = 0 AND (flagged = 1 OR (decision = 'escalate'
                      AND reason NOT LIKE 'stop_topic%' AND reason NOT LIKE 'llm_error%'
-                     AND reason NOT IN ('media', 'greeting', 'small_talk')))
+                     AND reason NOT IN ('media', 'greeting', 'small_talk', 'relayed')))
                ORDER BY id DESC LIMIT ?""", (limit,)).fetchall()
 
     def mark_learned(self, ids: list[int]) -> None:

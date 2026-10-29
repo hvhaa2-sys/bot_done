@@ -1,5 +1,6 @@
 """Адаптер MAX без сети: транспорт подменяем, события подаём словарями в формате MAX Bot API."""
 import asyncio
+import itertools
 import json
 import shutil
 import time
@@ -16,6 +17,7 @@ from app.services import Services
 
 BOT, MANAGER, MANAGER_CHAT, CLIENT, CLIENT_CHAT = 1, 100, 1000, 555, 5550
 CONN = f"{CONN_PREFIX}{MANAGER}"
+SEQ = itertools.count(1)  # у MAX номер сообщения в чате растёт по порядку
 
 
 class FakeApi:
@@ -23,11 +25,13 @@ class FakeApi:
     def __init__(self):
         self.sent, self.answers, self.fail = [], [], False
 
-    async def send(self, text, *, chat_id=None, user_id=None, buttons=None):
+    async def send(self, text, *, chat_id=None, user_id=None, buttons=None, forward=None):
         if self.fail:
             raise MaxError(503, "service.unavailable")
-        self.sent.append({"chat_id": chat_id, "text": text, "buttons": buttons})
-        return {}
+        self.sent.append({"chat_id": chat_id, "text": text, "buttons": buttons, "forward": forward})
+        seq = 10_000 + len(self.sent)  # как у MAX: номер сообщения растёт по порядку
+        return {"message": {"body": {"mid": f"bot{seq}", "seq": seq, "text": text},
+                            "timestamp": int(time.time() * 1000)}}
 
     async def answer(self, callback_id, *, notification=None, text=None, buttons=None):
         self.answers.append({"callback_id": callback_id, "notification": notification, "text": text, "buttons": buttons})
@@ -55,7 +59,7 @@ def message(text, user=CLIENT, chat=CLIENT_CHAT, *, attachments=None, link=None,
                       "is_bot": is_bot},
            "recipient": {"chat_id": chat, "chat_type": chat_type, "user_id": None},
            "timestamp": int((time.time() - age_s) * 1000),
-           "body": {"mid": mid, "seq": 1, "text": text, "attachments": attachments}}
+           "body": {"mid": mid, "seq": next(SEQ), "text": text, "attachments": attachments}}
     if link:
         msg["link"] = link
     return {"update_type": "message_created", "timestamp": msg["timestamp"], "message": msg}
@@ -200,7 +204,7 @@ def test_media_goes_to_manager_and_pauses_chat(env):
     assert to(api, CLIENT_CHAT)[-1]["text"] == "Послушал, перезвоню."
 
 
-def test_sticker_bot_group_and_stale_messages_are_ignored(env):
+def test_sticker_bot_and_group_messages_are_ignored(env):
     services, bot, api = env
     connect(bot)
     before = len(api.sent)
@@ -208,8 +212,87 @@ def test_sticker_bot_group_and_stale_messages_are_ignored(env):
     feed(bot, message("Сколько стоит экран?", user=999, is_bot=True))
     feed(bot, message("Сколько стоит экран?", user=BOT))
     feed(bot, message("Сколько стоит экран?", chat_type="chat"))
-    feed(bot, message("Сколько стоит экран?", age_s=3600))
     assert len(api.sent) == before and services.db.recent_dialogs(5) == []
+
+
+def test_nothing_from_client_is_lost_when_bot_does_not_answer(env):
+    """В MAX у менеджера нет своего чата с клиентом: старое сообщение и сообщение в чат на паузе
+    бот не отвечает, но пересылает менеджеру, а ответ на эту карточку уходит клиенту."""
+    services, bot, api = env
+    connect(bot)
+    feed(bot, message("Сколько стоит экран?", age_s=3600))
+    card = to(api, MANAGER_CHAT)[-1]["text"]
+    assert "пока бот был выключен" in card and "«Сколько стоит экран?»" in card and to(api, CLIENT_CHAT) == []
+    stale = services.db.recent_dialogs(1)[0]
+    assert (stale["status"], stale["reason"]) == (D.ESCALATED, "relayed")
+    assert stale["id"] not in [r["id"] for r in services.db.to_learn()], "бот не пытался ответить — это не пробел базы"
+    feed(bot, reply_to(card, "Экран — 30 000 ₽ в месяц."))
+    assert to(api, CLIENT_CHAT)[-1]["text"] == "Экран — 30 000 ₽ в месяц."
+
+    feed(bot, message("", attachments=[{"type": "image", "payload": {}}], mid="photo1"))
+    assert [m["forward"] for m in to(api, MANAGER_CHAT)[-2:]] == ["photo1", None], "фото менеджер видит само"
+    feed(bot, message("", attachments=[{"type": "image", "payload": {}}], mid="photo2"))
+    assert to(api, MANAGER_CHAT)[-1]["forward"] == "photo2", "второе фото альбома — только пересылка, без карточки"
+    feed(bot, message("Это макет, подойдёт?", mid="m3"))
+    card = to(api, MANAGER_CHAT)[-1]["text"]
+    assert "чат на паузе" in card and "«Это макет, подойдёт?»" in card and len(to(api, CLIENT_CHAT)) == 1
+    feed(bot, reply_to(card, "Подойдёт."))
+    assert to(api, CLIENT_CHAT)[-1]["text"] == "Подойдёт."
+
+
+def test_observe_relays_both_ways_measures_and_learns(env, monkeypatch):
+    """Наблюдение в MAX: модель не тратится, вопросы — менеджеру, его ответы — клиенту,
+    переписка в журнале наблюдения, время ответа замерено, ответ — предложение в базу знаний."""
+    services, bot, api = env
+    asyncio.run(services.update_settings({"default_mode": "observe"}))
+    connect(bot)
+    assert services.db.get_connection(CONN).mode == D.OBSERVE, "режим новых подключений — из настроек админки"
+
+    async def no_model(*_, **__):
+        raise AssertionError("в наблюдении модель не вызывается")
+
+    monkeypatch.setattr(services, "answer", no_model)
+    feed(bot, message("Здравствуйте", age_s=120, mid="m1"))
+    feed(bot, message("Делаете ли вы макет для лайтбокса?", age_s=90, mid="m2"))
+    cards = to(api, MANAGER_CHAT)[-2:]
+    watch = services.db.recent_dialogs(1)[0]
+    assert all(f"Вопрос #{watch['id']}" in c["text"] for c in cards), "куски одного вопроса — одна запись"
+    assert watch["status"] == D.WATCH and watch["question"] == "Здравствуйте\nДелаете ли вы макет для лайтбокса?"
+    assert to(api, CLIENT_CHAT) == [], "бот клиенту сам ничего не пишет"
+
+    feed(bot, reply_to(cards[-1]["text"], "Да, макет делает наш дизайнер, от трёх месяцев бесплатно."))
+    assert to(api, CLIENT_CHAT)[-1]["text"].startswith("Да, макет делает") and \
+        to(api, MANAGER_CHAT)[-1]["text"] == "Отправлено клиенту."
+    row = services.db.get_dialog(watch["id"])
+    assert row["answer"].startswith("Да, макет") and row["reply_after_s"] >= 80
+    roles = [m["role"] for m in services.db.observed_chat(CONN, CLIENT_CHAT)]
+    assert roles == ["client", "client", "manager"]
+    assert services.db.candidates(), "ответ менеджера — предложение в базу знаний"
+    lines = [json.loads(x) for x in services.watch_log.read_text(encoding="utf-8").splitlines()]
+    assert [x["from"] for x in lines] == ["client", "client", "manager"] and "Иван" not in str(lines)
+
+    feed(bot, message("", attachments=[{"type": "audio", "payload": {}}], mid="voice"))
+    assert to(api, MANAGER_CHAT)[-2]["forward"] == "voice" and "прислал(а) аудио" in to(api, MANAGER_CHAT)[-1]["text"]
+
+
+def test_max_modes_from_command_and_admin(env):
+    services, bot, api = env
+    connect(bot)
+    feed(bot, message("/mode watch", MANAGER, MANAGER_CHAT))
+    assert services.db.get_connection(CONN).mode == D.OBSERVE
+    feed(bot, message("/mode off", MANAGER, MANAGER_CHAT))
+    assert services.db.get_connection(CONN).mode == D.OBSERVE and "/mode observe" in to(api, MANAGER_CHAT)[-1]["text"]
+    from app.admin import create_app
+    from fastapi.testclient import TestClient
+    client = TestClient(create_app(services))
+    client.cookies.set("admin_token", services.settings.admin_token)
+    page = client.get("/").text
+    assert '<option value="observe" selected>Наблюдение</option>' in page and '<option value="off"' not in page
+    client.post("/mode", data={"connection_id": CONN, "mode": "draft"})
+    client.post("/mode", data={"connection_id": CONN, "mode": "off"})
+    assert services.db.get_connection(CONN).mode == "draft", "«Выключен» для MAX не ставится"
+    client.post("/mode", data={"connection_id": CONN, "mode": "observe"})
+    assert services.db.get_connection(CONN).mode == D.OBSERVE
 
 
 def test_start_greets_client_and_helps_manager(env):

@@ -129,17 +129,21 @@ def test_evening_summary_reports_observation(env):
     assert "Итоги дня" not in text and markup is None
 
 
-def test_admin_shows_watch_and_offers_mode_only_for_telegram(env):
+def test_admin_shows_watch_and_offers_off_only_for_telegram(env):
     services, dp, bot, _, _ = env
     feed(dp, bot, chat_message("Сколько стоит экран в атриуме?", date=NOW - 1800))
     feed(dp, bot, chat_message("30 000 ₽ в месяц.", from_id=OWNER, mid=2, date=NOW - 600))
     services.db.upsert_connection("max:7", 7, 70, True, True, "draft")
+    services.db.approve_connection("max:7")  # второй менеджер — после «Разрешить»
     client = TestClient(create_app(services))
     home = client.get("/?token=secret").text
     assert "Было → стало" in home and "20 мин" in home and "медиана за наблюдение" in home
-    assert home.count('value="observe"') == 1, "наблюдение предлагается только подключению Telegram"
-    client.post("/mode", data={"connection_id": "max:7", "mode": "watch"})
+    assert home.count('value="observe"') == 2, "наблюдение есть и в MAX: бот пересылает вопросы менеджеру"
+    assert home.count('value="off"') == 1, "«Выключен» — только для Telegram"
+    client.post("/mode", data={"connection_id": "max:7", "mode": "off"})
     assert services.db.get_connection("max:7").mode == "draft", "в MAX без бота клиенту никто не ответит"
+    client.post("/mode", data={"connection_id": "max:7", "mode": "watch"})
+    assert services.db.get_connection("max:7").mode == "observe"
     client.post("/mode", data={"connection_id": CONN, "mode": "auto"})
     assert services.db.get_connection(CONN).mode == "auto"
     journal = client.get("/dialogs?f=watch").text  # старая ссылка ведёт в раздел «Наблюдение»
