@@ -8,6 +8,12 @@
   в админке, как чужие подключения Telegram. Подключение — `max:<user_id менеджера>`; вопросы клиентов идут
   в последнее одобренное подключение.
 - Окна в 24 часа, как в Telegram, нет.
+- Своего чата с клиентом у менеджера в MAX нет: всё, на что бот не отвечает сам (наблюдение, чат на паузе, сообщения,
+  пришедшие, пока бот был выключен), бот пересылает менеджеру, иначе сообщение клиента потеряется. Фото, голосовые
+  и файлы пересылаются как есть, чтобы менеджер их увидел.
+- Наблюдение в MAX: бот сам не отвечает и модель не тратит — пересылает вопросы менеджеру, а его ответы (ответом
+  на карточку) клиенту. Переписка пишется в журнал наблюдения, время ответа замеряется, ответы менеджера становятся
+  предложениями в базу знаний — как в Telegram. «Выключен» в MAX нет: клиентам, кроме бота, никто не ответит.
 Логика режимов общая (`flow.process_client_message`): ядро и Telegram-адаптер не меняются.
 """
 from __future__ import annotations
@@ -23,9 +29,10 @@ import httpx
 from .. import db as D
 from ..services import Services
 from .flow import HOLDING_SENT, process_client_message
+from .observation import collect_observed
 from .max_api import Buttons, MaxApi, MaxError
 from .telegram_business import (_DRAFT_ID_RE, MEDIA_KINDS, MessageBuffer, build_candidates_message, build_summary,
-                                collect_quietly, mode_name, short)
+                                collect_quietly, mode_name, short, wait_text)
 
 log = logging.getLogger(__name__)
 
@@ -35,11 +42,17 @@ HOLDING_NOT_SENT = "Клиенту ничего не ушло: нет связи
 # В карточке flow.py предлагает ответить «в его чате» — в MAX чата клиента у менеджера нет
 _CARD_HINT = "Ответьте клиенту в его чате или прямо здесь, ответом на это сообщение"
 _MAX_CARD_HINT = "Ответьте на это сообщение своим текстом"
+_RELAY_HINT = "Ответьте на это сообщение — ответ уйдёт клиенту."
+OBSERVE_NOTE = ("\nБот сам клиентам не отвечает и модель не тратит: пересылает вопросы вам, а ваш ответ на карточку "
+                "отправляет клиенту. Запоминает, через сколько вы ответили, и предлагает ваши ответы в базу знаний. "
+                "Когда база наберётся, включите /mode draft или /mode auto.")
+MAX_MODES = ("observe", "draft", "auto")  # «Выключен» нет: клиентам в MAX, кроме бота, никто не ответит
 # Вложения, которые бот не разбирает: как голосовое или файл в Telegram
 _MEDIA = {"image": MEDIA_KINDS["photo"], "video": MEDIA_KINDS["video"], "audio": MEDIA_KINDS["audio"],
           "file": MEDIA_KINDS["document"]}
 
 HELP = ("Команды менеджера:\n"
+        "/mode observe — наблюдение: бот не отвечает сам, пересылает вопросы вам и учится на ваших ответах\n"
         "/mode draft — черновики: ответ сначала приходит вам\n"
         "/mode auto — автоответ: бот отвечает клиенту сам\n"
         "/status — статистика\n"
@@ -84,13 +97,18 @@ class MaxBot:
         self.buffer = MessageBuffer()
 
     # --- отправка ---
-    async def send(self, chat_id: int, text: str, buttons: Buttons | None = None) -> bool:
+    async def send(self, chat_id: int, text: str, buttons: Buttons | None = None, forward: str | None = None) -> bool:
+        return await self.send_message(chat_id, text, buttons, forward) is not None
+
+    async def send_message(self, chat_id: int, text: str, buttons: Buttons | None = None,
+                           forward: str | None = None) -> dict | None:
+        """Отправленное сообщение (нужен его номер для журнала наблюдения) или None, если не получилось."""
         try:
-            await self.api.send(text, chat_id=chat_id, buttons=buttons)
-            return True
+            sent = await self.api.send(text, chat_id=chat_id, buttons=buttons, forward=forward)
+            return (sent or {}).get("message") or {}
         except (MaxError, httpx.HTTPError) as exc:
             log.warning("MAX: не удалось отправить сообщение в чат %s: %s", chat_id, exc)
-            return False
+            return None
 
     async def answer(self, callback_id: str, note: str, text: str | None = None, buttons: Buttons | None = None) -> None:
         with contextlib.suppress(MaxError, httpx.HTTPError):
@@ -142,16 +160,25 @@ class MaxBot:
             return
         client = user_name(sender)
         services.chat_names[chat_id] = client
-        if age_minutes(message.get("timestamp")) > services.settings.stale_message_minutes:
-            services.event(f"{client}: старое сообщение (бот был выключен) — пропускаю")
+        if conn.mode == D.OBSERVE:
+            await self.relay(conn, chat_id, message, client)
             return
+        if conn.mode in D.SILENT_MODES:
+            return  # «Выключен» в MAX из админки и командой не ставится — разве что прямо в базе
+        if age_minutes(message.get("timestamp")) > services.settings.stale_message_minutes:
+            # Отвечать на сообщение многочасовой давности бот не будет, но и терять его нельзя
+            await self.relay(conn, chat_id, message, client, "написал(а), пока бот был выключен")
+            return
+        paused = services.db.is_paused(conn.id, chat_id)
         if not text:
             kind = media_kind(body.get("attachments") or [])
-            if kind and not services.db.is_paused(conn.id, chat_id):
-                await self.hand_media_to_manager(conn, chat_id, kind, client)
+            if kind and not paused:
+                await self.hand_media_to_manager(conn, chat_id, kind, client, body.get("mid"))
+            elif kind:  # следующие фото альбома: карточка уже ушла, пересылаем только сами фото
+                await self.send(conn.owner_chat_id, "", forward=body.get("mid"))
             return
-        if services.db.is_paused(conn.id, chat_id):
-            services.event(f"{client}: «{short(text, 60)}» — чат на паузе, бот молчит (снять: /resume)")
+        if paused:
+            await self.relay(conn, chat_id, message, client, "пишет в чат на паузе — бот молчит, ответьте сами")
             return
 
         key = (conn.id, chat_id)
@@ -229,8 +256,39 @@ class MaxBot:
             card = out.to_manager if sent or not out.to_client else out.to_manager.replace(HOLDING_SENT, HOLDING_NOT_SENT)
             await self.send(conn.owner_chat_id, for_max(card), draft_buttons(out.dialog_id) if out.with_buttons else None)
 
-    async def hand_media_to_manager(self, conn: D.Connection, chat_id: int, kind: str, client: str) -> None:
-        """Голосовое, фото без подписи, файл: бот их не разбирает — разговор забирает менеджер."""
+    async def relay(self, conn: D.Connection, chat_id: int, message: dict, client: str, why: str = "") -> None:
+        """Переслать сообщение клиента менеджеру без ответа бота: в наблюдении, на паузе, после простоя.
+        Ответ менеджера на эту карточку бот отправит клиенту (`on_manager_message`)."""
+        services, body = self.services, message.get("body") or {}
+        text = (body.get("text") or "").strip()
+        kind = None if text else media_kind(body.get("attachments") or [])
+        if not text and not kind:
+            return  # стикер, геолокация, контакт
+        shown = text or f"[{kind}]"
+        sent_at = (message.get("timestamp") or time.time() * 1000) / 1000
+        if conn.mode == D.OBSERVE:
+            # Как наблюдение в Telegram: журнал переписки, файл, замер времени ответа менеджера
+            services.db.observe_message(connection_id=conn.id, chat_id=chat_id, message_id=message_seq(message),
+                                        role="client", text=shown, sent_at=sent_at)
+            services.log_watch_message(conn.id, chat_id, "client", shown, sent_at)
+            dialog_id = services.db.watch_question(conn.id, chat_id, shown, sent_at, services.kb_version)
+            services.event(f"MAX, наблюдение: {client} — «{short(shown, 60)}» переслано менеджеру")
+        else:
+            dialog_id = services.db.log_dialog(
+                connection_id=conn.id, chat_id=chat_id, question=shown, answer="", decision="escalate",
+                reason="relayed", confidence=0.0, status=D.ESCALATED, sources=[], latency_ms=0, mode=conn.mode,
+                kb_version=services.kb_version)
+            services.event(f"MAX, {client}: {why} — переслано менеджеру")
+        if kind:
+            await self.send(conn.owner_chat_id, "", forward=body.get("mid"))
+        head = f"{client} {why}" if why else client
+        quote = f"прислал(а) {kind}" if kind else f"«{short(text, 1500)}»"
+        await self.send(conn.owner_chat_id, f"{head}:\n{quote}\n\nВопрос #{dialog_id}. {_RELAY_HINT}")
+
+    async def hand_media_to_manager(self, conn: D.Connection, chat_id: int, kind: str, client: str,
+                                    mid: str | None = None) -> None:
+        """Голосовое, фото без подписи, файл: бот их не разбирает — разговор забирает менеджер.
+        Само сообщение пересылаем: своего чата с клиентом у менеджера в MAX нет."""
         services = self.services
         # Пауза — до первого await: альбом приходит несколькими сообщениями сразу, а «уточню» и карточка нужны одни
         services.db.pause_chat(conn.id, chat_id, services.settings.manager_pause_minutes)
@@ -242,6 +300,8 @@ class MaxBot:
             mode=conn.mode, kb_version=services.kb_version)
         sent = auto and await self.send(chat_id, services.sign(holding))
         services.event(f"MAX, {client}: {kind} — бот такие не разбирает, передал менеджеру")
+        if mid:
+            await self.send(conn.owner_chat_id, "", forward=mid)
         await self.send(conn.owner_chat_id,
                         f"{client} прислал(а) {kind} — бот такие не разбирает.\n"
                         f"{HOLDING_SENT + ' ' if sent else ''}"
@@ -262,12 +322,13 @@ class MaxBot:
                 await self.send(chat_id, "Запрос ждёт разрешения администратора: админка → Обзор → Подключения.")
         elif command == "/mode":
             mode = args.strip().lower()
-            if mode not in {"draft", "auto"}:
-                await self.send(chat_id, "Укажите режим: /mode draft или /mode auto")
+            mode = D.MODE_ALIASES.get(mode, mode)  # «/mode watch» — прежнее имя наблюдения
+            if mode not in MAX_MODES:
+                await self.send(chat_id, "Укажите режим: /mode observe, /mode draft или /mode auto")
                 return
             services.db.set_mode(mode, connection_id=manager.id)
             services.event(f"MAX: менеджер включил режим «{mode_name(mode)}»")
-            await self.send(chat_id, f"Режим: {mode_name(mode)}.")
+            await self.send(chat_id, f"Режим: {mode_name(mode)}." + (OBSERVE_NOTE if mode == D.OBSERVE else ""))
         elif command == "/status":
             s = services.db.stats()
             accept = f"{s['draft_accept_rate']:.0%}" if s["draft_accept_rate"] is not None else "—"
@@ -313,6 +374,9 @@ class MaxBot:
             return
         services = self.services
         dialog = services.db.get_dialog(int(ids[-1]))
+        if dialog and dialog["status"] == D.WATCH and dialog["connection_id"] == manager.id:
+            await self.reply_observed(manager, chat_id, dialog, text)
+            return
         if not dialog or dialog["status"] not in (D.DRAFT_PENDING, D.ESCALATED):
             await self.send(chat_id, "Этот черновик уже обработан.")
             return
@@ -327,6 +391,27 @@ class MaxBot:
         else:
             services.db.set_dialog_status(dialog["id"], dialog["status"], answer=dialog["answer"])
             await self.send(chat_id, "Не отправлено: нет связи с MAX. Попробуйте ещё раз.")
+
+    async def reply_observed(self, manager: D.Connection, chat_id: int, dialog, text: str) -> None:
+        """Наблюдение: ответ менеджера на пересланный вопрос уходит клиенту; бот замеряет, через сколько
+        менеджер ответил, и собирает из ответа предложения в базу знаний. На одну карточку можно ответить
+        несколькими сообщениями — они допишутся к ответу."""
+        services, client_chat = self.services, dialog["chat_id"]
+        sent = await self.send_message(client_chat, text)
+        if sent is None:
+            await self.send(chat_id, "Не отправлено: нет связи с MAX. Попробуйте ещё раз.")
+            return
+        now = (sent.get("timestamp") or time.time() * 1000) / 1000
+        _, new = services.db.observe_message(connection_id=manager.id, chat_id=client_chat,
+                                             message_id=message_seq(sent), role="manager", text=text, sent_at=now)
+        services.log_watch_message(manager.id, client_chat, "manager", text, now)
+        waited = services.db.watch_reply(manager.id, client_chat, text, now)
+        who = services.chat_names.get(client_chat, client_chat)
+        services.event(f"MAX, наблюдение: менеджер ответил {who}"
+                       + (f" через {wait_text(waited / 60)}" if waited is not None else ""))
+        await self.send(chat_id, "Отправлено клиенту.")
+        if new:
+            await collect_observed(services, manager.id, client_chat, message_seq(sent))
 
     async def on_callback(self, callback: dict, message: dict) -> None:
         payload, callback_id = callback.get("payload") or "", callback.get("callback_id") or ""
@@ -410,6 +495,12 @@ class MaxBot:
                 await self.send(conn.owner_chat_id, proposals[0], buttons_of(proposals[1]))
         services.db.set_settings({SUMMARY_KEY: today})
         return sent
+
+
+def message_seq(message: dict) -> int:
+    """Номер сообщения в чате для журнала наблюдения: у MAX mid — строка, а seq растёт по порядку."""
+    seq = (message.get("body") or {}).get("seq")
+    return int(seq) if isinstance(seq, int) or str(seq or "").isdigit() else int(time.time() * 1000)
 
 
 def buttons_of(markup) -> Buttons | None:

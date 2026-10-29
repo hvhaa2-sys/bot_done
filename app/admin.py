@@ -1106,8 +1106,9 @@ def create_app(services: Services) -> FastAPI:
     @app.post("/mode", dependencies=[Depends(auth)])
     async def set_mode(connection_id: str = Form(...), mode: str = Form(...)) -> RedirectResponse:
         mode = D.MODE_ALIASES.get(mode, mode)
-        # В MAX клиенты пишут боту напрямую: если он молчит, им никто не ответит — тихих режимов там нет
-        if mode in D.MODES and not (mode in D.SILENT_MODES and connection_id.startswith("max:")):
+        # В MAX клиенты пишут боту напрямую: если он выключен, им никто не ответит. Наблюдение там есть —
+        # бот пересылает вопросы менеджеру, а его ответы клиентам
+        if mode in D.MODES and not (mode == "off" and connection_id.startswith("max:")):
             services.db.set_mode(mode, connection_id=connection_id)
         return RedirectResponse("/", status_code=303)
 
@@ -1483,8 +1484,11 @@ def import_dir(services: Services) -> Path:
 def observe_html(services: Services, conn_id: str = "", chat_id: str = "", q: str = "", msg: str = "",
                  keep: str = "") -> str:
     """Раздел «Наблюдение»: включено ли, главные числа, чаты и переписка по порядку с временем ответа менеджера."""
-    conns = [c for c in services.db.connections() if c.approved and not c.id.startswith("max:")]
-    if any(c.mode == D.OBSERVE for c in conns):
+    conns = [c for c in services.db.connections() if c.approved]
+    if any(c.mode == D.OBSERVE and c.id.startswith("max:") for c in conns):
+        state = ('<p class="ok">Идёт наблюдение: бот сам не отвечает, сохраняет переписку и замеряет, через сколько вы '
+                 "отвечаете. В MAX он пересылает вопросы клиентов вам, а ваши ответы на карточку — клиентам.</p>")
+    elif any(c.mode == D.OBSERVE for c in conns):
         state = ('<p class="ok">Идёт наблюдение: бот молчит, сохраняет переписку и замеряет, через сколько вы отвечаете. '
                  "Клиентам ничего не отправляется.</p>")
     else:
@@ -1886,11 +1890,12 @@ def activity_html(services: Services) -> str:
 
 
 def silent_options(c) -> str:
-    """«Выключен» и «Наблюдение» — только для Telegram: в MAX клиентам, кроме бота, никто не ответит."""
+    """«Выключен» — только для Telegram: в MAX клиентам, кроме бота, никто не ответит.
+    Наблюдение есть в обоих: в MAX бот пересылает вопросы менеджеру и его ответы клиентам."""
+    observe = f'<option value="observe" {"selected" if c.mode == D.OBSERVE else ""}>Наблюдение</option>\n'
     if c.id.startswith("max:"):
-        return ""
-    return (f'<option value="off" {"selected" if c.mode == "off" else ""}>Выключен</option>\n'
-            f'<option value="observe" {"selected" if c.mode == D.OBSERVE else ""}>Наблюдение</option>\n')
+        return observe
+    return f'<option value="off" {"selected" if c.mode == "off" else ""}>Выключен</option>\n' + observe
 
 
 def connections_html(services: Services) -> str:

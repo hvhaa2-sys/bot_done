@@ -24,16 +24,21 @@ async def observe(message: Message, services: Services, conn: Connection, text: 
         if not changed:
             return False
         services.event("Наблюдение: сохранено сообщение менеджера" if manager else "Наблюдение: сохранено сообщение клиента")
-        if not manager or not (message.text or message.caption):
-            return True
-        context = services.db.observation_context(conn.id, message.chat.id, message.message_id)
-        if context:
-            anchor, question, answer, sources = context
-            services.db.invalidate_observed_candidates([anchor])
-            try:
-                await services.collect_candidates(source="observe", connection_id=conn.id, chat_id=message.chat.id,
-                                                  dialog_id=None, client_question=question, manager_text=answer,
-                                                  observation_id=anchor, source_message_ids=sources)
-            except Exception:  # noqa: BLE001 — сообщение уже сохранено, сбор знаний не мешает переписке
-                log.exception("Не удалось выделить кандидатов из наблюдения")
+        if manager and (message.text or message.caption):
+            await collect_observed(services, conn.id, message.chat.id, message.message_id)
         return True
+
+
+async def collect_observed(services: Services, connection_id: str, chat_id: int, message_id: int) -> None:
+    """Ответ менеджера из журнала наблюдения → предложения в базу знаний (вопрос клиента берём из журнала)."""
+    context = services.db.observation_context(connection_id, chat_id, message_id)
+    if not context:
+        return
+    anchor, question, answer, sources = context
+    services.db.invalidate_observed_candidates([anchor])
+    try:
+        await services.collect_candidates(source="observe", connection_id=connection_id, chat_id=chat_id,
+                                          dialog_id=None, client_question=question, manager_text=answer,
+                                          observation_id=anchor, source_message_ids=sources)
+    except Exception:  # noqa: BLE001 — сообщение уже сохранено, сбор знаний не мешает переписке
+        log.exception("Не удалось выделить кандидатов из наблюдения")
