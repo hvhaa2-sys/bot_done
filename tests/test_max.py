@@ -11,7 +11,7 @@ import pytest
 
 from app import db as D
 from app.channels.max_api import MaxApi, MaxError, keyboard
-from app.channels.max_bot import CONN_PREFIX, HELP, MaxBot, run_max
+from app.channels.max_bot import CONN_PREFIX, HELP, NO_MANAGER, MaxBot, run_max
 from app.config import ROOT, Settings
 from app.services import Services
 
@@ -96,10 +96,11 @@ def test_first_manager_is_approved_and_stranger_waits(env):
     assert services.db.get_connection(f"{CONN_PREFIX}777").mode == "draft", "неодобренный режим не меняет"
 
 
-def test_client_without_manager_is_not_answered(env):
+def test_client_without_manager_is_told_and_model_is_not_spent(env):
     services, bot, api = env
     feed(bot, message("Сколько стоит экран в атриуме?"))
-    assert api.sent == [] and services.db.recent_dialogs(5) == []
+    assert [m["text"] for m in to(api, CLIENT_CHAT)] == [NO_MANAGER], "не молчим: клиент поймёт, что написать позже"
+    assert services.db.recent_dialogs(5) == []
 
 
 def test_draft_card_goes_to_manager_with_buttons(env):
@@ -485,3 +486,115 @@ def test_launch_check_reports_max(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "shop_bot" in out and "example.org/hook" in out
     assert asyncio.run(check.check_max(replace(settings, max_bot_token=""))) is True, "без токена MAX не обязателен"
+
+
+def test_greeting_in_drafts_is_answered_and_manager_is_not_bothered(env):
+    services, bot, api = env
+    connect(bot)
+    before = len(to(api, MANAGER_CHAT))
+    feed(bot, message("Здравствуйте"))
+    assert to(api, CLIENT_CHAT)[-1]["text"] == services.assistant.greeting_message, "иначе клиент в полной тишине"
+    assert len(to(api, MANAGER_CHAT)) == before
+
+
+def test_caption_contact_location_and_slash_text_reach_manager(env):
+    services, bot, api = env
+    connect(bot)
+    feed(bot, message("вот макет, подойдёт?", attachments=[{"type": "image", "payload": {}}], mid="photo"))
+    sent = to(api, MANAGER_CHAT)
+    assert any(m["forward"] == "photo" for m in sent) and "вот макет" in sent[-1]["text"], "и фото, и черновик по подписи"
+    assert not services.db.is_paused(CONN, CLIENT_CHAT), "подпись — обычный вопрос, бот отвечает дальше"
+
+    feed(bot, message("/ сколько стоит экран в атриуме?", mid="slash"))
+    assert "сколько стоит экран" in to(api, MANAGER_CHAT)[-1]["text"], "текст со слэшем у клиента — не команда"
+    feed(bot, message("/mode auto", mid="fake"))
+    assert services.db.get_connection(CONN).mode == "draft", "клиент режим не меняет"
+
+    feed(bot, message("", attachments=[{"type": "contact", "payload": {}}], mid="phone"))
+    assert to(api, MANAGER_CHAT)[-2]["forward"] == "phone" and "контакт" in to(api, MANAGER_CHAT)[-1]["text"]
+    assert services.db.is_paused(CONN, CLIENT_CHAT), "разговор забирает менеджер"
+    feed(bot, message("", attachments=[{"type": "location", "payload": {}}], mid="geo"))
+    assert to(api, MANAGER_CHAT)[-1]["forward"] == "geo"
+
+
+def test_observe_keeps_names_and_text_out_of_log_and_photo_with_caption_is_forwarded(env):
+    services, bot, api = env
+    connect(bot)
+    feed(bot, message("/mode observe", MANAGER, MANAGER_CHAT))
+    services.events.clear()  # имя менеджера при подключении — можно, его данные это не клиентские
+    feed(bot, message("секретный вопрос", attachments=[{"type": "image", "payload": {}}], mid="photo"))
+    assert to(api, MANAGER_CHAT)[-2]["forward"] == "photo" and "«секретный вопрос»" in to(api, MANAGER_CHAT)[-1]["text"]
+    assert not any("секретный" in text or "Иван" in text for _, text in services.events)
+
+
+def test_reply_to_old_card_does_not_close_newer_question(env):
+    services, bot, api = env
+    connect(bot)
+    feed(bot, message("/mode observe", MANAGER, MANAGER_CHAT))
+    feed(bot, message("вопрос один"))
+    first = to(api, MANAGER_CHAT)[-1]["text"]
+    feed(bot, reply_to(first, "ответ один"))
+    feed(bot, message("вопрос два"))
+    candidates = len(services.db.candidates())
+    feed(bot, reply_to(first, "дополнение к первому"))
+    rows = {r["question"]: r for r in services.db.recent_dialogs(5)}
+    assert rows["вопрос один"]["answer"] == "ответ один\nдополнение к первому" and not rows["вопрос два"]["answer"]
+    assert len(services.db.candidates()) == candidates, "нельзя связать дополнение с вопросом два"
+
+
+def test_reply_from_admin_works_while_max_observes(env):
+    services, bot, _ = env
+    connect(bot)
+    services.client_senders["max"] = lambda _conn, chat, text: bot.send(chat, text)
+    services.db.set_mode("observe", connection_id=CONN)
+    dialog = services.db.log_dialog(connection_id=CONN, chat_id=CLIENT_CHAT, question="скидка?", answer="",
+                                    decision="escalate", reason="stop_topic:скид", confidence=0, status=D.ESCALATED,
+                                    sources=[], latency_ms=0, mode="draft")
+    assert asyncio.run(services.decide_draft(dialog, "edit", "Обсудим.")) == "sent"
+
+
+def test_max_user_with_same_number_as_telegram_owner_is_not_approved(env):
+    services, _, _ = env
+    services.db.upsert_connection("tg-conn", 777, 1, True, True, "off")
+    assert not services.db.upsert_connection(f"{CONN_PREFIX}777", 777, 2, True, True, "draft").approved
+    services.db.approve_connection(f"{CONN_PREFIX}777")
+    assert services.db.upsert_connection(f"{CONN_PREFIX}777", 777, 2, True, True, "draft").approved, "знакомый в MAX"
+
+
+def test_run_max_survives_bad_answer_and_shows_lost_connection(env, monkeypatch):
+    services, _, _ = env
+    calls = []
+
+    real_sleep = asyncio.sleep
+
+    async def handler(request):
+        await real_sleep(0)  # подмена транспорта не отдаёт управление сама, а настоящая сеть — отдаёт
+        calls.append(request.url.path)
+        if request.url.path == "/me":
+            return httpx.Response(200, json={"user_id": 1, "first_name": "Бот"})
+        if len(calls) == 2:
+            return httpx.Response(200, text="<html>шлюз</html>")
+        if len(calls) == 3:
+            raise httpx.ConnectError("нет сети")
+        return httpx.Response(200, json={"updates": [], "marker": 1})
+
+    states = []
+
+    async def fast(_):
+        states.append(services.max_status["ok"])
+        await real_sleep(0)
+
+    monkeypatch.setattr("app.channels.max_bot.asyncio.sleep", fast)
+
+    async def scenario():
+        api = MaxApi("t", "http://x", transport=httpx.MockTransport(handler))
+        task = asyncio.create_task(run_max(api, services))
+        while len(calls) < 5:
+            await real_sleep(0.01)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await api.close()
+
+    asyncio.run(scenario())
+    assert False in states, "пока связи нет, админка это показывает"
+    assert services.max_status["ok"], "связь вернулась — статус снова хороший"

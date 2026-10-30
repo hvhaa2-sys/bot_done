@@ -49,6 +49,7 @@ class Outgoing:
     to_manager: str | None = None    # карточка для менеджера
     with_buttons: bool = False       # кнопки «Отправить / Пропустить»
     notice: str | None = None        # «клиент готов к заказу» — бот ответил сам, но менеджеру стоит подключиться
+    greeting: str | None = None      # приветствие в черновиках: Telegram молчит (менеджер видит чат), MAX здоровается
 
 
 async def process_client_message(services: Services, conn: Connection, chat_id: int, text: str,
@@ -79,7 +80,8 @@ async def process_client_message(services: Services, conn: Connection, chat_id: 
     if reply.decision == SKIP:
         return Outgoing(0)
     if reply.reason == R_GREETING:
-        return Outgoing(0, to_client=services.sign(reply.text) if mode == "auto" else None)
+        greeting = services.sign(reply.text)
+        return Outgoing(0, to_client=greeting if mode == "auto" else None, greeting=greeting)
 
     if mode == "auto" and reply.is_answer:
         status, to_client = D.SENT_AUTO, services.sign(reply.text)

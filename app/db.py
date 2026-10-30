@@ -171,9 +171,10 @@ class Database:
         """Новое подключение одобряется сразу, только если это первый менеджер или уже знакомый
         владелец. Остальные ждут кнопки «Разрешить» в админке:
         иначе любой, кто знает имя бота, подключил бы его к себе и тратил нашу модель."""
-        approved_owners = {r[0] for r in self.conn.execute(
-            "SELECT owner_user_id FROM connections WHERE approved=1")}
-        approve = not approved_owners or owner_user_id in approved_owners
+        approved = self.conn.execute("SELECT id, owner_user_id FROM connections WHERE approved=1").fetchall()
+        # Номера пользователей у каждого мессенджера свои: совпавшее число в MAX — не тот же человек, что в Telegram
+        known = {r[1] for r in approved if r[0].startswith("max:") == id.startswith("max:")}
+        approve = not approved or owner_user_id in known
         self.conn.execute(
             """INSERT INTO connections (id, owner_user_id, owner_chat_id, mode, enabled, can_reply, approved, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -264,7 +265,7 @@ class Database:
                        kb_version: int | None = None) -> int:
         """Сообщение клиента в режиме наблюдения. Пока менеджер не ответил, следующие сообщения клиента —
         то же обращение: дописываем к нему, ожидание считается от первого (как в импорте переписки)."""
-        last = self._last_in_chat(connection_id, chat_id)
+        last = self.last_in_chat(connection_id, chat_id)
         if last and last["status"] == WATCH and not last["answer"]:
             self.conn.execute("UPDATE dialogs SET question=question || char(10) || ? WHERE id=?",
                               (mask_pd(text), last["id"]))
@@ -277,10 +278,12 @@ class Database:
         self.conn.commit()
         return int(cur.lastrowid)
 
-    def watch_reply(self, connection_id: str, chat_id: int, text: str, ts: float) -> float | None:
+    def watch_reply(self, connection_id: str, chat_id: int, text: str, ts: float,
+                    dialog_id: int | None = None) -> float | None:
         """Менеджер написал клиенту сам. Первое сообщение закрывает обращение и фиксирует время ответа,
-        следующие (пока клиент молчит) дописываются к ответу. Возвращает секунды ожидания для первого."""
-        last = self._last_in_chat(connection_id, chat_id)
+        следующие (пока клиент молчит) дописываются к ответу. Возвращает секунды ожидания для первого.
+        dialog_id — ответ на конкретный вопрос (карточка в MAX), иначе — на последний в чате."""
+        last = self.get_dialog(dialog_id) if dialog_id else self.last_in_chat(connection_id, chat_id)
         if not last or last["status"] != WATCH:
             return None  # менеджер пишет первым или обращение из другого режима — ожидания нет
         if last["answer"]:
@@ -297,7 +300,7 @@ class Database:
         return self.conn.execute(
             "SELECT created_at, reply_after_s FROM dialogs WHERE status=? ORDER BY id", (WATCH,)).fetchall()
 
-    def _last_in_chat(self, connection_id: str, chat_id: int) -> sqlite3.Row | None:
+    def last_in_chat(self, connection_id: str, chat_id: int) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM dialogs WHERE connection_id=? AND chat_id=? ORDER BY id DESC LIMIT 1",
                                  (connection_id, chat_id)).fetchone()
 
