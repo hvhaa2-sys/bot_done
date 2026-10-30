@@ -96,7 +96,15 @@ class MaxApi:
             except ValueError:
                 data = {}
             raise MaxError(resp.status_code, str(data.get("code", "")), str(data.get("message", "")))
-        return resp.json() if resp.content else {}
+        if not resp.content:
+            return {}
+        try:
+            data = resp.json()
+        except ValueError:  # шлюз или прокси вернул страницу вместо ответа API
+            data = None
+        if not isinstance(data, dict):
+            raise MaxError(resp.status_code, "bad.response", "ответ не в формате API")
+        return data
 
     async def _send(self, method: str, path: str, params: dict, json: dict | None) -> httpx.Response:
         try:

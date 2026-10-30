@@ -200,7 +200,8 @@ class Services:
             return "no_conn"
         if action == "skip":
             return "skipped" if self.db.claim_dialog(dialog_id, D.DRAFT_REJECTED) else "handled"
-        if conn.mode in D.SILENT_MODES:
+        # В MAX наблюдение не тихое: бот и так пересылает ответы менеджера клиентам
+        if conn.mode in D.SILENT_MODES and not conn.id.startswith("max:"):
             return "off" if conn.mode == "off" else "observe"
         draft = action == "send" and dialog["status"] == D.DRAFT_PENDING
         text = self.sign(dialog["answer"]) if draft else text.strip() if action == "edit" else ""

@@ -79,10 +79,10 @@ async def check_max(settings: Settings) -> bool:
         me = await api.me()
         hooks = (await api.request("GET", "/subscriptions")).get("subscriptions") or []
     except MaxError as exc:
-        line(False, "MAX", "токен не принят — скопируйте его заново на dev.max.ru" if exc.status == 401 else str(exc))
+        line(False, "MAX", "токен не принят — скопируйте его заново на business.max.ru" if exc.status == 401 else str(exc))
         return False
     except Exception as exc:  # noqa: BLE001
-        line(False, "MAX", f"нет связи ({type(exc).__name__}) — проверьте интернет")
+        line(False, "MAX", f"нет связи ({type(exc).__name__}) — проверьте интернет; через зарубежный VPN MAX не открывается")
         return False
     finally:
         await api.close()
