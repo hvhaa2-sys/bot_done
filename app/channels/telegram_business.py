@@ -705,6 +705,17 @@ def make_router() -> Router:
     return router
 
 
+def make_bot(settings) -> Bot:
+    """Бот Telegram. С российского сервера api.telegram.org не отвечает: TELEGRAM_API_URL ведёт через свой релей."""
+    if not settings.telegram_api_url:
+        return Bot(settings.telegram_bot_token)
+    from aiogram.client.session.aiohttp import AiohttpSession
+    from aiogram.client.telegram import TelegramAPIServer
+
+    server = TelegramAPIServer.from_base(settings.telegram_api_url.rstrip("/"))
+    return Bot(settings.telegram_bot_token, session=AiohttpSession(api=server))
+
+
 def build_dispatcher(services: Services) -> Dispatcher:
     dp = Dispatcher()
     dp["services"] = services

@@ -11,13 +11,21 @@ import json
 import os
 import secrets
 import shutil
+import socket
 import sqlite3
+import subprocess  # nosec B404 — только git с постоянными аргументами
 import sys
 import tarfile
 import tempfile
 from pathlib import Path, PurePosixPath
 
 MAX_BYTES = 512 * 1024 * 1024
+# Что нужно серверу из репозитория. Презентации и материалы показов на сервере не нужны
+BUNDLE_CODE = (".dockerignore", ".env.example", "Dockerfile", "docker-compose.yml", "setup", "Makefile", "README.md",
+               "pyproject.toml", "requirements.lock", "requirements.txt", "app", "deploy", "eval", "tools", "data/kb",
+               "docs/DOCKER.md", "docs/ПЕРЕНОС.md")
+# Compose всё равно задаёт пути и порт сам. Ключ Яндекса серверу не нужен, пока модель — GigaChat
+SERVER_ENV_SKIP = {"DB_PATH", "KB_DIR", "ADMIN_HOST", "ADMIN_PORT"}
 
 
 def digest(path: Path) -> str:
@@ -216,6 +224,57 @@ def restore_backup(data: Path, archive: Path, *, yes: bool = False) -> dict:
     return manifest
 
 
+def server_env(env: dict[str, str]) -> str:
+    """Настройки для сервера: без путей этого компьютера и без ключей, которыми бот не пользуется."""
+    keep = {k.strip(): v.strip() for k, v in env.items() if k.strip() not in SERVER_ENV_SKIP}
+    if keep.get("LLM_PROVIDER") != "openai":
+        keep = {k: v for k, v in keep.items() if not k.startswith("OPENAI_")}
+    keep.setdefault("TELEGRAM_API_URL", "")
+    return "".join(f"{k}={v}\n" for k, v in keep.items())
+
+
+def _git(root: Path, *args: str, output: Path | None = None) -> str:
+    with (output.open("wb") if output else open(os.devnull, "wb")) as sink:
+        done = subprocess.run(["git", "-C", str(root), *args], check=True,  # nosec B603 B607
+                              stdout=sink if output else subprocess.PIPE, stderr=subprocess.PIPE)
+    return "" if output else done.stdout.decode()
+
+
+def create_bundle(root: Path, out: Path, *, final: bool = False, port: int = 8000) -> dict:
+    """Папка для переноса на сервер: код из последнего коммита, снимок data/ и настройки сервера.
+    final — настоящий переезд: бот должен быть остановлен (иначе после снимка придут новые сообщения,
+    а два бота с одним токеном мешают друг другу), и весь код — закоммичен."""
+    root, out = root.resolve(), out.resolve()
+    if out.exists():
+        raise ValueError("Такая папка уже есть: выберите новое имя")
+    if out.is_relative_to(root):
+        raise ValueError("Папка переноса должна лежать вне проекта: в ней переписка и ключи")
+    dirty = [line for line in _git(root, "status", "--porcelain", "--", *BUNDLE_CODE).splitlines() if line]
+    present = [p for p in BUNDLE_CODE if _git(root, "ls-tree", "HEAD", "--", p)]
+    if final:
+        if set(BUNDLE_CODE) - set(present):
+            raise ValueError(f"В последнем коммите нет: {', '.join(sorted(set(BUNDLE_CODE) - set(present)))}")
+        if dirty:
+            raise ValueError(f"Есть незакоммиченные правки, на сервер они не попадут ({len(dirty)} файлов). Закоммитьте их")
+        with socket.socket() as probe:
+            probe.settimeout(1)
+            if probe.connect_ex(("127.0.0.1", port)) == 0:
+                raise ValueError(f"Бот ещё работает (порт {port}). Остановите его: deploy/mac-autostart.sh off")
+    out.mkdir(parents=True, mode=0o700)
+    try:
+        manifest = create_backup(root / "data", out / "data.tar.gz")
+        _git(root, "archive", "--format=tar.gz", "HEAD", "--", *present, output=out / "code.tar.gz")
+        (out / "server.env").write_text(server_env(read_env(root / ".env")), encoding="utf-8")
+        for name in ("code.tar.gz", "server.env"):
+            os.chmod(out / name, 0o600)
+        sums = "".join(f"{digest(out / n)}  {n}\n" for n in ("code.tar.gz", "data.tar.gz", "server.env"))
+        (out / "SHA256SUMS").write_text(sums, encoding="utf-8")
+    except BaseException:
+        shutil.rmtree(out, ignore_errors=True)
+        raise
+    return {"files": len(manifest["files"]), "dirty": dirty, "commit": _git(root, "rev-parse", "--short", "HEAD").strip()}
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
@@ -230,9 +289,21 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument("--archive", required=True, help="Путь к архиву или - для stdin/stdout")
         if command == "restore":
             p.add_argument("--yes", action="store_true")
+    bundle = sub.add_parser("bundle", help="Собрать папку для переноса на сервер")
+    bundle.add_argument("--out", type=Path, required=True, help="Новая папка вне проекта")
+    bundle.add_argument("--final", action="store_true", help="Настоящий переезд: бот остановлен, код закоммичен")
     args = parser.parse_args(argv)
     try:
-        if args.action == "init":
+        if args.action == "bundle":
+            root = Path(__file__).resolve().parent.parent
+            result = create_bundle(root, args.out, final=args.final,
+                                   port=int(read_env(root / ".env").get("ADMIN_PORT", "8000")))
+            print(f"Готово: {args.out}. Коммит {result['commit']}, файлов данных {result['files']}.")
+            if result["dirty"]:
+                print(f"Внимание: незакоммиченные правки в {len(result['dirty'])} файлах в код не попали.")
+            if not args.final:
+                print("Это репетиция: бот работает, новые сообщения в снимок не попадут. Для переезда — --final.")
+        elif args.action == "init":
             key = bot = admin = ""
             if not args.demo:
                 if args.non_interactive:
@@ -255,7 +326,8 @@ def main(argv: list[str] | None = None) -> None:
                     with path.open("rb") as src:
                         shutil.copyfileobj(src, sys.stdout.buffer)
                 print(f"{args.action}: файлов {len(result['files'])}, проверка пройдена", file=sys.stderr)
-    except (ValueError, OSError, sqlite3.DatabaseError, tarfile.TarError, KeyError, json.JSONDecodeError) as exc:
+    except (ValueError, OSError, sqlite3.DatabaseError, tarfile.TarError, KeyError, json.JSONDecodeError,
+            subprocess.CalledProcessError) as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
 

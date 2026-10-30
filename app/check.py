@@ -38,10 +38,11 @@ async def check_telegram(settings: Settings) -> bool:
     if not settings.telegram_bot_token:
         line(False, "Telegram", "нет TELEGRAM_BOT_TOKEN в .env — создайте бота в @BotFather (/newbot)")
         return False
-    from aiogram import Bot
     from aiogram.exceptions import TelegramUnauthorizedError
 
-    bot = Bot(settings.telegram_bot_token)
+    from .channels.telegram_business import make_bot
+
+    bot = make_bot(settings)
     try:
         me = await bot.get_me()
         hook = await bot.get_webhook_info()
@@ -49,7 +50,9 @@ async def check_telegram(settings: Settings) -> bool:
         line(False, "Telegram", "токен не принят — скопируйте его из @BotFather заново")
         return False
     except Exception as exc:  # noqa: BLE001
-        line(False, "Telegram", f"нет связи ({type(exc).__name__}) — проверьте интернет или VPN")
+        hint = "проверьте релей TELEGRAM_API_URL" if settings.telegram_api_url else \
+            "проверьте интернет; с российского сервера нужен релей TELEGRAM_API_URL"
+        line(False, "Telegram", f"нет связи ({type(exc).__name__}) — {hint}")
         return False
     finally:
         await bot.session.close()
