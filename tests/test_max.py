@@ -11,7 +11,7 @@ import pytest
 
 from app import db as D
 from app.channels.max_api import MaxApi, MaxError, keyboard
-from app.channels.max_bot import CONN_PREFIX, HELP, NO_MANAGER, MaxBot, run_max
+from app.channels.max_bot import CONN_PREFIX, HELP, NO_MANAGER, MaxBot, handle_queue, run_max, run_webhook
 from app.config import ROOT, Settings
 from app.services import Services
 
@@ -23,15 +23,18 @@ SEQ = itertools.count(1)  # у MAX номер сообщения в чате р�
 class FakeApi:
     """Тот же интерфейс, что у MaxApi: запоминает, что бот отправил."""
     def __init__(self):
-        self.sent, self.answers, self.fail = [], [], False
+        self.sent, self.answers, self.fail, self.no_forward = [], [], False, False
 
-    async def send(self, text, *, chat_id=None, user_id=None, buttons=None, forward=None):
-        if self.fail:
+    async def send(self, text, *, chat_id=None, user_id=None, buttons=None, forward=None, files=None):
+        if self.fail or (forward and self.no_forward):
             raise MaxError(503, "service.unavailable")
-        self.sent.append({"chat_id": chat_id, "text": text, "buttons": buttons, "forward": forward})
+        self.sent.append({"chat_id": chat_id, "text": text, "buttons": buttons, "forward": forward, "files": files})
         seq = 10_000 + len(self.sent)  # как у MAX: номер сообщения растёт по порядку
         return {"message": {"body": {"mid": f"bot{seq}", "seq": seq, "text": text},
                             "timestamp": int(time.time() * 1000)}}
+
+    async def subscriptions(self):
+        return []
 
     async def answer(self, callback_id, *, notification=None, text=None, buttons=None):
         self.answers.append({"callback_id": callback_id, "notification": notification, "text": text, "buttons": buttons})
@@ -54,18 +57,21 @@ def feed(bot, update):
 
 
 def message(text, user=CLIENT, chat=CLIENT_CHAT, *, attachments=None, link=None, age_s=0, chat_type="dialog",
-            is_bot=False, mid="m1"):
+            is_bot=False, mid=None):
+    seq = next(SEQ)
+    mid = mid or f"auto{seq}"  # у каждого сообщения MAX свой mid, повторы бот отбрасывает
     msg = {"sender": {"user_id": user, "first_name": "Иван", "last_name": "Петров", "username": "ivan",
                       "is_bot": is_bot},
            "recipient": {"chat_id": chat, "chat_type": chat_type, "user_id": None},
            "timestamp": int((time.time() - age_s) * 1000),
-           "body": {"mid": mid, "seq": next(SEQ), "text": text, "attachments": attachments}}
+           "body": {"mid": mid, "seq": seq, "text": text, "attachments": attachments}}
     if link:
         msg["link"] = link
     return {"update_type": "message_created", "timestamp": msg["timestamp"], "message": msg}
 
 
-def callback(payload, card="", user=MANAGER, callback_id="cb1"):
+def callback(payload, card="", user=MANAGER, callback_id=None):
+    callback_id = callback_id or f"cb{next(SEQ)}"  # у каждого нажатия свой номер
     return {"update_type": "message_callback", "callback": {"callback_id": callback_id, "payload": payload,
                                                              "user": {"user_id": user}},
             "message": {"body": {"mid": "card", "seq": 1, "text": card}}}
@@ -569,12 +575,14 @@ def test_run_max_survives_bad_answer_and_shows_lost_connection(env, monkeypatch)
 
     async def handler(request):
         await real_sleep(0)  # подмена транспорта не отдаёт управление сама, а настоящая сеть — отдаёт
-        calls.append(request.url.path)
         if request.url.path == "/me":
             return httpx.Response(200, json={"user_id": 1, "first_name": "Бот"})
-        if len(calls) == 2:
+        if request.url.path == "/subscriptions":
+            return httpx.Response(200, json={"subscriptions": []})
+        calls.append(request.url.path)
+        if len(calls) == 1:
             return httpx.Response(200, text="<html>шлюз</html>")
-        if len(calls) == 3:
+        if len(calls) == 2:
             raise httpx.ConnectError("нет сети")
         return httpx.Response(200, json={"updates": [], "marker": 1})
 
@@ -598,3 +606,193 @@ def test_run_max_survives_bad_answer_and_shows_lost_connection(env, monkeypatch)
     asyncio.run(scenario())
     assert False in states, "пока связи нет, админка это показывает"
     assert services.max_status["ok"], "связь вернулась — статус снова хороший"
+
+
+FILE = {"type": "file", "payload": {"url": "https://x/1", "token": "tok1"}, "filename": "kp.pdf", "size": 1}
+
+
+def test_manager_sends_file_to_client_from_the_bot(env):
+    services, bot, api = env
+    connect(bot)
+    feed(bot, message("Пришлите КП"))
+    card = to(api, MANAGER_CHAT)[-1]["text"]
+    update = reply_to(card, "")
+    update["message"]["body"]["attachments"] = [FILE]
+    feed(bot, update)
+    sent = to(api, CLIENT_CHAT)[-1]
+    assert sent["files"] == [{"type": "file", "payload": {"token": "tok1"}}] and sent["forward"] is None, "от имени бота"
+    assert services.db.recent_dialogs(1)[0]["answer"] == "[файл]"
+
+    feed(bot, message("/mode observe", MANAGER, MANAGER_CHAT))
+    feed(bot, message("А макет?", mid="q2"))
+    update = reply_to(to(api, MANAGER_CHAT)[-1]["text"], "Вот пример")
+    update["message"]["body"]["attachments"] = [FILE]
+    update["message"]["body"]["mid"] = "m-file"
+    feed(bot, update)
+    assert to(api, CLIENT_CHAT)[-1]["text"] == "Вот пример" and to(api, CLIENT_CHAT)[-1]["files"]
+
+
+def test_media_falls_back_to_token_when_forward_is_refused(env):
+    _, bot, api = env
+    connect(bot)
+    api.no_forward = True
+    feed(bot, message("", attachments=[{"type": "image", "payload": {"url": "u", "token": "photo-token"}}], mid="p1"))
+    assert any(m["files"] == [{"type": "image", "payload": {"token": "photo-token"}}] for m in to(api, MANAGER_CHAT))
+
+
+def test_manager_reply_pauses_bot_in_auto_only(env):
+    services, bot, api = env
+    connect(bot)
+    feed(bot, message("Дадите скидку?", mid="d1"))
+    feed(bot, reply_to(to(api, MANAGER_CHAT)[-1]["text"], "Обсудим."))
+    assert not services.db.is_paused(CONN, CLIENT_CHAT), "в черновиках следующий вопрос и так идёт менеджеру"
+    feed(bot, message("/mode auto", MANAGER, MANAGER_CHAT))
+    feed(bot, message("А ещё скидку?", mid="d2"))
+    card = to(api, MANAGER_CHAT)[-1]["text"]
+    feed(bot, reply_to(card, "Обсудим, позвоню."))
+    assert services.db.is_paused(CONN, CLIENT_CHAT), "менеджер взял разговор — бот не перебивает"
+    answers = len(to(api, CLIENT_CHAT))
+    feed(bot, message("Сколько стоит экран в атриуме?", mid="d3"))
+    assert len(to(api, CLIENT_CHAT)) == answers and "чат на паузе" in to(api, MANAGER_CHAT)[-1]["text"]
+
+
+def test_repeated_events_do_not_answer_twice(env):
+    services, bot, api = env
+    connect(bot)
+    feed(bot, message("/mode auto", MANAGER, MANAGER_CHAT, mid="cmd"))
+    update = message("Сколько стоит экран в атриуме?", mid="same")
+    feed(bot, update)
+    feed(bot, update)
+    assert len(to(api, CLIENT_CHAT)) == 1 and len(services.db.recent_dialogs(5)) == 1
+
+
+def test_start_without_manager_is_told(env):
+    _, bot, api = env
+    feed(bot, {"update_type": "bot_started", "chat_id": CLIENT_CHAT, "user": {"user_id": CLIENT}})
+    assert to(api, CLIENT_CHAT)[-1]["text"] == NO_MANAGER
+
+
+def admin_client(services):
+    from fastapi.testclient import TestClient
+
+    from app.admin import create_app
+    return TestClient(create_app(services))
+
+
+def test_webhook_endpoint_accepts_only_secret_and_queues(env):
+    services, _, _ = env
+    client = admin_client(services)
+    url = "/max/webhook"
+    assert client.post(url, json={}).status_code == 404, "секрет не настроен — как будто адреса нет"
+    services.settings = replace(services.settings, max_webhook_secret="s3cret")
+    assert client.post(url, json={}, headers={"X-Max-Bot-Api-Secret": "wrong"}).status_code == 404
+    good = {"X-Max-Bot-Api-Secret": "s3cret"}
+    assert client.post(url, json={"update_type": "x"}, headers=good).status_code == 503, "бот не готов — MAX повторит"
+    services.max_updates = asyncio.Queue(maxsize=1)
+    assert client.post(url, content="не json", headers=good).status_code == 400
+    assert client.post(url, json=[1], headers=good).status_code == 400
+    assert client.post(url, json={"update_type": "x"}, headers=good).status_code == 200
+    assert services.max_updates.get_nowait() == {"update_type": "x"}
+    client.post(url, json={"a": 1}, headers=good)
+    assert client.post(url, json={"a": 2}, headers=good).status_code == 503, "очередь полна — не теряем, MAX повторит"
+    assert client.post(url, content="x" * 2_000_001, headers=good).status_code == 413
+    assert client.get(url).status_code == 405
+
+
+def test_run_webhook_subscribes_replaces_foreign_and_restores_lost(env, monkeypatch):
+    services, bot, _ = env
+    services.settings = replace(services.settings, max_webhook_url="https://bot.test/max/webhook", max_webhook_secret="s")
+    hooks = [{"url": "https://old.test"}]
+    calls = []
+
+    class Api:
+        async def subscriptions(self):
+            return list(hooks)
+
+        async def subscribe(self, url, secret, types):
+            calls.append(("sub", url, secret, "message_callback" in types))
+            hooks.append({"url": url})
+
+        async def unsubscribe(self, url):
+            calls.append(("del", url))
+            hooks[:] = [h for h in hooks if h["url"] != url]
+
+    real_sleep = asyncio.sleep
+    rounds = []
+
+    async def fake_sleep(_):
+        rounds.append(1)
+        if len(rounds) == 1:
+            hooks.clear()  # MAX снял вебхук, пока сервер был недоступен
+        if len(rounds) == 2:
+            raise asyncio.CancelledError
+        await real_sleep(0)
+
+    monkeypatch.setattr("app.channels.max_bot.asyncio.sleep", fake_sleep)
+    ready = {"ok": True, "username": "", "name": ""}
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(run_webhook(Api(), bot, services, ready))
+    assert calls == [("del", "https://old.test"), ("sub", "https://bot.test/max/webhook", "s", True),
+                     ("sub", "https://bot.test/max/webhook", "s", True)]
+    assert services.max_status == ready and services.max_updates is None
+
+
+def test_run_webhook_refuses_insecure_settings(env):
+    services, bot, _ = env
+    services.settings = replace(services.settings, max_webhook_url="http://bot.test/x", max_webhook_secret="s")
+    asyncio.run(run_webhook(None, bot, services, {"ok": True}))
+    assert not services.max_status["ok"] and "https" in services.max_status["error"]
+
+
+def test_queue_worker_survives_broken_event(env):
+    services, _, _ = env
+    seen = []
+
+    class Bot:
+        async def handle(self, update):
+            seen.append(update)
+            if update.get("bad"):
+                raise ValueError("сломанное событие")
+
+    async def scenario():
+        queue = asyncio.Queue()
+        worker = asyncio.create_task(handle_queue(Bot(), queue))
+        queue.put_nowait({"bad": True})
+        queue.put_nowait({"ok": True})
+        await asyncio.sleep(0.05)
+        worker.cancel()
+
+    asyncio.run(scenario())
+    assert len(seen) == 2
+
+
+def test_admin_shows_client_link(env):
+    services, _, _ = env
+    services.settings = replace(services.settings, max_bot_token="t", admin_token="adm")
+    services.max_status = {"ok": True, "username": "reklama_bot", "name": "Реклама"}
+    client = admin_client(services)
+    client.cookies.set("admin_token", "adm")
+    assert "max.ru/reklama_bot" in client.get("/").text
+
+
+def test_polling_removes_leftover_webhook(env):
+    services, _, _ = env
+    removed = []
+
+    class Api(FakeApi):
+        async def me(self):
+            return {"user_id": BOT}
+
+        async def subscriptions(self):
+            return [{"url": "https://old.test/max/webhook"}]
+
+        async def unsubscribe(self, url):
+            removed.append(url)
+
+        async def updates(self, marker=None):
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(run_max(Api(), services))
+    assert removed == ["https://old.test/max/webhook"], "иначе MAX не отдаёт события опросом, и бот молчит"
+

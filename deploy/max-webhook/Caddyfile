@@ -1,0 +1,10 @@
+# Основной сервер: наружу открыт только приём событий MAX. Админка остаётся доступной лишь через SSH-туннель.
+# Сертификат Caddy получает сам, MAX принимает только доверенный сертификат и порт 443.
+#
+#   sudo cp Caddyfile /etc/caddy/Caddyfile, в /etc/default/caddy: MAX_DOMAIN=bot.ваш-домен.ru
+{$MAX_DOMAIN} {
+	handle /max/webhook {
+		reverse_proxy 127.0.0.1:8000
+	}
+	respond 404
+}

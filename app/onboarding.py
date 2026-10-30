@@ -104,7 +104,10 @@ def progress(services: Services) -> Progress:
     profile = load(services)
     connection = next((c for c in services.db.connections() if c.id == profile.get("connection_id")), None)
     bot = services.bot_status or {}
-    connected = bool(connection and connection.enabled and connection.approved and bot.get("ok") and bot.get("business"))
+    # У MAX нет бизнес-режима: достаточно, что бот на связи
+    channel_up = ((services.max_status or {}).get("ok") if connection and connection.id.startswith("max:")
+                  else bot.get("ok") and bot.get("business"))
+    connected = bool(connection and connection.enabled and connection.approved and channel_up)
     named = bool(profile.get("business_name"))
     channel_detail = ("Подключение найдено." if connected else "Нужно действующее разрешённое подключение Telegram.")
     if not named:
@@ -249,7 +252,10 @@ def channel_form(services: Services, state: Progress, profile: dict) -> str:
     link = (f'<a href="https://t.me/{escape(name, quote=True)}">@{escape(name)}</a>' if name else "бота")
     guide = (f'<p>В Telegram откройте {link} и нажмите «Старт». Затем: Настройки → Автоматизация чатов → '
              'добавить бота → выбрать рабочие чаты.</p>')
-    if not services.settings.telegram_bot_token:
+    if services.settings.max_bot_token and not services.settings.telegram_bot_token:
+        guide = ('<p>Менеджер открывает бота компании в MAX и пишет ему /manager. Если подключения уже есть, разрешите '
+                 'новое в <a href="/">«Обзоре»</a>.</p>')
+    elif not services.settings.telegram_bot_token:
         guide = '<p class="warn">Сначала задайте токен Telegram в настройках установки и перезапустите приложение.</p>'
     elif bot and not bot.get("ok"):
         guide = '<p class="warn">Нет связи с Telegram. Проверьте подключение в «Обзоре».</p>'
@@ -261,7 +267,7 @@ def channel_form(services: Services, state: Progress, profile: dict) -> str:
 value="{escape(str(profile.get('business_name', '')), quote=True)}" placeholder="Например, студия рекламы">
 <p class="hint">Материалы этой установки общие для всех подключённых менеджеров.</p>
 {guide}<label for="connection-id">Подключение менеджера</label><select id="connection-id" name="connection_id">{options}</select>
-<p class="hint">Новое подключение появится здесь после подключения в Telegram и разрешения на «Обзоре».</p>
+<p class="hint">Новое подключение появится здесь после подключения в мессенджере и разрешения на «Обзоре».</p>
 <div class="row onboarding-next"><button>Сохранить и проверить</button><a href="/">Открыть подключения</a></div></form>'''
 
 

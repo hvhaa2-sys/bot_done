@@ -92,3 +92,33 @@ def test_fake_max_rejects_bad_token_and_long_text(tmp_path):
         await api.close()
 
     asyncio.run(scenario())
+
+
+def test_webhook_delivery_with_secret_and_no_polling():
+    """Поддельный MAX при подписке шлёт события на адрес с секретом, опрос в это время пуст."""
+    async def scenario():
+        fake = FakeMax()
+        api = MaxApi(TOKEN, "http://max.test", transport=httpx.ASGITransport(app=create_app(fake)))
+        assert await api.subscriptions() == []
+        got = []
+
+        async def receiver(request):
+            got.append((request.headers["X-Max-Bot-Api-Secret"], request.read()))
+            return httpx.Response(200)
+
+        real = httpx.AsyncClient
+        httpx.AsyncClient = lambda **kw: real(transport=httpx.MockTransport(receiver), **kw)
+        try:
+            await api.subscribe("https://bot.test/max/webhook", "s3cret", ("message_created",))
+            assert (await api.subscriptions())[0]["url"] == "https://bot.test/max/webhook"
+            await fake.user_writes("anna", "вопрос")
+        finally:
+            httpx.AsyncClient = real
+        assert got[0][0] == "s3cret" and "вопрос".encode() in got[0][1]
+        assert (await api.updates(None, timeout=0))["updates"] == []
+        await api.unsubscribe("https://bot.test/max/webhook")
+        assert await api.subscriptions() == []
+        await api.close()
+
+    asyncio.run(scenario())
+

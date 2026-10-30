@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import itertools
 import logging
 import shutil
@@ -23,6 +24,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
@@ -56,13 +58,25 @@ class FakeMax:
         self.notes: list[dict] = []     # всплывающие уведомления после нажатия кнопки
         self.callbacks: dict[str, tuple[str, str]] = {}  # callback_id → (mid сообщения, кто нажал)
         self.seq = itertools.count(1)
+        self.hooks: dict[str, str] = {}  # подписки: адрес вебхука → секрет
+        self.delivered = 0               # сколько событий уже отправлено на вебхук
         self.version = 0
         self.changed = asyncio.Condition()
 
     async def touch(self) -> None:
         self.version += 1
+        await self.deliver()
         async with self.changed:
             self.changed.notify_all()
+
+    async def deliver(self) -> None:
+        """Подписка есть — события уходят на вебхук с секретом в заголовке, опросу не достаются."""
+        while self.hooks and self.delivered < len(self.updates):
+            update = self.updates[self.delivered]
+            self.delivered += 1
+            async with httpx.AsyncClient(timeout=10) as client:
+                for url, secret in self.hooks.items():
+                    await client.post(url, json=update, headers={"X-Max-Bot-Api-Secret": secret})
 
     def find(self, mid: str) -> dict:
         found = next((m for m in self.messages if m["body"]["mid"] == mid), None)
@@ -92,7 +106,8 @@ class FakeMax:
 
     # --- со стороны людей (страница песочницы) ---
     async def user_writes(self, who: str, text: str = "", media: str = "", reply_to: str = "") -> dict:
-        attachments = [{"type": media, "payload": {"url": f"https://example.invalid/{media}"}}] if media else []
+        token = hashlib.sha256(f"{who}{next(self.seq)}".encode()).hexdigest()[:16]
+        attachments = [{"type": media, "payload": {"url": f"https://example.invalid/{media}", "token": token}}] if media else []
         link = self.linked("reply", reply_to) if reply_to else None
         msg = self.new_message(user(who), PEOPLE[who]["chat_id"], text, attachments, link)
         self.updates.append({"update_type": "message_created", "timestamp": msg["timestamp"], "message": msg,
@@ -143,6 +158,8 @@ class FakeMax:
         return {"success": True}
 
     async def wait_updates(self, marker: int | None, timeout: int, limit: int) -> dict:
+        if self.hooks:  # как в MAX: при активной подписке опрос ничего не получает
+            return {"updates": [], "marker": marker or 0}
         start = marker or 0
         if len(self.updates) <= start and timeout > 0:
             async with self.changed:
@@ -202,7 +219,21 @@ def create_app(fake: FakeMax) -> FastAPI:
     @app.get("/subscriptions")
     async def subscriptions(request: Request) -> dict:
         auth(request)
-        return {"subscriptions": []}
+        return {"subscriptions": [{"url": url, "time": 0, "update_types": []} for url in fake.hooks]}
+
+    @app.post("/subscriptions")
+    async def subscribe(request: Request) -> dict:
+        auth(request)
+        body = await request.json()
+        fake.hooks[body["url"]] = body.get("secret") or ""
+        fake.delivered = len(fake.updates)
+        return {"success": True}
+
+    @app.delete("/subscriptions")
+    async def unsubscribe(request: Request, url: str) -> dict:
+        auth(request)
+        fake.hooks.pop(url, None)
+        return {"success": True}
 
     @app.get("/updates")
     async def updates(request: Request, marker: int | None = None, timeout: int = 30, limit: int = 100) -> dict:
@@ -295,7 +326,8 @@ color:var(--muted);text-decoration:underline}
 <section data-side="manager"><div class="top"><b>Менеджер</b></div>
 <div class="log"></div><div class="notes"></div>
 <form><div class="replying" hidden></div><input placeholder="/manager, /mode observe, или ответ на карточку"
-autocomplete="off"><button>Отправить</button></form></section>
+autocomplete="off"><button>Отправить</button>
+<button type="button" class="light" data-file>Файл</button></form></section>
 </main>
 <script>
 const client = {who: "anna"}, reply = {mid: "", text: ""};
@@ -356,6 +388,8 @@ document.addEventListener("click", (e) => {
     reply.mid = ""; render();
   } else if (t.dataset.start !== undefined) {
     post({who: client.who, start: true});
+  } else if (t.dataset.file !== undefined) {
+    if (reply.mid) { post({who: "manager", media: "file", reply_to: reply.mid}); reply.mid = ""; }
   } else if (t.dataset.media) {
     post({who: client.who, media: t.dataset.media});
   }

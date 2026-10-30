@@ -80,7 +80,7 @@ async def check_max(settings: Settings) -> bool:
     api = MaxApi(settings.max_bot_token, settings.max_api_url)
     try:
         me = await api.me()
-        hooks = (await api.request("GET", "/subscriptions")).get("subscriptions") or []
+        hooks = await api.subscriptions()
     except MaxError as exc:
         line(False, "MAX", "токен не принят — скопируйте его заново на business.max.ru" if exc.status == 401 else str(exc))
         return False
@@ -90,6 +90,14 @@ async def check_max(settings: Settings) -> bool:
     finally:
         await api.close()
     line(True, "Бот MAX", me.get("username") or me.get("first_name") or str(me.get("user_id")))
+    if settings.max_webhook_url:
+        if not settings.max_webhook_url.startswith("https://") or not settings.max_webhook_secret:
+            line(False, "Вебхук MAX", "нужны MAX_WEBHOOK_URL с https:// и MAX_WEBHOOK_SECRET")
+            return False
+        known = any(h.get("url") == settings.max_webhook_url for h in hooks)
+        line(True if known else None, "Вебхук MAX", "подключён" if known else "бот подключит его при запуске")
+        return True
+    line(None, "Вебхук MAX", "не задан: бот на долгом опросе, для рабочего режима MAX просит вебхук")
     if hooks:
         # Бот получает события долгим опросом; подписка-вебхук, скорее всего, перехватит их
         line(False, "Вебхук MAX", f"у бота есть подписка {hooks[0].get('url')} — удалите её (DELETE /subscriptions)")
