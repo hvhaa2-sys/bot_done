@@ -1,0 +1,14 @@
+# Релей к Telegram: маленький сервер за границей, через него российский сервер ходит только к api.telegram.org.
+# Ничего не хранит. Токен бота идёт в адресе запроса, поэтому журнал запросов здесь не включать.
+# Пускает только основной сервер — иначе через релей сможет ходить кто угодно.
+#
+#   RELAY_DOMAIN=tg.example.ru MAIN_SERVER_IP=1.2.3.4 caddy run --config Caddyfile
+{$RELAY_DOMAIN} {
+	@main remote_ip {$MAIN_SERVER_IP}
+	handle @main {
+		reverse_proxy https://api.telegram.org {
+			header_up Host {upstream_hostport}
+		}
+	}
+	respond 403
+}
