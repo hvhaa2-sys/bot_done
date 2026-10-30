@@ -162,10 +162,22 @@ _SURCHARGE_RE = re.compile(r"(?:дополнительн|отдельн|допл
                            r"|(?:дополнительн|отдельн)\w* оплачива|\bотдельно\b(?![^.!?\n]*включ)")
 
 
+_WORKS_RE = re.compile(r"(\d[\d\s]*)₽[^\n]*?стоимость работ: ([^;\n]*)")
+
+
+def _priced_works(answer: str, known: str) -> str:
+    """«Производство бортов — 318 720 ₽. Стоимость работ: печать, монтаж»: работы и есть эта цена. Только если ответ
+    называет лишь такие цены: у самих бортов за 1 500 000 ₽ производство и монтаж — доплата."""
+    works = {int(re.sub(r"\D", "", m[1])): m[2] for m in _WORKS_RE.finditer(known)}
+    named = set(extract_amounts(answer))
+    return " ".join(works.values()) if named and named <= works.keys() else ""
+
+
 def unsupported_inclusions(answer: str, seen: str) -> list[str]:
     """Услуги, которые ответ называет включёнными в цену, хотя в базе так не написано."""
     known = seen.lower()
     bad = []
+    works = _priced_works(answer, known)
     for sentence in _SENTENCE_RE.findall(answer.lower().replace("ё", "е")):  # «включён»
         # По частям фразы: «Печать оплачивается дополнительно, монтаж включён в цену» — вторая часть врёт
         # «Включены НДС, печать и монтаж» — «включены» действует и на следующие части перечня,
@@ -179,10 +191,10 @@ def unsupported_inclusions(answer: str, seen: str) -> list[str]:
                 continue
             if _INCLUDED_RE.search(clause) or (_INCLUDES_RE.search(clause) and _PRICE_TALK_RE.search(answer)):
                 claiming = True
-                bad += _unknown_services(clause, known, bad)
+                bad += [s for s in _unknown_services(clause, known, bad) if s not in works]
             elif claiming and not extract_amounts(clause) and not re.search(r"обойд|стоит|составля", clause):
                 # «включены НДС, печать и монтаж» — продолжение перечня; «печать обойдётся в 7 950 ₽» — доплата
-                bad += _unknown_services(clause, known, bad)
+                bad += [s for s in _unknown_services(clause, known, bad) if s not in works]
             else:
                 claiming = False
     return bad

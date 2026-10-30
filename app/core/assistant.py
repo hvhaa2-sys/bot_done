@@ -20,8 +20,8 @@ from .conversation import MAX_CLARIFICATIONS, Conversation
 from .answer_grounding import budget_issues, price_period_issues, property_issues
 from .client_intent import active_request
 from .knowledge import KnowledgeBase, PriceRow, SearchHit, _format_words, format_rub, parse_budget
-from .price_guard import (drop_bracket_totals, computed_totals, drop_numbers, extract_amounts, row_multipliers,
-                          ungrounded_numbers,
+from .price_guard import (drop_bracket_totals, computed_totals, drop_numbers, extract_amounts, extract_numbers,
+                          row_multipliers, ungrounded_numbers,
                           unknown_amounts,
                           unsupported_inclusions)
 from .text import fix_mixed_script, from_translit, small_talk, starts_with_greeting, tokenize, translit_word
@@ -199,9 +199,9 @@ class Assistant:
         if topic:
             return Reply(ESCALATE, self.holding_message, 0.0, f"{R_STOP_TOPIC}:{topic}")
         if _BILLBOARD_RE.search(question) and not self.kb._venues_in(question):
-            street = "; ".join("{} ({}) — {} за {}".format(
+            street = "; ".join("{} ({}) — {} за {}{}".format(
                 re.sub(r" *\(.*?\)", "", r.placement.split(" — ")[0]), r.placement.split(" — ")[-1],
-                format_rub(r.price_rub), r.period) for r in self.kb.street_screens())
+                format_rub(r.price_rub), r.period, _season_suffix(r)) for r in self.kb.street_screens())
             missing = ["Билбордов", *(name for rx, name in _ALSO_MISSING if rx.search(question))]
             missing_text = missing[0] if len(missing) == 1 else f"{', '.join(missing[:-1])} и {missing[-1]}"
             return Reply(ANSWER, BILLBOARD_MESSAGE.format(missing=missing_text, street=street), 1.0, R_OFF_RANGE)
@@ -373,7 +373,8 @@ class Assistant:
                 # «С учётом сезонной наценки» у машины, «учесть НДС» сверх цены — к менеджеру
                 return Reply(ESCALATE, text, confidence, f"{R_TERMS}:{problem}", sources, raw=raw)
             text = add_missing_conditions(drop_foreign_extras(text, rows), rows)
-            text = complete_partial_list(text, question, hits, self.kb.prices)
+            # Сезонные цены сверяем с текстом до перечня: дописанные строки несут их сами
+            text = add_season_prices(complete_partial_list(text, question, hits, self.kb.prices), rows, said=text)
         return Reply(ANSWER, text, confidence, "", sources, raw=raw)
 
 
@@ -595,7 +596,38 @@ def add_missing_conditions(text: str, rows: list) -> str:
     return _before_question(text, " ".join(dict.fromkeys(extra)))
 
 
-_HEDGE_RE = re.compile(r"например|в том числе|среди них|и другие|есть и друг|не все|часть", re.IGNORECASE)
+def add_season_prices(text: str, rows: list, said: str | None = None) -> str:
+    """Цена, названная в чате, может быть признана офертой, поэтому сезонную цену строки дописываем кодом,
+    если ответ её не назвал. said — текст, в котором ищем сезонную цену (по умолчанию весь ответ)."""
+    # Обычная цена другой строки — не сезонная этой: 31 500 ₽ у экрана ВЕЕР и в ноябре у экрана ДЕПО
+    named = set(extract_numbers(text if said is None else said)) - {row.price_rub for row in rows}
+    missing = {id(row): [p for p in _season_prices(row) if not set(extract_amounts(p)) & named] for row in rows}
+    rows = [row for row in rows if missing[id(row)]]
+    if not rows:
+        return text
+    own = {rows[0].price_rub, *extract_amounts(rows[0].notes)}
+    if len(rows) == 1 and all(n in own or n < 1000 for n in extract_numbers(text)):
+        part = "; ".join(missing[id(rows[0])])
+        return _before_question(text, f"{part[0].upper()}{part[1:]}.")
+    # В ответе есть другие цены: без названия позиции клиент отнесёт сезонную к последней из них
+    with_venue = len({_venue_head(row.placement) for row in rows}) > 1
+    named_rows: dict[str, list[str]] = {}
+    for row in rows:
+        named_rows.setdefault(_row_title(row, with_venue), []).extend(missing[id(row)])
+    return _before_question(text, " ".join(f"{title}: {'; '.join(parts)}." for title, parts in named_rows.items()))
+
+
+def _season_prices(row: PriceRow) -> list[str]:
+    """Сезонные цены строки: только с суммой, «в декабре коэффициент 2» без неё клиенту ничего не называет."""
+    return [part for part in row.parts()["season"] if extract_amounts(part)]
+
+
+def _season_suffix(row: PriceRow) -> str:
+    """Сезонная цена рядом с обычной, когда строку пишет сам код: « (в ноябре–декабре 37 800 ₽ в месяц)»."""
+    return f" ({'; '.join(parts)})" if (parts := _season_prices(row)) else ""
+
+
+_HEDGE_RE =re.compile(r"например|в том числе|среди них|и другие|есть и друг|не все|часть", re.IGNORECASE)
 LIST_APPEND_LIMIT = 8  # больше строк кодом не дописываем: простыня в чате не читается, остальное — по вопросу
 PARTIAL_LIST_NOTE = "Это часть вариантов — могу рассказать и про остальные."
 
@@ -635,11 +667,16 @@ def complete_partial_list(text: str, question: str, hits: list[SearchHit], price
 def list_item(row: PriceRow, with_venue: bool = True) -> str:
     """Строка прайса для перечня клиенту: «Баннер № 2, ВЕЕР Молл, Екатеринбург — атриум: 25 000 ₽ за 1 месяц»,
     без площадки — «Баннер № 2 — атриум: 25 000 ₽ за 1 месяц»."""
-    place = row.placement.partition(" — ")[2]
-    name = f"{row.format}, {_venue_head(row.placement)}" if with_venue else row.format
     period = f" за {row.period}" if row.period else ""
     vat = " (без НДС)" if "без ндс" in row.notes.lower() else ""
-    return f"{name}{f' — {place}' if place else ''}: {format_rub(row.price_rub)}{period}{vat}"
+    return f"{_row_title(row, with_venue)}: {format_rub(row.price_rub)}{period}{vat}{_season_suffix(row)}"
+
+
+def _row_title(row: PriceRow, with_venue: bool = True) -> str:
+    """«Баннер № 2, ВЕЕР Молл, Екатеринбург — атриум», без площадки — «Баннер № 2 — атриум»."""
+    place = row.placement.partition(" — ")[2]
+    name = f"{row.format}, {_venue_head(row.placement)}" if with_venue else row.format
+    return f"{name}{f' — {place}' if place else ''}"
 
 
 def _venue_head(placement: str) -> str:

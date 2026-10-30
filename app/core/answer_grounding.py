@@ -38,8 +38,10 @@ _FMT_SKIP = set(tokenize("цифровой рекламный размещени
                          # формату (GigaChat Pro, 28.10): «оплачиваются дополнительно» («Дополнительный пост охраны»),
                          # «печать одного флага» («…, одна сторона» у тейбл-тентов), «1,45×2,4 м» (метры в размерах),
                          # «за 5 граней» («колонна, 4 грани»), «полный месяц» (срок, а не формат)
-                         "дополнительный один одна одно одного одной одну м см мм шт штука грань грани граней полный"))
-_PERIOD = re.compile(r"(?<!\w)(?:(\d{1,2}|один|одна|одну|два|две|три|четыре|пять|шесть)\s*)?"
+                         "дополнительный один одна одно одного одной одну м см мм шт штука грань грани граней полный "
+                         "например"))
+# (?<!20\d\d\s): «по 28 февраля 2027 года» — дата, а не срок «год»
+_PERIOD = re.compile(r"(?<!\w)(?<!20\d\d\s)(?:(\d{1,2}|один|одна|одну|два|две|три|четыре|пять|шесть)\s*)?"
                      r"(месяц\w*|мес\.?|недел\w*|день|дня|дней|сут\w*|год\w*)\b|полгода|пол года|квартал", re.I)
 _COUNTS = {"один": 1, "одна": 1, "одну": 1, "два": 2, "две": 2, "три": 3, "четыре": 4, "пять": 5, "шесть": 6}
 _PRORATE = re.compile(r"(?:будет|выйдет|обойдется|получится)\s+(?:меньше|дешевле)|"
@@ -131,6 +133,9 @@ def property_issues(kb: KnowledgeBase, answer: str, hits: list[SearchHit], quest
     for hit in hits:
         chunk = hit.chunk
         if chunk.kind == "catalog":
+            # «Все форматы — ДЕПО: Цифровой экран со звуком»: название формата, остальные свойства каталог не подтверждает
+            if chunk.venue and "со звуком" in chunk.text.lower():
+                evidence.append((Scope(chunk.venue - _CITY_TOKENS), ("звук", True)))
             continue
         title, sep, body = chunk.text.partition("\nОтвет: ")
         current = scope(kb, title if sep else "")
@@ -167,15 +172,31 @@ def periods(text: str) -> list[tuple[tuple[str, int], int, int]]:
     return out
 
 
+_LIST_ITEM = re.compile(r"\s*(?:[-–—•*]|\d+[.)])\s")
+
+
+def _scoped_parts(kb: KnowledgeBase, answer: str, current: Scope):
+    """Фраза ответа и то, о чём она. Пункт списка наследует формат и место заголовка, а не соседнего пункта:
+    после «- Вход: статичное перекрытие» баннер в следующем пункте считался перекрытием (GigaChat Pro, 30.10)."""
+    heading = current
+    for line in answer.split("\n"):
+        item = _LIST_ITEM.match(line)
+        if item:
+            current = heading
+        for part in _SENTENCES.split(line):
+            current = scope(kb, part, current)
+            yield part, current
+        if not item and line.strip():
+            heading = current
+
+
 def price_period_issues(kb: KnowledgeBase, answer: str, hits: list[SearchHit], question: str) -> list[int]:
     rows = [kb.prices[int(h.chunk.id.split("-")[1])] for h in hits if h.chunk.kind == "price"]
     if not rows:
         return []
-    current = scope(kb, question)
     budget = parse_budget(question.lower())  # бюджет клиента, повторённый в ответе, — не цена формата
     bad = []
-    for part in _SENTENCES.split(answer):
-        current = scope(kb, part, current)
+    for part, current in _scoped_parts(kb, answer, scope(kb, question)):
         spans = amount_spans(part)
         mentioned = periods(part)
         if _PRORATE.search(part):

@@ -1444,3 +1444,167 @@ def test_second_opinion_admitting_missing_data_still_goes_to_manager(kb):
     from app.core.assistant import retry_hint
     assert not retry_hint("model_unsure", "Аренда промо-зоны на 2 дня стоит 80 000 ₽ в день, монтаж отдельно.", "",
                           "хотим провести фестиваль на 2 дня в веере, сколько стоит аренда атриума?")
+
+
+# --- сезонная цена: названная в чате цена может быть признана офертой ---
+_TERMINALS = PriceRow("Видео на навигационных терминалах (3 шт.)", "ВЕЕР Молл, Екатеринбург", "1 месяц", 17325,
+                      "с НДС 5%; ролик 10 сек, 144 выхода в день; в ноябре–декабре 20 790 ₽ в месяц")
+_FOOD_COURT = PriceRow("Цифровой экран", "ВЕЕР Молл, Екатеринбург — фуд-корт", "1 месяц", 42000,
+                       "с НДС 5%; ролик 10 сек; в ноябре–декабре 50 400 ₽ в месяц")
+_DEPO = PriceRow("Цифровой экран", "ДЕПО, Нижний Тагил — фуд-корт", "1 месяц", 26250,
+                 "с НДС 5%; в ноябре–декабре 31 500 ₽ в месяц")
+_VEER = PriceRow("Цифровой экран", "ВЕЕР Молл, Екатеринбург — атриум", "1 месяц", 31500,
+                 "с НДС 5%; в ноябре–декабре 37 800 ₽ в месяц")
+
+
+def _hits_of(rows):
+    kb = KnowledgeBase([], rows, [])
+    return kb, [SearchHit(c, 1.0) for c in kb.chunks if c.kind == "price"]
+
+
+def test_season_price_added_when_answer_names_only_regular_one():
+    from app.core.assistant import add_season_prices
+    text = "Видео на навигационных терминалах ВЕЕР Молл будет стоить 17 325 ₽ за месяц."
+    assert add_season_prices(text, [_TERMINALS]) == f"{text} В ноябре–декабре 20 790 ₽ в месяц."
+
+
+def test_season_price_goes_before_closing_question():
+    from app.core.assistant import add_season_prices
+    text = "Терминалы — 17 325 ₽ за месяц.\n\nКогда планируете запуск?"
+    assert add_season_prices(text, [_TERMINALS]) == ("Терминалы — 17 325 ₽ за месяц. В ноябре–декабре 20 790 ₽ в месяц."
+                                                     "\n\nКогда планируете запуск?")
+
+
+@pytest.mark.parametrize("said", ["в ноябре–декабре 20 790 ₽", "в ноябре–декабре 20790 руб.", "в сезон 20 790"])
+def test_season_price_not_repeated_when_named(said):
+    from app.core.assistant import add_season_prices
+    text = f"Терминалы — 17 325 ₽ за месяц, {said}."
+    assert add_season_prices(text, [_TERMINALS]) == text
+
+
+def test_season_price_only_with_named_month_and_amount():
+    from app.core.assistant import add_season_prices
+    text = "Экран — 10 000 ₽ за месяц."
+    for notes in ("с НДС 5%", "ёлка стоит с декабря по февраль", "в декабре коэффициент 2",
+                  "для маркетплейсов в ноябре 160 000 ₽"):
+        assert add_season_prices(text, [PriceRow("Экран", "ВЕЕР Молл", "1 месяц", 10000, notes)]) == text
+
+
+def test_season_price_not_guessed_between_rows_with_same_price():
+    # Два экрана по 31 500 ₽ с разной сезонной ценой: строка не определена, значит, не дописываем
+    from app.core.assistant import add_season_prices
+    other = PriceRow("Цифровой экран", "ВЕЕР Молл, Екатеринбург — вход", "1 месяц", 31500,
+                     "с НДС 5%; в ноябре–декабре 40 000 ₽ в месяц")
+    kb, hits = _hits_of([_VEER, other])
+    text = "Цифровой экран в ВЕЕР — 31 500 ₽ в месяц."
+    assert kb.rows_in_answer(text, hits) == []
+    assert add_season_prices(text, []) == text
+
+
+def test_regular_price_of_other_row_is_not_its_season_price():
+    # 31 500 ₽ — обычная цена экрана ВЕЕР и ноябрьская экрана ДЕПО: ноябрьская здесь не названа
+    from app.core.assistant import add_season_prices
+    text = "Экран в ДЕПО — 26 250 ₽, экран в ВЕЕР — 31 500 ₽ в месяц."
+    result = add_season_prices(text, [_DEPO, _VEER])
+    assert "Цифровой экран, ДЕПО, Нижний Тагил — фуд-корт: в ноябре–декабре 31 500 ₽ в месяц." in result
+    assert "Цифровой экран, ВЕЕР Молл, Екатеринбург — атриум: в ноябре–декабре 37 800 ₽ в месяц." in result
+
+
+def test_season_price_names_its_row_when_answer_has_other_prices():
+    # Строка терминалов определена, строка за 42 000 ₽ — нет: без названия цена повисла бы на последней сумме
+    from app.core.assistant import add_season_prices
+    text = "Терминалы — 17 325 ₽ в месяц, экран на фуд-корте — 42 000 ₽ в месяц."
+    assert add_season_prices(text, [_TERMINALS]) == (
+        f"{text} Видео на навигационных терминалах (3 шт.): в ноябре–декабре 20 790 ₽ в месяц.")
+    assert "Цифровой экран — фуд-корт: в ноябре–декабре 50 400 ₽" in add_season_prices(text, [_TERMINALS, _FOOD_COURT])
+
+
+def test_listed_rows_carry_season_price():
+    from app.core.assistant import list_item
+    assert list_item(_VEER, with_venue=False) == ("Цифровой экран — атриум: 31 500 ₽ за 1 месяц "
+                                                  "(в ноябре–декабре 37 800 ₽ в месяц)")
+
+
+def test_billboard_template_names_season_prices():
+    street = PriceRow("Цифровой экран Инцентра", "ЦПКиО, Екатеринбург — центральная площадь, уличный экран", "1 месяц", 42000,
+                      "с НДС 5%; в ноябре–декабре 50 400 ₽ в месяц")
+    r = run(Assistant(KnowledgeBase([], [street], []), FakeLLM("x")).answer("Сколько стоит билборд?"))
+    assert "42 000 ₽ за 1 месяц (в ноябре–декабре 50 400 ₽ в месяц)" in r.text
+
+
+def test_model_answer_gets_season_price_end_to_end():
+    kb = KnowledgeBase([], [_TERMINALS, _FOOD_COURT], [])
+    answer = "Видео на навигационных терминалах ВЕЕР Молл будет стоить 17 325 ₽ за месяц. Подойдёт?"
+    r = run(Assistant(kb, FakeLLM(answer), min_score=0).answer("сколько стоят терминалы в веере"))
+    assert r.decision == ANSWER
+    assert r.text == ("Видео на навигационных терминалах ВЕЕР Молл будет стоить 17 325 ₽ за месяц. "
+                      "В ноябре–декабре 20 790 ₽ в месяц. Подойдёт?")
+
+
+# --- формат в карточке менеджеру ---
+@pytest.mark.parametrize("budget", ["30 тыс", "30тыс", "30 тыс.", "30 тысяч", "30 т.р.", "30 тр", "30к", "30 000 руб",
+                                    "30 000 рублей", "2 млн", "2 миллиона", "1 лям", "30 косарей"])
+def test_money_units_do_not_get_into_format(budget):
+    from app.core.conversation import Conversation
+    kb = KnowledgeBase.load(ROOT / "data" / "kb")
+    state = Conversation()
+    state.observe(kb, f"бюджет {budget} нужен экран на фудкорте в веере")
+    assert state.format == "экран фудкорте"
+    assert "формат: экран фудкорте" in state.parameters()
+
+
+def test_budget_alone_keeps_chosen_format_and_real_format_with_thousands_works():
+    from app.core.conversation import Conversation
+    kb = KnowledgeBase.load(ROOT / "data" / "kb")
+    state = Conversation()
+    state.observe(kb, "нужен экран в веере")
+    state.observe(kb, "бюджет 30 тыс")
+    assert state.format == "экран"
+    state = Conversation()
+    state.observe(kb, "парковочные талоны партия 40 тыс")
+    assert "тыс" not in state.format and "талон" in state.format
+
+
+def test_row_found_by_place_when_price_is_shared():
+    entrance = PriceRow("Цифровой экран", "ВЕЕР Молл, Екатеринбург — центральный вход", "1 месяц", 31500,
+                        "с НДС 5%; в ноябре–декабре 37 800 ₽ в месяц")
+    atrium = PriceRow("Цифровой экран", "ВЕЕР Молл, Екатеринбург — центральный атриум", "1 месяц", 31500,
+                      "с НДС 5%; в ноябре–декабре 40 000 ₽ в месяц")
+    kb, hits = _hits_of([entrance, atrium])
+    assert kb.rows_in_answer("Экран в атриуме ВЕЕР Молл стоит 31 500 ₽ за месяц.", hits) == [atrium]
+    assert kb.rows_in_answer("Экран у центрального входа — 31 500 ₽ в месяц.", hits) == [entrance]
+    # Место не названо или названы оба — строка не определена
+    assert kb.rows_in_answer("Экран в ВЕЕР Молл — 31 500 ₽ в месяц.", hits) == []
+    assert kb.rows_in_answer("Экран у входа и в атриуме — 31 500 ₽ в месяц.", hits) == []
+
+
+def test_row_found_when_abbreviation_splits_sentence():
+    kb, hits = _hits_of([_TERMINALS])
+    text = "Есть видео на навигационных терминалах (3 шт.) за 17 325 ₽ в месяц."
+    assert kb.rows_in_answer(text, hits) == [_TERMINALS]
+
+
+def test_row_found_by_place_when_format_named_earlier():
+    away = PriceRow("Цифровой экран Инцентра", "ТЦ «Омега», Екатеринбург — фасад, направление из центра", "1 месяц", 63000,
+                    "с НДС 5%; в ноябре–декабре 75 600 ₽ в месяц")
+    banner = PriceRow("Баннер", "ТЦ «Омега», Екатеринбург — парковка", "1 месяц", 63000, "с НДС 5%")
+    kb, hits = _hits_of([away, banner])
+    assert kb.rows_in_answer("Экран на фасаде Омеги есть. В направлении из центра — 63 000 ₽ за месяц.", hits) == [away]
+    # Ни формата, ни места — не угадываем
+    assert kb.rows_in_answer("Есть вариант за 63 000 ₽ за месяц.", hits) == []
+
+
+def test_works_in_production_row_are_not_unfounded_inclusion():
+    from app.core.price_guard import unsupported_inclusions
+    known = ("[1] Прайс: Производство брендирования бортов катка, ВЕЕР Молл — 318 720 ₽ за сезон декабрь–февраль. "
+             "Подробности: стоимость работ: печать, производство, монтаж и демонтаж; баннерная ткань.\n"
+             "[2] Прайс: Брендирование бортов катка, ВЕЕР Молл — 1 500 000 ₽ за сезон декабрь–февраль. "
+             "Не входит в цену, доплата: производство и монтаж отдельно.")
+    assert unsupported_inclusions("Производство бортов катка — 318 720 ₽ за сезон. Включены услуги печати, производства, "
+                                  "монтажа и демонтажа.", known) == []
+    # Сами борта: производство и монтаж — доплата, разрешения от соседней строки нет
+    assert unsupported_inclusions("Брендирование бортов катка — 1 500 000 ₽. Включены производство и монтаж.", known)
+    # Названы обе цены: неясно, к какой относится «включены» — к менеджеру, как раньше
+    assert unsupported_inclusions("Борта — 1 500 000 ₽, производство — 318 720 ₽. Включены печать и монтаж.", known)
+    # Услуга, которой нет в строке работ
+    assert unsupported_inclusions("Производство — 318 720 ₽. Включён дизайн.", known) == ["дизайн"]

@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from app.config import ROOT
 from app.core.answer_grounding import budget_issues, price_period_issues, property_issues
 from app.core.assistant import Assistant
 from app.core.knowledge import KnowledgeBase, PriceRow, SearchHit, parse_faq
@@ -252,3 +253,49 @@ def test_place_word_with_another_stem_is_not_a_format():
     answer = ("В ВЕЕР Молл есть подвесные флаги в галереях.\n- Галереи, места № 1–8: 98 175 ₽ в месяц за 3 флага.\n"
               "Печать каждого флага – 14 000 ₽.")
     assert price_period_issues(kb, answer, hits(kb), "флаги в веере сколько?") == []
+
+
+def test_list_item_does_not_inherit_format_of_previous_item():
+    rows = [PriceRow("Баннер на статичном перекрытии 9,2×2,4 м", "ДЕПО, Нижний Тагил — центральный вход", "1 месяц", 20000, ""),
+            PriceRow("Баннер № 1, 2×3,8 м", "ДЕПО, Нижний Тагил — переход в кинотеатр", "1 месяц", 12000, "")]
+    kb = KnowledgeBase([], rows, [])
+    all_hits = [SearchHit(c, 1.0) for c in kb.chunks if c.kind == "price"]
+    answer = ("В ДЕПО есть баннеры:\n- Центральный вход: статичное перекрытие 9,2×2,4 м - 20 000 ₽/мес\n"
+              "- Переход в кинотеатр: 2×3,8 м - 12 000 ₽/мес")
+    assert price_period_issues(kb, answer, all_hits, "а баннеры в депо какие есть?") == []
+    numbered = answer.replace("- Центральный", "1. Центральный").replace("- Переход", "2. Переход")
+    assert price_period_issues(kb, numbered, all_hits, "а баннеры в депо какие есть?") == []
+    # Чужая цена в пункте списка по-прежнему ловится
+    wrong = "В ДЕПО есть баннеры:\n- Переход в кинотеатр: 2×3,8 м - 20 000 ₽/мес"
+    assert price_period_issues(kb, wrong, all_hits, "а баннеры в депо какие есть?") == [20000]
+
+
+def test_date_with_year_is_not_a_period():
+    rows = [PriceRow("Генеральный спонсор катка", "ДЕПО, Нижний Тагил — каток", "сезон 1 декабря 2026 – 28 февраля 2027", 1000000, ""),
+            PriceRow("Цифровой экран", "ДЕПО, Нижний Тагил — вход", "1 месяц", 26250, "")]
+    kb = KnowledgeBase([], rows, [])
+    all_hits = [SearchHit(c, 1.0) for c in kb.chunks if c.kind == "price"]
+    assert price_period_issues(kb, "Спонсор катка ДЕПО — 1 000 000 рублей за сезон с 1 декабря 2026 года по 28 февраля 2027 года.",
+                               all_hits, "спонсор катка депо сколько") == []
+    # А настоящий срок «за год» остаётся сроком
+    assert price_period_issues(kb, "Экран ДЕПО — 26 250 ₽ за год.", all_hits, "экран в депо сколько") == [26250]
+
+
+def test_for_example_is_not_a_format():
+    # «Например» есть в названии строки прайса, но о формате не говорит: флаги уходили менеджеру (GigaChat Pro, 30.10)
+    rows = [PriceRow("Подвесные флаги, 3 шт. 2,5×6 м", "ВЕЕР Молл, Екатеринбург — места № 9 и 12", "1 месяц", 207900, ""),
+            PriceRow("Брендирование, например, колонн", "ВЕЕР Молл, Екатеринбург — холл", "1 месяц", 1000, "")]
+    kb = KnowledgeBase([], rows, [])
+    all_hits = [SearchHit(c, 1.0) for c in kb.chunks if c.kind == "price"]
+    answer = "В ВЕЕР есть подвесные флаги. Например, на местах № 9 и 12 — 207 900 ₽ за месяц."
+    assert price_period_issues(kb, answer, all_hits, "флаги в веере") == []
+
+
+def test_format_name_from_catalog_is_not_unfounded_sound():
+    kb = KnowledgeBase.load(ROOT / "data" / "kb")
+    depo = [h for h in kb.retrieve("Здравствуйте, интересует ДЕПО") if h.chunk.kind == "catalog"]
+    assert depo and "со звуком" in depo[0].chunk.text
+    answer = "В ДЕПО есть цифровой экран со звуком и другие форматы."
+    assert property_issues(kb, answer, depo, "Здравствуйте, интересует ДЕПО") == []
+    # Звук в ДЕПО не переносится на другой ТЦ
+    assert property_issues(kb, "В Бутово экран со звуком.", depo, "что в бутово") == ["звук"]
