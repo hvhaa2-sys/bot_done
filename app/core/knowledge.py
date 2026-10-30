@@ -385,14 +385,24 @@ class KnowledgeBase:
         """Строки контекста, чью цену называет ответ: цена и формат в той же фразе. Одного ТЦ мало —
         к «промо в ДЕПО, все выходные — 25 000 ₽» дописывались условия баннера ДЕПО за те же 25 000 ₽."""
         found: list[PriceRow] = []
-        for sentence in re.findall(r"[^.!?\n]+", answer):
+        everywhere = {_VENUE_ALIASES.get(t, t) for t in self.normalize(answer)}
+        # «(3 шт.) за 17 325 ₽» — точка сокращения не конец фразы: цена осталась бы без формата
+        for sentence in re.findall(r"[^.!?\n]+", re.sub(r"\bшт\.", "шт", answer)):
             words = {_VENUE_ALIASES.get(t, t) for t in self.normalize(sentence)}
             for amount in set(extract_amounts(sentence)):
-                matches = [self.prices[int(h.chunk.id.split("-")[1])] for h in hits
-                           if h.chunk.kind == "price" and h.chunk.price == amount and _format_words(h.chunk.fmt) & words]
+                priced = [h.chunk for h in hits if h.chunk.kind == "price" and h.chunk.price == amount]
+                # «Экраны на фасаде. В направлении из центра — 63 000 ₽»: формат назван раньше, место — рядом с ценой
+                chunks = [c for c in priced if _format_words(c.fmt) & words] or \
+                         [c for c in priced if _format_words(c.fmt) & everywhere and c.place & words]
+                # два экрана по 31 500 ₽, но назван атриум — строка определена; ничья — не угадываем
+                if len(chunks) > 1:
+                    scores = [len((c.place | c.venue) & words) for c in chunks]
+                    chunks = [chunks[scores.index(max(scores))]] if max(scores) and scores.count(max(scores)) == 1 else []
                 # два баннера по 25 000 ₽ — не угадываем, чьи условия дописать
-                if len(matches) == 1 and matches[0] not in found:
-                    found.append(matches[0])
+                if len(chunks) == 1:
+                    row = self.prices[int(chunks[0].id.split("-")[1])]
+                    if row not in found:
+                        found.append(row)
         return found
 
     def client_summary(self, texts: list[str]) -> str:
