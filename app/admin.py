@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import datetime as dt
+import hmac
 import io
 import json
 import re
@@ -948,6 +949,26 @@ def create_app(services: Services) -> FastAPI:
         response.set_cookie("admin_token", token, httponly=True, samesite="lax")
         return response
 
+    @app.post("/max/webhook")
+    async def max_webhook(request: Request) -> Response:
+        """События MAX. Единственный путь, открытый наружу (deploy/max-webhook/Caddyfile), поэтому без секрета — 404."""
+        secret = services.settings.max_webhook_secret
+        given = request.headers.get("X-Max-Bot-Api-Secret", "")
+        if not secret or not hmac.compare_digest(given.encode(), secret.encode()):
+            return Response(status_code=404)
+        raw = await request.body()
+        if len(raw) > 2_000_000:
+            return Response(status_code=413)
+        try:
+            update = json.loads(raw)
+        except ValueError:
+            return Response(status_code=400)
+        queue = services.max_updates
+        if queue is None or queue.full() or not isinstance(update, dict):  # не приняли — MAX доставит ещё раз
+            return Response(status_code=503 if isinstance(update, dict) else 400)
+        queue.put_nowait(update)
+        return Response('{"ok": true}', media_type="application/json")
+
     @app.get("/health")
     async def health() -> Response:
         """Для мониторинга на сервере: без токена, без подробностей."""
@@ -1824,9 +1845,10 @@ def status_html(services: Services) -> str:
         elif not mx["ok"]:
             item(False, "MAX", escape(mx["error"]))
         else:
+            link = f"; ссылка для клиентов: max.ru/{escape(mx['username'])}" if mx["username"] else ""
             item(True, f"Бот MAX {escape(mx['username'] or mx['name'])}",
-                 "запущен" if any(c.id.startswith("max:") and c.approved for c in services.db.connections())
-                 else "запущен; менеджеру — написать боту /manager")
+                 ("запущен" if any(c.id.startswith("max:") and c.approved for c in services.db.connections())
+                  else "запущен; менеджеру — написать боту /manager") + link)
     conns = [c for c in services.db.connections() if c.approved]
     pending = sum(not c.approved for c in services.db.connections())
     modes = ", ".join(MODE_TITLES.get(c.mode, c.mode) for c in conns)

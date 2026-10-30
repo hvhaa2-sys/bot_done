@@ -190,11 +190,17 @@ def repo(tmp_path, state):
     return root
 
 
+def read_secret(env):
+    return next(line.split("=", 1)[1] for line in env.splitlines() if line.startswith("MAX_WEBHOOK_SECRET="))
+
+
 def test_server_env_drops_local_paths_and_unused_keys():
     env = server_env({"TELEGRAM_BOT_TOKEN": "t", "DB_PATH": "data/app.db", "ADMIN_HOST": "127.0.0.1", "LLM_PROVIDER": "gigachat",
                       "OPENAI_API_KEY": "yandex", "GIGACHAT_AUTH_KEY": "g"})
     assert "DB_PATH" not in env and "ADMIN_HOST" not in env and "OPENAI" not in env, "ключ Яндекса на сервер не везём"
     assert "TELEGRAM_BOT_TOKEN=t\n" in env and "GIGACHAT_AUTH_KEY=g\n" in env and "TELEGRAM_API_URL=\n" in env
+    assert "MAX_WEBHOOK_URL=\n" in env and len(read_secret(env)) > 30, "секрет вебхука создаётся сам"
+    assert "MAX_WEBHOOK_SECRET=old\n" in server_env({"MAX_WEBHOOK_SECRET": "old"}), "заданный не меняем"
     assert "OPENAI_API_KEY=y" in server_env({"LLM_PROVIDER": "openai", "OPENAI_API_KEY": "y"}), "модель через него — нужен"
 
 

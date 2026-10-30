@@ -42,11 +42,12 @@ def read_env(path: Path) -> dict[str, str]:
 
 
 def init_env(path: Path, example: Path, *, demo: bool = False, force: bool = False,
-             auth_key: str = "", bot_token: str = "", admin_token: str = "") -> bool:
+             auth_key: str = "", bot_token: str = "", admin_token: str = "", max_token: str = "") -> bool:
     if path.exists() and not force:
         raise ValueError("Файл настроек уже есть. Он не изменён. Для новой конфигурации укажите другой --env-file")
     values = {"LLM_PROVIDER": "mock" if demo else "gigachat", "GIGACHAT_AUTH_KEY": auth_key,
-              "TELEGRAM_BOT_TOKEN": bot_token, "ADMIN_TOKEN": admin_token or secrets.token_urlsafe(32)}
+              "TELEGRAM_BOT_TOKEN": bot_token, "MAX_BOT_TOKEN": max_token,
+              "ADMIN_TOKEN": admin_token or secrets.token_urlsafe(32)}
     if not demo and not auth_key:
         raise ValueError("Для GigaChat нужен ключ. Для проверки без сети используйте --demo")
     if any("\n" in v or "\r" in v for v in values.values()):
@@ -230,6 +231,10 @@ def server_env(env: dict[str, str]) -> str:
     if keep.get("LLM_PROVIDER") != "openai":
         keep = {k: v for k, v in keep.items() if not k.startswith("OPENAI_")}
     keep.setdefault("TELEGRAM_API_URL", "")
+    keep.setdefault("MAX_BOT_TOKEN", "")
+    keep.setdefault("MAX_WEBHOOK_URL", "")
+    if not keep.get("MAX_WEBHOOK_SECRET"):
+        keep["MAX_WEBHOOK_SECRET"] = secrets.token_urlsafe(32)
     return "".join(f"{k}={v}\n" for k, v in keep.items())
 
 
@@ -304,15 +309,16 @@ def main(argv: list[str] | None = None) -> None:
             if not args.final:
                 print("Это репетиция: бот работает, новые сообщения в снимок не попадут. Для переезда — --final.")
         elif args.action == "init":
-            key = bot = admin = ""
+            key = bot = admin = max_token = ""
             if not args.demo:
                 if args.non_interactive:
                     parser.error("Для настройки без диалога доступен только --demo")
                 key = getpass.getpass("Ключ авторизации GigaChat: ").strip()
-                bot = getpass.getpass("Токен Telegram (Enter — только админка): ").strip()
+                bot = getpass.getpass("Токен Telegram (Enter — без Telegram): ").strip()
+                max_token = getpass.getpass("Токен бота MAX (Enter — без MAX): ").strip()
             if not args.non_interactive:
                 admin = getpass.getpass("Токен админки (Enter — создать случайный): ").strip()
-            init_env(args.env_file, args.example, demo=args.demo, auth_key=key, bot_token=bot, admin_token=admin)
+            init_env(args.env_file, args.example, demo=args.demo, auth_key=key, bot_token=bot, admin_token=admin, max_token=max_token)
             print("Настройки сохранены с правами 600. ADMIN_TOKEN находится в выбранном .env.")
         else:
             with tempfile.TemporaryDirectory(prefix="assistant-archive-") as tmp:

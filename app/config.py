@@ -54,6 +54,8 @@ class Settings:
     exam_files: str = "eval/questions*.csv"  # контрольные вопросы перед публикацией базы; пусто — без них
     max_bot_token: str = ""  # второй канал — бот организации в MAX; пусто — MAX выключен
     max_api_url: str = ""    # пусто — штатный адрес MAX Bot API
+    max_webhook_url: str = ""     # https://домен/max/webhook; пусто — долгий опрос (для проверки, MAX просит вебхук)
+    max_webhook_secret: str = ""  # MAX шлёт его в заголовке, чужие запросы отбрасываем
     telegram_api_url: str = ""  # свой релей к Telegram: с российских серверов api.telegram.org не отвечает
     admin_login: str = ""          # вход в админку по логину и паролю (python -m app.password); пусто — по токену
     admin_password_hash: str = ""
@@ -92,6 +94,8 @@ class Settings:
             exam_files=env("EXAM_FILES", "eval/questions*.csv"),
             max_bot_token=env("MAX_BOT_TOKEN", ""),
             max_api_url=env("MAX_API_URL", ""),
+            max_webhook_url=env("MAX_WEBHOOK_URL", ""),
+            max_webhook_secret=env("MAX_WEBHOOK_SECRET", ""),
             telegram_api_url=env("TELEGRAM_API_URL", ""),
             admin_login=env("ADMIN_LOGIN", ""),
             admin_password_hash=env("ADMIN_PASSWORD_HASH", ""),

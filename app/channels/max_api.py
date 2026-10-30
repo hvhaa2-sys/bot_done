@@ -60,12 +60,14 @@ class MaxApi:
         return await self.request("GET", "/updates", params={"marker": marker, "timeout": timeout, "limit": 100})
 
     async def send(self, text: str, *, chat_id: int | None = None, user_id: int | None = None,
-                   buttons: Buttons | None = None, forward: str | None = None) -> dict:
+                   buttons: Buttons | None = None, forward: str | None = None, files: list[dict] | None = None) -> dict:
         """{"message": {...}} — отправленное сообщение. forward — mid сообщения, которое переслать
-        (фото или голосовое клиента менеджеру); text тогда может быть пустым."""
-        body: dict = {"text": fit(text)} if text or not forward else {}
-        if buttons:
-            body["attachments"] = [keyboard(buttons)]
+        (фото или голосовое клиента менеджеру); files — вложения по токенам из полученного сообщения,
+        уходят от имени бота (файл менеджера клиенту). С ними text может быть пустым."""
+        body: dict = {"text": fit(text)} if text or not (forward or files) else {}
+        attachments = [*(files or []), *([keyboard(buttons)] if buttons else [])]
+        if attachments:
+            body["attachments"] = attachments
         if forward:
             body["link"] = {"type": "forward", "mid": forward}
         return await self.request("POST", "/messages", params={"chat_id": chat_id, "user_id": user_id}, json=body)
@@ -80,6 +82,17 @@ class MaxApi:
         if text is not None:
             body["message"] = {"text": fit(text), "attachments": [keyboard(buttons)] if buttons else []}
         return await self.request("POST", "/answers", params={"callback_id": callback_id}, json=body)
+
+    async def subscriptions(self) -> list[dict]:
+        return (await self.request("GET", "/subscriptions")).get("subscriptions") or []
+
+    async def subscribe(self, url: str, secret: str, update_types: tuple[str, ...]) -> dict:
+        """Вебхук: MAX шлёт события POST-запросом на url с секретом в заголовке X-Max-Bot-Api-Secret."""
+        return await self.request("POST", "/subscriptions", json={"url": url, "secret": secret,
+                                                                  "update_types": list(update_types)})
+
+    async def unsubscribe(self, url: str) -> dict:
+        return await self.request("DELETE", "/subscriptions", params={"url": url})
 
     async def request(self, method: str, path: str, *, params: dict | None = None, json: dict | None = None) -> dict:
         params = {k: v for k, v in (params or {}).items() if v is not None}
