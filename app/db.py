@@ -90,6 +90,12 @@ CREATE TABLE IF NOT EXISTS observed_messages (
     reply_to_message_id INTEGER,
     UNIQUE (connection_id, chat_id, message_id)
 );
+
+CREATE TABLE IF NOT EXISTS client_sources (
+    chat_id INTEGER PRIMARY KEY,
+    source TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
 """
 
 # Статусы диалога
@@ -392,6 +398,24 @@ class Database:
                         "latency_ms": (r["latency_ms"] or 0) if r else 0})
         return out
 
+    def set_client_source(self, chat_id: int, source: str) -> None:
+        """Откуда пришёл клиент MAX (метка из ссылки). Важен первый приход: повторный по другой ссылке не меняет."""
+        self.conn.execute("INSERT OR IGNORE INTO client_sources (chat_id, source, created_at) VALUES (?, ?, ?)",
+                          (chat_id, source, time.time()))
+        self.conn.commit()
+
+    def source_stats(self) -> dict[str, dict[str, int]]:
+        """По каждой метке: сколько клиентов и заявок. Ключ "" — клиенты, пришедшие без метки."""
+        rows = self.conn.execute(
+            """SELECT COALESCE(s.source, '') AS source, COUNT(DISTINCT c.chat_id) AS clients,
+                      COUNT(DISTINCT CASE WHEN d.reason = 'lead' THEN d.id END) AS leads
+               FROM (SELECT chat_id FROM client_sources
+                     UNION SELECT chat_id FROM dialogs WHERE connection_id LIKE 'max:%') AS c
+               LEFT JOIN client_sources AS s ON s.chat_id = c.chat_id
+               LEFT JOIN dialogs AS d ON d.chat_id = c.chat_id AND d.connection_id LIKE 'max:%'
+               GROUP BY COALESCE(s.source, '')""").fetchall()
+        return {r["source"]: {"clients": r["clients"], "leads": r["leads"]} for r in rows}
+
     def to_learn(self, limit: int = 500) -> list[sqlite3.Row]:
         """Вопросы, на которые у бота не нашлось ответа или он ответил неверно (отметка «Ошибка»).
         Стоп-темы (скидки, договор) и голосовые сюда не попадают: это работа менеджера, не пробел в базе.
@@ -400,7 +424,7 @@ class Database:
             """SELECT id, question, reason, created_at, flagged FROM dialogs
                WHERE learned = 0 AND (flagged = 1 OR (decision = 'escalate'
                      AND reason NOT LIKE 'stop_topic%' AND reason NOT LIKE 'llm_error%'
-                     AND reason NOT IN ('media', 'greeting', 'small_talk', 'relayed')))
+                     AND reason NOT IN ('media', 'greeting', 'small_talk', 'relayed', 'lead', 'human')))
                ORDER BY id DESC LIMIT ?""", (limit,)).fetchall()
 
     def mark_learned(self, ids: list[int]) -> None:
