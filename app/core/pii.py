@@ -15,6 +15,12 @@ _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
 _CARD_RE = re.compile(r"\b(?:\d[ -]?){16}\b")
 
 
+def find_phone(text: str) -> str:
+    """Телефон из сообщения клиента, который сам оставляет контакт, — или пусто."""
+    match = _PHONE_RE.search(text)
+    return match.group().strip() if match else ""
+
+
 def mask_pd(text: str) -> str:
     """Скрыть персональные данные: телефоны, почты, номера карт."""
     text = _CARD_RE.sub("[карта]", text)

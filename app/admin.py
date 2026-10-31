@@ -73,6 +73,7 @@ PRICE_PER_1K = {"GigaChat": 0.065, "GigaChat-Pro": 0.5, "GigaChat-Max": 0.65}
 SEARCH_PLACES = [
     ("Обзор", "/", "главная неделя график статистика"),
     ("Проверить бота", "/#sandbox", "тестовый чат спросить песочница"),
+    ("Клиенты в MAX", "/invite", "ссылка qr код бот перевести клиентов откуда пришли заявки"),
     ("Подключения", "/#connections", "менеджеры разрешить режим черновики автоответ"),
     ("Диалоги", "/dialogs", "разговоры журнал переписка"),
     ("Черновики", "/dialogs?f=drafts", "ждут решения отправить"),
@@ -173,6 +174,8 @@ h2{font-size:17px;margin:0 0 12px;font-weight:650;letter-spacing:-.01em}
 h3{font-size:15px;margin:16px 0 8px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:20px;margin-bottom:16px}
 .card>:last-child{margin-bottom:0}.card>p:first-child,.card>h2:first-child{margin-top:0}
+.sources{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:12px;margin-bottom:16px}
+.sources .card{margin:0}.qr{display:block;background:#fff;max-width:100%;height:auto}.source .link{overflow-wrap:anywhere}
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
 .kpis .card{margin:0;padding:14px 16px}
 .kpi{font:600 28px/1.15 var(--mono);margin-top:4px;letter-spacing:-.02em}
@@ -431,7 +434,7 @@ text-decoration:none}.palette .hit span{font-size:13px;color:var(--muted);white-
 """
 
 NAV = [("/", "Обзор"), ("/dialogs", "Диалоги"), ("/observe", "Наблюдение"), ("/learn", "Обучение"), ("/kb", "База знаний"),
-       ("/exam", "Экзамен"), ("/settings", "Настройки"), ("/onboarding", "Внедрение")]
+       ("/invite", "Клиенты в MAX"), ("/exam", "Экзамен"), ("/settings", "Настройки"), ("/onboarding", "Внедрение")]
 NAV_GROUPS = {"/dialogs": "Разговоры", "/learn": "Бот"}  # подпись группы в меню перед этим пунктом
 
 
@@ -464,6 +467,13 @@ const changed = el => $$("input, textarea, select", el).some(f =>
   : f.value !== f.defaultValue) || !!$("details[data-opened]", el);
 // Отмечаем только то, что открыл или закрыл человек: браузер шлёт toggle и для блоков, открытых с сервера,
 // и тогда живое обновление вставало бы, пока на экране разговор с формой ответа
+$$("[data-copy]").forEach(b => b.addEventListener("click", async () => {
+  const field = document.getElementById(b.dataset.copy);
+  field.select();
+  try { await navigator.clipboard.writeText(field.value); b.textContent = "Скопировано"; }
+  catch { document.execCommand("copy"); b.textContent = "Скопировано"; }
+}));
+
 document.addEventListener("click", e => {
   e.target.closest?.("main details > summary")?.parentElement.setAttribute("data-opened", "");
 });
@@ -802,13 +812,15 @@ CSS = "".join(
 
 def render_page(title: str, body: str, active: str = "/", refresh: int | None = None, *,
                 wide: bool = False, badges: dict[str, int] | None = None, poll: int | None = None,
-                brand: str = "") -> HTMLResponse:
+                brand: str = "", hide: tuple[str, ...] = ()) -> HTMLResponse:
     """Страница админки: меню слева, справа раздел. wide — для ящиков «Диалогов» и «Наблюдения» во всю ширину.
     poll — раз в сколько секунд скрипт подтягивает блоки с data-live (новые сообщения, счётчики) без перезагрузки;
     refresh — то же для страниц, которые меняются целиком (экзамен), а без JavaScript — обычное обновление."""
     current = ' class="on" aria-current="page"'
     links = []
     for href, name in NAV:
+        if href in hide:
+            continue
         if href in NAV_GROUPS:
             links.append(f'<span class="grp">{NAV_GROUPS[href]}</span>')
         count = (badges or {}).get(href)
@@ -873,7 +885,8 @@ def create_app(services: Services) -> FastAPI:
     def page(title: str, body: str, active: str = "/", refresh: int | None = None, *,
              wide: bool = False, poll: int | None = None) -> HTMLResponse:
         return render_page(title, body, active, refresh, wide=wide, badges=nav_badges(services), poll=poll,
-                           brand=onboarding.load(services).get("business_name", ""))
+                           brand=onboarding.load(services).get("business_name", ""),
+                           hide=() if services.settings.max_bot_token else ("/invite",))
 
     failures: dict[str, list[float]] = {}
 
@@ -974,6 +987,35 @@ def create_app(services: Services) -> FastAPI:
         """Для мониторинга на сервере: без токена, без подробностей."""
         services.db.conn.execute("SELECT 1").fetchone()
         return Response('{"ok": true}', media_type="application/json")
+
+    # --- перевод клиентов в бота MAX ---
+    @app.get("/invite", dependencies=[Depends(auth)])
+    async def invite_page(msg: str = "") -> HTMLResponse:
+        return page("Клиенты в MAX", invite_html(services, msg), "/invite")
+
+    @app.post("/invite/source", dependencies=[Depends(auth)])
+    async def invite_add(title: str = Form("")) -> RedirectResponse:
+        title = " ".join(title.split())[:40]
+        sources = invite_sources(services)
+        if title and all(s["title"].lower() != title.lower() for s in sources):
+            used = {s["id"] for s in sources}
+            source = next(f"s{n}" for n in range(1, len(used) + 2) if f"s{n}" not in used)
+            services.db.set_settings({SOURCES_KEY: json.dumps([*sources, {"id": source, "title": title}], ensure_ascii=False)})
+        return RedirectResponse("/invite", status_code=303)
+
+    @app.get("/invite/qr/{source}.svg", dependencies=[Depends(auth)])
+    async def invite_qr(source: str, download: int = 0) -> Response:
+        username = (services.max_status or {}).get("username")
+        if not username or source not in {s["id"] for s in invite_sources(services)}:
+            return Response(status_code=404)
+        import segno
+
+        out = io.BytesIO()
+        # Чёрное на белом с полем вокруг: так код читается и на тёмной теме, и на печати
+        segno.make(invite_link(username, source), error="m").save(out, kind="svg", scale=8, border=4, dark="#000000",
+                                                                  light="#ffffff")
+        headers = {"Content-Disposition": f'attachment; filename="qr-{source}.svg"'} if download else {}
+        return Response(out.getvalue(), media_type="image/svg+xml", headers=headers)
 
     # --- внедрение бизнеса ---
     def onboarding_page(step: str = "", msg: str = "", form: dict | None = None) -> HTMLResponse:
@@ -1945,6 +1987,56 @@ def connections_html(services: Services) -> str:
     title = "Подключения" if any(c.id.startswith("max:") for c in conns) else "Подключения Telegram"
     return f"""<div class="card" id="connections"><h2>{title}</h2>{hint}<div class="scroll"><table>
 <tr><th>Менеджер</th><th>Статус</th><th>Режим</th></tr>{"".join(row(c) for c in conns)}</table></div></div>"""
+
+
+SOURCES_KEY = "max_sources"
+DEFAULT_SOURCES = [{"id": "site", "title": "Сайт"}, {"id": "card", "title": "Визитка"},
+                   {"id": "old", "title": "Старые клиенты"}]
+OLD_CLIENTS_TEXT = ("Здравствуйте! Вопросы по рекламе теперь можно задавать нашему боту в MAX: {link}\n"
+                    "Он сразу подскажет форматы и цены, а если нужно, подключусь я.")
+
+
+def invite_sources(services: Services) -> list[dict[str, str]]:
+    raw = services.db.get_settings().get(SOURCES_KEY)
+    return json.loads(raw) if raw else list(DEFAULT_SOURCES)
+
+
+def invite_link(username: str, source: str) -> str:
+    return f"https://max.ru/{username}?start={source}"
+
+
+def invite_html(services: Services, msg: str = "") -> str:
+    """Перевод клиентов в бота: ссылка и QR-код на каждое место, откуда пришли и сколько заявок, текст для старых клиентов."""
+    username = (services.max_status or {}).get("username") or ""
+    stats = services.db.source_stats()
+    sources = invite_sources(services)
+
+    def card(source: dict[str, str]) -> str:
+        link = invite_link(username, source["id"])
+        counts = stats.get(source["id"], {"clients": 0, "leads": 0})
+        qr = (f"""<img class="qr" src="/invite/qr/{escape(source['id'], quote=True)}.svg" width="168" height="168" alt="QR-код: {escape(source['title'], quote=True)}">
+<p class="link"><a href="{escape(link, quote=True)}">{escape(link.removeprefix('https://'))}</a></p>
+<p><a href="/invite/qr/{escape(source['id'], quote=True)}.svg?download=1">Скачать QR-код</a></p>""" if username else "")
+        return f"""<div class="card source"><h2>{escape(source['title'])}</h2>{qr}
+<p class="muted">{plural(counts['clients'], 'клиент', 'клиента', 'клиентов')} · {plural(counts['leads'], 'заявка', 'заявки', 'заявок')}</p></div>"""
+
+    known = {s["id"] for s in sources}
+    other = [v for k, v in stats.items() if k not in known]
+    unmarked = (f'<p class="muted">Без метки: {plural(sum(v["clients"] for v in other), "клиент", "клиента", "клиентов")}, '
+                f'{plural(sum(v["leads"] for v in other), "заявка", "заявки", "заявок")}.</p>' if other else "")
+    empty = ("" if username else '<p class="warn">Ссылки и QR-коды появятся, когда бот MAX будет подключён.</p>')
+    old = next((s for s in sources if s["id"] == "old"), sources[0])
+    text = ""
+    if username:
+        message = OLD_CLIENTS_TEXT.format(link=invite_link(username, old["id"]))
+        text = f"""<div class="card"><h2>Текст для старых клиентов</h2><textarea id="old-text" rows="3" readonly>{escape(message)}</textarea>
+<div class="row"><button type="button" class="light small" data-copy="old-text">Скопировать</button></div></div>"""
+    return f"""<h1>Клиенты в MAX</h1>{f'<p class="ok">{escape(msg)}</p>' if msg else ""}{empty}
+<p class="muted">У каждого места своя ссылка: так видно, откуда пришёл клиент и кто оставил заявку.</p>
+<div class="sources">{"".join(card(s) for s in sources)}</div>{unmarked}{text}
+<div class="card"><h2>Новое место</h2><form method="post" action="/invite/source" class="row">
+<label for="source-title">Название</label><input id="source-title" name="title" maxlength="40" required placeholder="Например, листовка в ТЦ">
+<button class="small">Добавить</button></form></div>"""
 
 
 def learn_html(services: Services, msg: str = "", check: str = "", *, tab: str = "", n: int = 0,

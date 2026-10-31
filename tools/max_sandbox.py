@@ -40,7 +40,7 @@ PEOPLE = {
     "anna": {"user_id": 201, "first_name": "Анна", "last_name": "К.", "username": "anna_k", "chat_id": 9201},
     "ildar": {"user_id": 202, "first_name": "Ильдар", "last_name": "", "username": "", "chat_id": 9202},
 }
-MEDIA = {"image": "фото", "audio": "голосовое", "file": "файл"}
+MEDIA = {"image": "фото", "audio": "голосовое", "file": "файл", "contact": "контакт"}
 log = logging.getLogger("max_sandbox")
 
 
@@ -108,6 +108,11 @@ class FakeMax:
     async def user_writes(self, who: str, text: str = "", media: str = "", reply_to: str = "") -> dict:
         token = hashlib.sha256(f"{who}{next(self.seq)}".encode()).hexdigest()[:16]
         attachments = [{"type": media, "payload": {"url": f"https://example.invalid/{media}", "token": token}}] if media else []
+        if media == "contact":  # кнопка «Отправить мой контакт»: выдуманный номер в формате vCard
+            person = user(who)
+            attachments = [{"type": "contact", "payload": {
+                "vcf_info": f"BEGIN:VCARD\nVERSION:3.0\nFN:{person['first_name']}\nTEL;TYPE=cell:+79990001122\nEND:VCARD",
+                "max_info": person, "hash": token}}]
         link = self.linked("reply", reply_to) if reply_to else None
         msg = self.new_message(user(who), PEOPLE[who]["chat_id"], text, attachments, link)
         self.updates.append({"update_type": "message_created", "timestamp": msg["timestamp"], "message": msg,
@@ -115,9 +120,9 @@ class FakeMax:
         await self.touch()
         return msg
 
-    async def user_starts(self, who: str) -> None:
+    async def user_starts(self, who: str, payload: str | None = None) -> None:
         self.updates.append({"update_type": "bot_started", "timestamp": int(time.time() * 1000),
-                             "chat_id": PEOPLE[who]["chat_id"], "user": user(who), "payload": None})
+                             "chat_id": PEOPLE[who]["chat_id"], "user": user(who), "payload": payload})
         await self.touch()
 
     async def user_presses(self, who: str, mid: str, payload: str) -> None:
@@ -174,7 +179,7 @@ class FakeMax:
     def state(self) -> dict:
         def view(m: dict) -> dict:
             body, link = m["body"], m.get("link")
-            buttons = [[{"text": b["text"], "payload": b["payload"]} for b in row]
+            buttons = [[{"type": b.get("type", "callback"), "text": b["text"], "payload": b.get("payload", "")} for b in row]
                        for a in body.get("attachments") or [] if a.get("type") == "inline_keyboard"
                        for row in a["payload"]["buttons"]]
             media = next((MEDIA.get(a["type"], a["type"]) for a in body.get("attachments") or []
@@ -268,7 +273,7 @@ def create_app(fake: FakeMax) -> FastAPI:
         if who not in PEOPLE:
             raise HTTPException(400, "unknown person")
         if data.get("start"):
-            await fake.user_starts(who)
+            await fake.user_starts(who, data.get("source") or None)
         elif data.get("payload"):
             await fake.user_presses(who, data.get("mid", ""), data["payload"])
         elif (text := (data.get("text") or "").strip()) or data.get("media") in MEDIA:
@@ -341,6 +346,7 @@ function bubble(m, who) {
 ${esc(m.link.from)}: ${esc(m.link.text.slice(0, 160))}</div>` : "";
   const text = m.text ? esc(m.text) : m.media ? `[${esc(m.media)}]` : "";
   const kb = m.buttons.length ? `<div class="kb">${m.buttons.flat().map((b) =>
+    b.type === "request_contact" ? `<button data-contact>${esc(b.text)}</button>` :
     `<button data-mid="${m.mid}" data-payload="${esc(b.payload)}">${esc(b.text)}</button>`).join("")}</div>` : "";
   const re = who === "manager" && m.bot && m.text ? `<button class="re" data-reply="${m.mid}">Ответить</button>` : "";
   return `<div class="msg ${mine ? "me" : "bot"}">${link}${text}${kb}<div class="t">${m.time}</div>${re}</div>`;
@@ -386,8 +392,10 @@ document.addEventListener("click", (e) => {
     document.querySelector("[data-side=manager] input").focus();
   } else if (t.closest(".replying") && t.matches("button")) {
     reply.mid = ""; render();
+  } else if (t.dataset.contact !== undefined) {
+    post({who: client.who, media: "contact"});
   } else if (t.dataset.start !== undefined) {
-    post({who: client.who, start: true});
+    post({who: client.who, start: true, source: new URLSearchParams(location.search).get("start")});
   } else if (t.dataset.file !== undefined) {
     if (reply.mid) { post({who: "manager", media: "file", reply_to: reply.mid}); reply.mid = ""; }
   } else if (t.dataset.media) {

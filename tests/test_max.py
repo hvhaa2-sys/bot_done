@@ -11,7 +11,9 @@ import pytest
 
 from app import db as D
 from app.channels.max_api import MaxApi, MaxError, keyboard
-from app.channels.max_bot import CONN_PREFIX, HELP, NO_MANAGER, MaxBot, handle_queue, run_max, run_webhook
+from app.channels.max_bot import (AFTER_ANSWER, ASK_CONTACT, BUDGET_ASK, CLIENT_MENU, CONN_PREFIX, HELP, HUMAN_AGAIN, HUMAN_DONE,
+                                  LEAD_ASK, LEAD_DONE, NO_MANAGER, NOT_DELIVERED, OBSERVE_MENU, MaxBot, handle_queue, run_max,
+                                  run_webhook)
 from app.config import ROOT, Settings
 from app.services import Services
 
@@ -517,10 +519,11 @@ def test_caption_contact_location_and_slash_text_reach_manager(env):
     assert services.db.get_connection(CONN).mode == "draft", "клиент режим не меняет"
 
     feed(bot, message("", attachments=[{"type": "contact", "payload": {}}], mid="phone"))
-    assert to(api, MANAGER_CHAT)[-2]["forward"] == "phone" and "контакт" in to(api, MANAGER_CHAT)[-1]["text"]
-    assert services.db.is_paused(CONN, CLIENT_CHAT), "разговор забирает менеджер"
+    assert to(api, MANAGER_CHAT)[-2]["forward"] == "phone" and "Заявка" in to(api, MANAGER_CHAT)[-1]["text"], "номер не разобрали"
+    assert not services.db.is_paused(CONN, CLIENT_CHAT), "заявка — не повод молчать на следующие вопросы"
     feed(bot, message("", attachments=[{"type": "location", "payload": {}}], mid="geo"))
-    assert to(api, MANAGER_CHAT)[-1]["forward"] == "geo"
+    assert to(api, MANAGER_CHAT)[-2]["forward"] == "geo" and "геолокацию" in to(api, MANAGER_CHAT)[-1]["text"]
+    assert services.db.is_paused(CONN, CLIENT_CHAT), "разговор забирает менеджер"
 
 
 def test_observe_keeps_names_and_text_out_of_log_and_photo_with_caption_is_forwarded(env):
@@ -795,4 +798,226 @@ def test_polling_removes_leftover_webhook(env):
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(run_max(Api(), services))
     assert removed == ["https://old.test/max/webhook"], "иначе MAX не отдаёт события опросом, и бот молчит"
+
+
+def press(bot, payload, user=CLIENT, chat=CLIENT_CHAT):
+    feed(bot, {"update_type": "message_callback",
+               "callback": {"callback_id": f"cb{next(SEQ)}", "payload": payload,
+                            "user": {"user_id": user, "first_name": "Иван", "last_name": "Петров", "username": "ivan"}},
+               "message": {"recipient": {"chat_id": chat, "chat_type": "dialog"}, "body": {"mid": "x", "seq": 1, "text": "меню"}}})
+
+
+def contact(phone="+7 999 000-11-22", mid=None):
+    vcf = f"BEGIN:VCARD\nVERSION:3.0\nFN:Иван\nTEL;TYPE=cell:{phone}\nEND:VCARD"
+    return message("", attachments=[{"type": "contact", "payload": {"vcf_info": vcf, "max_info": {}, "hash": "h"}}], mid=mid)
+
+
+def test_menu_on_start_and_greeting_but_not_in_observe(env):
+    services, bot, api = env
+    connect(bot)
+    feed(bot, {"update_type": "bot_started", "chat_id": CLIENT_CHAT, "user": {"user_id": CLIENT}})
+    assert to(api, CLIENT_CHAT)[-1]["buttons"] == CLIENT_MENU
+    feed(bot, message("Здравствуйте"))
+    assert to(api, CLIENT_CHAT)[-1]["buttons"] == CLIENT_MENU
+    feed(bot, message("/start"))
+    assert to(api, CLIENT_CHAT)[-1]["buttons"] == CLIENT_MENU
+    feed(bot, message("/mode observe", MANAGER, MANAGER_CHAT))
+    feed(bot, {"update_type": "bot_started", "chat_id": CLIENT_CHAT, "user": {"user_id": CLIENT}})
+    assert to(api, CLIENT_CHAT)[-1]["buttons"] is None, "в наблюдении бот сам ничего не делает"
+    before = len(api.sent)
+    press(bot, "menu:catalog")
+    assert api.answers[-1]["notification"] == OBSERVE_MENU and len(api.sent) == before, "старая кнопка в наблюдении"
+
+
+def test_catalog_button_needs_no_model_and_works_in_drafts(env, monkeypatch):
+    services, bot, api = env
+    connect(bot)
+
+    async def no_model(*_):
+        raise AssertionError("кнопка каталога не должна звать модель")
+
+    monkeypatch.setattr(services.assistant.llm, "complete", no_model)
+    press(bot, "menu:catalog")
+    sent = to(api, CLIENT_CHAT)[-1]
+    assert sent["buttons"] == AFTER_ANSWER and sent["text"].startswith("Мы размещаем рекламу") and api.answers[-1]["notification"]
+    assert services.db.recent_dialogs(5) == [], "это не вопрос клиента"
+
+
+def test_catalog_button_on_real_knowledge_base(tmp_path, monkeypatch):
+    """Учебная база показывает каталог почти на любую фразу, поэтому проверяем и на настоящей."""
+    shutil.copytree(ROOT / "data" / "kb", tmp_path / "kb", ignore=shutil.ignore_patterns(".obsidian"))
+    settings = replace(Settings.load(), db_path=tmp_path / "t.db", kb_dir=tmp_path / "kb", llm_provider="mock", exam_files="")
+    services = Services(settings)
+    api = FakeApi()
+    bot = MaxBot(api, services, BOT)
+    connect(bot)
+    press(bot, "menu:catalog")
+    text = to(api, CLIENT_CHAT)[-1]["text"]
+    assert text.startswith("Мы размещаем рекламу") and "ВЕЕР Молл" in text
+
+
+def test_budget_button_turns_next_number_into_budget(env):
+    services, bot, api = env
+    connect(bot)
+    press(bot, "menu:budget")
+    assert to(api, CLIENT_CHAT)[-1]["text"] == BUDGET_ASK
+    feed(bot, message("50 тысяч"))
+    assert services.db.recent_dialogs(1)[0]["question"] == "Бюджет 50 тысяч"
+    feed(bot, message("70 тысяч"))
+    assert services.db.recent_dialogs(1)[0]["question"] == "70 тысяч", "только сразу после кнопки"
+
+
+def test_contact_button_makes_lead_card_with_context_and_no_phone_in_journal(env):
+    services, bot, api = env
+    connect(bot)
+    feed(bot, message("Сколько стоит экран в атриуме?"))
+    press(bot, "menu:lead")
+    assert to(api, CLIENT_CHAT)[-1]["text"] == LEAD_ASK and to(api, CLIENT_CHAT)[-1]["buttons"] == ASK_CONTACT
+    feed(bot, contact())
+    card = to(api, MANAGER_CHAT)[-1]["text"]
+    assert card.startswith("Заявка: Иван Петров") and "Телефон: +7 999 000-11-22" in card and "Вопрос #" in card
+    assert "экран" in card and "Сколько стоит экран в атриуме?" in card, "не только номер, но и о чём речь"
+    assert to(api, CLIENT_CHAT)[-1]["text"] == LEAD_DONE
+    row = services.db.recent_dialogs(1)[0]
+    assert (row["question"], row["reason"], row["status"]) == ("[заявка]", "lead", D.ESCALATED)
+    assert "999" not in str(dict(row)) and not any("999" in t for _, t in services.events), "телефона нет ни в журнале, ни в логе"
+    assert row["id"] not in [r["id"] for r in services.db.to_learn()]
+    feed(bot, reply_to(card, "Спасибо, позвоню сегодня."))
+    assert to(api, CLIENT_CHAT)[-1]["text"] == "Спасибо, позвоню сегодня."
+
+
+def test_phone_by_text_after_lead_button_and_not_otherwise(env):
+    services, bot, api = env
+    connect(bot)
+    press(bot, "menu:lead")
+    feed(bot, message("мой номер 8 912 345-67-89"))
+    assert "Телефон: 8 912 345-67-89" in to(api, MANAGER_CHAT)[-1]["text"]
+    assert services.db.recent_dialogs(1)[0]["question"] == "[заявка]"
+    press(bot, "menu:lead")
+    feed(bot, message("а сначала скажите, сколько стоит экран в атриуме?"))
+    assert "Заявка" not in to(api, MANAGER_CHAT)[-1]["text"], "вопрос вместо телефона — обычный вопрос"
+
+
+def test_lead_failure_is_honest(env):
+    _, bot, api = env
+    connect(bot)
+    real = api.send
+
+    async def manager_down(text, *, chat_id=None, **kw):
+        if chat_id == MANAGER_CHAT:
+            raise MaxError(503, "down")
+        return await real(text, chat_id=chat_id, **kw)
+
+    api.send = manager_down
+    feed(bot, contact())
+    assert to(api, CLIENT_CHAT)[-1]["text"] == NOT_DELIVERED, "нельзя сказать «передал», если не передали"
+
+
+def test_call_human_by_button_and_by_words(env):
+    services, bot, api = env
+    connect(bot)
+    feed(bot, message("/mode auto", MANAGER, MANAGER_CHAT))
+    feed(bot, message("Сколько стоит экран в атриуме?"))
+    assert to(api, CLIENT_CHAT)[-1]["buttons"] == AFTER_ANSWER, "под ответом бота есть выход к человеку"
+    before = len(to(api, MANAGER_CHAT))
+    press(bot, "menu:human")
+    assert to(api, CLIENT_CHAT)[-1]["text"] == HUMAN_DONE and services.db.is_paused(CONN, CLIENT_CHAT)
+    assert "просит менеджера" in to(api, MANAGER_CHAT)[-1]["text"] and len(to(api, MANAGER_CHAT)) == before + 1
+    press(bot, "menu:human")
+    assert to(api, CLIENT_CHAT)[-1]["text"] == HUMAN_AGAIN and len(to(api, MANAGER_CHAT)) == before + 1, "не дёргаем дважды"
+
+    services.db.resume_chats(CONN)
+    bot.called.clear()
+    for text in ("позовите менеджера", "соедините с человеком", "Хочу поговорить с оператором"):
+        bot.called.clear()
+        services.db.resume_chats(CONN)
+        feed(bot, message(text))
+        assert to(api, CLIENT_CHAT)[-1]["text"] == HUMAN_DONE, text
+    services.db.resume_chats(CONN)
+    feed(bot, message("а ваш менеджер обещал скидку"))
+    assert "просит менеджера" not in to(api, MANAGER_CHAT)[-1]["text"], "упоминание менеджера — ещё не просьба позвать"
+
+
+def test_ready_to_buy_asks_for_contact(env):
+    _, bot, api = env
+    connect(bot)
+    feed(bot, message("/mode auto", MANAGER, MANAGER_CHAT))
+    feed(bot, message("Хочу на месяц экран в атриуме, берём"))
+    assert to(api, CLIENT_CHAT)[-1]["text"] == LEAD_ASK and to(api, CLIENT_CHAT)[-1]["buttons"] == ASK_CONTACT
+    feed(bot, contact())
+    assert to(api, MANAGER_CHAT)[-1]["text"].startswith("Заявка:")
+
+
+def test_menu_for_stranger_manager_and_no_manager(env):
+    services, bot, api = env
+    press(bot, "menu:human")
+    assert api.answers[-1]["notification"] == NO_MANAGER
+    connect(bot)
+    press(bot, "menu:human", user=MANAGER, chat=MANAGER_CHAT)
+    assert api.answers[-1]["notification"] == "Это кнопка для клиентов."
+    press(bot, "menu:unknown")
+    assert api.answers[-1]["notification"] == "Кнопка устарела."
+
+
+def test_source_from_link_is_kept_first_and_counted(env):
+    services, bot, _ = env
+    connect(bot)
+    feed(bot, {"update_type": "bot_started", "chat_id": CLIENT_CHAT, "user": {"user_id": CLIENT}, "payload": "card"})
+    feed(bot, {"update_type": "bot_started", "chat_id": CLIENT_CHAT, "user": {"user_id": CLIENT}, "payload": "site"})
+    feed(bot, contact())
+    feed(bot, {"update_type": "bot_started", "chat_id": 7777, "user": {"user_id": 777}, "payload": "bad payload!"})
+    feed(bot, message("Сколько стоит экран в атриуме?", user=888, chat=8880))
+    stats = services.db.source_stats()
+    assert stats["card"] == {"clients": 1, "leads": 1} and "site" not in stats and "bad payload!" not in stats
+    assert stats[""]["clients"] == 1, "написал без ссылки"
+    feed(bot, message("/start site", user=999, chat=9990))
+    assert services.db.source_stats()["site"]["clients"] == 1
+
+
+def test_several_files_go_one_by_one(env):
+    _, bot, api = env
+    connect(bot)
+    feed(bot, message("Пришлите КП"))
+    update = reply_to(to(api, MANAGER_CHAT)[-1]["text"], "Держите")
+    second = {"type": "file", "payload": {"url": "u", "token": "tok2"}}
+    update["message"]["body"]["attachments"] = [FILE, second]
+    feed(bot, update)
+    sent = to(api, CLIENT_CHAT)[-2:]
+    assert sent[0]["text"] == "Держите" and sent[0]["files"] == [{"type": "file", "payload": {"token": "tok1"}}]
+    assert sent[1]["files"] == [{"type": "file", "payload": {"token": "tok2"}}], "MAX: файл — единственное вложение"
+
+
+def test_keyboard_has_contact_button():
+    assert keyboard([[("Контакт", "\0contact"), ("Меню", "menu:x")]])["payload"]["buttons"] == [[
+        {"type": "request_contact", "text": "Контакт"}, {"type": "callback", "text": "Меню", "payload": "menu:x"}]]
+
+
+def test_invite_page_links_qr_stats_and_new_source(env):
+    services, bot, _ = env
+    services.settings = replace(services.settings, max_bot_token="t", admin_token="adm")
+    client = admin_client(services)
+    client.cookies.set("admin_token", "adm")
+    assert "Ссылки и QR-коды появятся" in client.get("/invite").text
+    assert client.get("/invite/qr/site.svg").status_code == 404
+    services.max_status = {"ok": True, "username": "reklama_bot", "name": "Реклама"}
+    connect(bot)
+    feed(bot, {"update_type": "bot_started", "chat_id": CLIENT_CHAT, "user": {"user_id": CLIENT}, "payload": "card"})
+    feed(bot, contact())
+    page = client.get("/invite").text
+    assert 'href="/invite"' in page, "раздел в меню, когда MAX подключён"
+    assert "max.ru/reklama_bot?start=site" in page and "max.ru/reklama_bot?start=card" in page
+    assert "1 клиент · 1 заявка" in page and "max.ru/reklama_bot?start=old" in page.split('id="old-text"')[1]
+    svg = client.get("/invite/qr/card.svg")
+    assert svg.headers["content-type"].startswith("image/svg") and b"<svg" in svg.content
+    assert "attachment" in client.get("/invite/qr/card.svg?download=1").headers["content-disposition"]
+    assert client.get("/invite/qr/nope.svg").status_code == 404
+    client.post("/invite/source", data={"title": "  Листовка <b>в ТЦ</b> "})
+    client.post("/invite/source", data={"title": "листовка <b>в тц</b>"})
+    page = client.get("/invite").text
+    assert "start=s1" in page and "start=s2" not in page and "&lt;b&gt;" in page and "<b>в ТЦ" not in page
+    assert client.get("/invite/qr/s1.svg").status_code == 200
+    services.settings = replace(services.settings, max_bot_token="")
+    assert 'href="/invite"' not in client.get("/").text, "без MAX раздела в меню нет"
+    client.cookies.clear()
+    assert client.get("/invite", follow_redirects=False).status_code != 200, "только после входа"
 

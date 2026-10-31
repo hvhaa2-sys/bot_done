@@ -20,6 +20,7 @@ RETRY_DELAYS = (1.0, 2.0, 4.0)
 _RETRYABLE = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.RemoteProtocolError)
 
 Buttons = list[list[tuple[str, str]]]  # ряды кнопок: (надпись, payload)
+REQUEST_CONTACT = "\0contact"  # вместо payload: кнопка, по которой клиент отправляет свой контакт
 
 
 class MaxError(Exception):
@@ -41,8 +42,12 @@ def fit(text: str) -> str:
 
 def keyboard(buttons: Buttons) -> dict:
     """Кнопки под сообщением: при нажатии бот получает событие message_callback с этим payload."""
-    return {"type": "inline_keyboard", "payload": {"buttons": [
-        [{"type": "callback", "text": text, "payload": payload} for text, payload in row] for row in buttons]}}
+    def button(text: str, payload: str) -> dict:
+        if payload == REQUEST_CONTACT:
+            return {"type": "request_contact", "text": text}
+        return {"type": "callback", "text": text, "payload": payload}
+
+    return {"type": "inline_keyboard", "payload": {"buttons": [[button(*b) for b in row] for row in buttons]}}
 
 
 class MaxApi:
