@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from .client_intent import active_request
 from .knowledge import (KnowledgeBase, SearchHit, _CITY_NAMES, _CITY_RE, _CITY_TOKENS, _NOT_TENANT_RE,
                         _VENUE_ALIASES, format_rub, parse_budget, position_ranges, venue_tokens)
-from .text import from_translit, small_talk, stem
+from .text import drop_courtesy, from_translit, small_talk, stem
 
 MAX_CLARIFICATIONS = 2
 CLARIFICATIONS = {
@@ -45,6 +45,7 @@ _FORMAT_MODIFIER = re.compile(r"(?:ый|ий|ой|ая|яя|ое|ее|ые|ие|
 _SELECTION = re.compile(r"\b(?:вариант\w*|предложен\w*|подбор\w*|дешев\w*|недорог\w*|доступн\w*|бюджетн\w*)", re.I)
 _EXTRAS = {stem(w) for w in "печать монтаж производство дизайн макет".split()}
 _PLACE_SKIP = {stem(w) for w in "экран высота место вид сторона направление".split()}
+_LOCATIVE = re.compile(r"\b(?:в|во|на|у|возле|около|над|под|перед|вдоль)\s+$", re.I)
 _FOCUS = ((re.compile(r"печат|напечата", re.I), "печать"),
           (re.compile(r"монтаж|смонтир", re.I), "монтаж"),
           (re.compile(r"требован|макет|ролик|видео", re.I), "требования к макету ролику"),
@@ -54,13 +55,25 @@ _FOCUS = ((re.compile(r"печат|напечата", re.I), "печать"),
           (re.compile(r"выход\w* в|показ\w*|как часто|секунд", re.I), "показы ролика"))
 
 
-def _selected_formats(kb: KnowledgeBase, text: str, format_tokens: set[str]) -> list[str]:
+def _selected_formats(kb: KnowledgeBase, text: str, format_tokens: set[str], known: bool = False) -> list[str]:
     # Семейство задаёт существительное. Прилагательное уточняет соседнее семейство,
     # если они вместе встречаются в прайсе: «полный брендинг», но не «полный ценник».
     words = list(_WORDS.finditer(text))
     candidates = {i: set(kb.normalize(m[0])) & format_tokens for i, m in enumerate(words)
                   if len(m[0]) > 2 and not m[0].isdigit() and stem(m[0]) not in _FORMAT_SKIP}
     candidates = {i: tokens for i, tokens in candidates.items() if tokens}
+    # «Экран в атриуме»: атриум есть в названии «Флаг в атриуме», но с экраном в прайсе не встречается — это место.
+    # «Брендинг катка» — формат: в прайсе есть «Брендирование бортов катка».
+    places = kb._place_tokens - _PLACE_SKIP
+    placed = {i for i, tokens in candidates.items() if tokens <= places and not any(
+        chunk.kind == "price" and chunk.fmt & tokens and chunk.fmt & candidates[j]
+        for j in candidates if j != i for chunk in kb.chunks)}
+    if not candidates.keys() - placed:
+        # Формат назван только словами мест: место — слово после предлога («медиа-куб у эскалаторов»),
+        # а «реклама в лифтах» без известного формата остаётся форматом. Известный формат «а в атриуме?» не заменяет.
+        placed = {i for i in placed if _LOCATIVE.search(text[:words[i].start()])}
+    if known or candidates.keys() - placed:
+        candidates = {i: tokens for i, tokens in candidates.items() if i not in placed}
     modifiers = {i for i in candidates if _FORMAT_MODIFIER.search(words[i][0])
                  and not re.search(r"(?:[ае]ние|тие)$", words[i][0])}
     anchors = candidates.keys() - modifiers
@@ -228,7 +241,8 @@ class Conversation:
             self.__dict__.update(Conversation().__dict__)
             self.changed = True
         positive = _NEGATED.sub(" ", text)
-        tokens = set(kb.normalize(positive))
+        # Псевдонимы те же, что в поиске: «в академе», «в депошке», «veer»
+        tokens = {_VENUE_ALIASES.get(t, t) for t in kb.normalize(positive)}
         venues = [name for name, keys in self.venues(kb).items() if keys & tokens]
         city = _CITY_RE.search(positive)
         new_city = _CITY_NAMES[next(k for k, v in city.groupdict().items() if v)] if city else ""
@@ -258,8 +272,10 @@ class Conversation:
         if self.format and re.search(r"требован|макет|\bготов\w*", text):
             format_tokens -= {stem(w) for w in ("ролик видео видеоролик").split()}
         words = _WORDS.findall(positive)
-        formats = _selected_formats(kb, positive, format_tokens)
-        self._format_query = (question, _format_search_text(kb, positive, kb._format_tokens, formats))
+        formats = _selected_formats(kb, positive, format_tokens, known=bool(self.format))
+        # «Добрый день, …в месяц»: «день» из приветствия не срок и не слово для поиска
+        plain = drop_courtesy(positive)
+        self._format_query = (question, _format_search_text(kb, plain, kb._format_tokens, formats))
         if formats:
             selected = " ".join(formats)
             if self.format and not set(kb.normalize(selected)) & set(kb.normalize(self.format)):
@@ -270,7 +286,9 @@ class Conversation:
                  & set(kb.normalize(self.format)) for m in _NEGATED.finditer(text)):
             self.changed = self.changed or bool(self.format or self.place)
             self.format, self.place = "", ""
-        places = list(dict.fromkeys(w for w in words if set(kb.normalize(w)) & (kb._place_tokens - _PLACE_SKIP)))
+        # «флаг в атриуме»: флаг есть и среди мест Бутово («флаг 1»), но здесь это уже формат
+        places = list(dict.fromkeys(w for w in words if w not in formats
+                                    and set(kb.normalize(w)) & (kb._place_tokens - _PLACE_SKIP)))
         old_place = self.place
         if places:
             self.place = " ".join(places)
@@ -278,7 +296,7 @@ class Conversation:
             self.place = "место № " + ", ".join(str(a) if a == b else f"{a}–{b}" for a, b in position)
         if old_place and self.place != old_place:
             self.changed = True
-        period, season = _PERIOD.search(positive), _SEASON.search(positive)
+        period, season = _PERIOD.search(plain), _SEASON.search(plain)
         if period or season:
             duration = period or _PERIOD.search(self.period)
             month = season or _SEASON.search(self.period)
@@ -310,7 +328,8 @@ class Conversation:
             self.intent = " ".join(focus)
         elif not (venues or _OTHER_VENUES.search(text) or formats or places or position or period or season or budget or new_city
                   or _REFERS.search(text) or _BUSINESS.search(text) or _SELECTION.search(text)
-                  or self.pending or kb.matched_stop_topic(text)) and len(words) > 2:
+                  or self.pending or kb.matched_stop_topic(text)) and len(_WORDS.findall(plain)) > 2:
+            # «Спасибо, хорошего дня» — не новая тема: вежливые слова не считаем
             self.__dict__.update(Conversation().__dict__)
             self.changed = True
 

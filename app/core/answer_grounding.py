@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from .knowledge import KnowledgeBase, SearchHit, _CITY_TOKENS, parse_budget
 from .price_guard import amount_spans, extract_amounts
-from .text import tokenize
+from .text import drop_courtesy, tokenize
 
 _SENTENCES = re.compile(r"(?<!руб\.)(?<!р\.)(?<!сек\.)(?<!мес\.)(?<=[.!?])\s+|\n+", re.I)
 _UNKNOWN = re.compile(r"не (?:указан|извест|подтвержд)|нет (?:данных|информации)|не могу (?:подтверд|сказа)|"
@@ -159,7 +159,8 @@ def property_issues(kb: KnowledgeBase, answer: str, hits: list[SearchHit], quest
 
 def periods(text: str) -> list[tuple[tuple[str, int], int, int]]:
     out = []
-    for match in _PERIOD.finditer(text):
+    # «Добрый день, экран — 31 500 ₽» — в приветствии нет срока цены
+    for match in _PERIOD.finditer(drop_courtesy(text)):
         raw, unit = match.group().lower(), (match.group(2) or "").lower()
         if raw.startswith(("полгода", "пол года", "квартал")):
             value = ("month", 3 if raw == "квартал" else 6)
