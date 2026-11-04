@@ -62,6 +62,17 @@ def starts_with_greeting(text: str) -> bool:
     return bool(words) and words[0] in _GREETINGS and len(words) <= 4 and "?" not in text
 
 
+# «Добрый день», «хорошего дня», «день добрый», «с Новым годом» — вежливость, а не срок размещения
+_COURTESY_RE = re.compile(r"\b(?:добр|хорош|отличн|удачн|приятн|прекрасн|чудесн|замечательн|продуктивн|л[её]гк)\w*\s+"
+                          r"(?:(?:вам|всем|тебе)\s+)?(?:день|дня|денька|недел\w*)\b|\bдень\s+добр\w*|\bс\s+новым\s+год\w*",
+                          re.IGNORECASE)
+
+
+def drop_courtesy(text: str) -> str:
+    """Приветствие и пожелание со словом срока — пробелами той же длины: позиции остальных слов не сдвигаются."""
+    return _COURTESY_RE.sub(lambda m: " " * len(m[0]), text)
+
+
 def is_short_reaction(text: str) -> bool:
     """«Гениально 👏», «Ого, давайте» — реакция, а не вопрос: «Уточню и вернусь» на неё звучит странно."""
     return len(_TOKEN_RE.findall(text)) <= 3 and "?" not in text
