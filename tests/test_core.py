@@ -1549,8 +1549,8 @@ def test_money_units_do_not_get_into_format(budget):
     kb = KnowledgeBase.load(ROOT / "data" / "kb")
     state = Conversation()
     state.observe(kb, f"бюджет {budget} нужен экран на фудкорте в веере")
-    assert state.format == "экран фудкорте"
-    assert "формат: экран фудкорте" in state.parameters()
+    assert (state.format, state.place) == ("экран", "фудкорте")
+    assert "формат: экран; место: фудкорте" in state.parameters()
 
 
 def test_budget_alone_keeps_chosen_format_and_real_format_with_thousands_works():
