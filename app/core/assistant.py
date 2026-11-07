@@ -370,7 +370,7 @@ class Assistant:
         if needs_manager:
             return Reply(ESCALATE, text, confidence, R_MODEL_UNSURE, sources, raw=raw)
         # «Есть ли звук на экранах?» — «Звук присутствует», хотя в базе про звук ни слова: обещание без опоры
-        if missing := self.kb.ungrounded_focus(question, text, known):
+        if missing := self.kb.ungrounded_focus(question, text, known) or self.kb.absent_topic_claims(question, text, known):
             return Reply(ESCALATE, text, confidence, f"{R_UNGROUNDED}:{missing}", sources, raw=raw)
         if hits and (missing := property_issues(self.kb, text, hits, question)):
             return Reply(ESCALATE, text, confidence, f"{R_UNGROUNDED}:{missing}", sources, raw=raw)
@@ -760,6 +760,8 @@ _GUESS_RE = re.compile(r"скорее всего|\bвероятно\b|по-ви�
                        r"|обычно подход\w*|как правило|должн\w* подойти"
                        # «Требования к формату точно не указаны, однако часто используется mp4» — догадка вместо данных
                        r"|(?:часто|обычно|как правило) (?:использу|применя|принима)\w*"
+                       # «автомобиль обычно размещается у центрального входа, точное место может зависеть от планировки»
+                       r"|обычно (?:размеща|располага|став|устанавлива|находит|проход)\w*|может зависеть от"
                        r"|(?:не указан\w*|нет (?:данных|информации|сведений))[^.!?\n]{0,60}?,\s*(?:однако|но)\b",
                        re.IGNORECASE)
 _MENTIONS_MANAGER_RE = re.compile(r"менеджер", re.IGNORECASE)

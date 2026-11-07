@@ -535,18 +535,25 @@ class KnowledgeBase:
         if not asked or _REFUSAL_RE.search(head):
             return []
         focus = set(self.normalize(asked)) - self._all_venues - _FOCUS_SKIP
-        said, seen = set(tokenize(answer)), set(tokenize(context))
-        seen |= {full for short, full in _ABBREVIATIONS.items() if short in seen}  # «ролик до 15 сек»
-        missing = []
-        for word in sorted(focus):
-            if len(word) < 3 or word.isdigit() or word not in said:
-                continue
-            if word in seen or set(_SYNONYMS.get(word, [])) & seen:
-                continue
-            # «забрендировать» при «брендирование», «размещение» при «разместить» — одно и то же
-            if len(word) >= 5 and any(len(w) >= 5 and (word[:5] in w or w[:5] in word) for w in seen):
-                continue
-            missing.append(word)
+        said, seen = set(tokenize(answer)), _seen_words(context)
+        return [w for w in sorted(focus) if len(w) >= 3 and not w.isdigit() and w in said and not _grounded(w, seen)]
+
+    def absent_topic_claims(self, question: str, answer: str, context: str) -> list[str]:
+        """Модель ставит условие по теме, о которой в базе ни слова, или отправляет к третьей стороне.
+        Экзамен обучения 04.11, база из одного прайса: «для музыки на мероприятии потребуется оформить пост охраны
+        за 8 000 ₽» (в контексте про музыку ничего, пост охраны — другая строка), «обратитесь напрямую
+        к администрации ВЕЕР Молла». Честный отказ не трогаем, как и в ungrounded_focus."""
+        if _REFUSAL_RE.search(" ".join(re.split(r"(?<=[.!?])\s+", answer.strip())[:2])):
+            return []
+        seen = _seen_words(context)
+        missing = [] if _grounded(stem("администрация"), seen) or not _THIRD_PARTY_RE.search(answer) else ["администрация"]
+        focus = {w for w in set(self.normalize(question)) - self._all_venues - _FOCUS_SKIP
+                 if len(w) >= 4 and not w.isdigit() and not _grounded(w, seen)}
+        for sentence in re.split(r"(?<=[.!?])\s+", answer):
+            # Тема — до условия: «Для музыки … потребуется оформить». После глагола — подробности ответа:
+            # «необходимо связаться с бухгалтером напрямую» (контакт в базе есть, «напрямую» — слово клиента)
+            if m := _REQUIREMENT_RE.search(sentence):
+                missing += sorted(focus & set(tokenize(sentence[:m.start()])) - set(missing))
         return missing
 
     def allowed_amounts(self) -> set[int]:
@@ -772,6 +779,24 @@ _REFUSAL_RE = re.compile(r"^(?:нет\b|к сожалению)|\bу нас не�
                          r"|осуществля|оказыва|продаём|продаем)|нет возможности|невозможно|нельзя|только (?:внутри|в торгов)",
                          re.IGNORECASE)
 _ABBREVIATIONS = {"сек": stem("секунд"), "мин": stem("минут"), "мес": stem("месяц"), "шт": stem("штук")}
+# Условие или обязанность в ответе: «потребуется оформить», «необходимо согласовать»
+_REQUIREMENT_RE = re.compile(r"\b(?:потребу\w*|понадоб\w*|необходим\w*|требует\w*|придётся|придется|обязательн\w*"
+                             r"|нужн[оаы]?|надо|следует)\b", re.IGNORECASE)
+# Третья сторона: «обратитесь напрямую к администрации ТЦ», «по согласованию с администрацией» — если в базе
+# про администрацию ничего нет, это выдумано или отправляет клиента мимо менеджера
+_THIRD_PARTY_RE = re.compile(r"\bадминистрац\w*", re.IGNORECASE)
+
+
+def _seen_words(context: str) -> set[str]:
+    seen = set(tokenize(context))
+    return seen | {full for short, full in _ABBREVIATIONS.items() if short in seen}  # «ролик до 15 сек»
+
+
+def _grounded(word: str, seen: set[str]) -> bool:
+    """Слово есть в контексте — само, синонимом или с тем же началом («забрендировать» при «брендирование»)."""
+    if word in seen or set(_SYNONYMS.get(word, [])) & seen:
+        return True
+    return len(word) >= 5 and any(len(w) >= 5 and (word[:5] in w or w[:5] in word) for w in seen)
 _FOCUS_SKIP = {stem(w) for w in (
     "есть можно ли реклама рекламу рекламы рекламный размещение разместить размещать стоит стоимость сколько цена "
     "цены ваш вы мы нас наш наша наши свой тц трц молл здравствуйте добрый день подскажите скажите пожалуйста хочу "

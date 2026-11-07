@@ -1667,18 +1667,26 @@ data-chat="{escape(f"{picked['connection_id']}|{picked['chat_id']}")}">
 def observation_access_html(services: Services) -> str:
     options = "".join(f'<option value="{escape(c.id)}">{escape(c.id)}</option>'
                       for c in services.db.connections() if c.approved)
+    saved = {(r["connection_id"], r["chat_id"]): r["n"] for r in services.db.observed_chats()}
+    access = services.privacy.rows()
+    allowed = sum(r["allowed"] for r in access)
     rows = "".join(
-        f'<tr><td>{escape(r["connection_id"])}</td><td>{r["chat_id"]}</td>'
+        f'<tr><td>{escape(chat_title(services, r["connection_id"], r["chat_id"]))}</td>'
+        f'<td class="muted">{r["chat_id"]}</td><td>{saved.get((r["connection_id"], r["chat_id"]), 0)}</td>'
         f'<td>{"Разрешён" if r["allowed"] else "Не записывается"}</td><td>'
         f'<form method="post" action="/observe/access">'
         f'<input type="hidden" name="connection_id" value="{escape(r["connection_id"])}">'
         f'<input type="hidden" name="chat_id" value="{r["chat_id"]}">'
         f'<input type="hidden" name="allowed" value="{0 if r["allowed"] else 1}">'
         f'<button class="light">{"Запретить" if r["allowed"] else "Разрешить"}</button></form></td></tr>'
-        for r in services.privacy.rows())
-    return f'''<details class="card"><summary>Какие чаты записывать</summary>
-<p>Новые чаты не записываются до вашего разрешения. Здесь появляется только номер чата.</p>
-<div class="scroll"><table><tr><th>Подключение</th><th>Чат</th><th>Наблюдение</th><th></th></tr>{rows}</table></div>
+        for r in access)
+    waiting = len(access) - allowed
+    summary = f"Какие чаты записывать · разрешено {allowed}" + (f", ждут решения {waiting}" if waiting else "")
+    return f'''<details class="card" id="access"{" open" if waiting and not allowed else ""}><summary>{summary}</summary>
+<p>Новые чаты не записываются до вашего разрешения. Разрешайте только рабочие: личная переписка в бот попадать не должна.
+Имя видно, если собеседник писал после запуска бота; «Сохранено» — сообщений в журнале.</p>
+<div class="scroll"><table><tr><th>Собеседник</th><th>Номер чата</th><th>Сохранено</th><th>Наблюдение</th><th></th></tr>
+{rows}</table></div>
 <form method="post" action="/observe/access" class="row">
 <select name="connection_id" aria-label="Подключение">{options}</select>
 <input name="chat_id" type="number" required placeholder="Номер чата" aria-label="Номер чата">
