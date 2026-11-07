@@ -40,6 +40,10 @@ class Sandbox:
         self.marker = data["marker"]
         for update in data["updates"]:
             await self.bot.handle(update)
+            if body.get("who") == "manager" and body.get("text") == "/manager":
+                self.services.db.approve_connection(f"max:{PEOPLE['manager']['user_id']}")
+                await self.bot.on_command('/start', PEOPLE['manager'], PEOPLE['manager']['chat_id'],
+                                           self.services.db.get_connection(f"max:{PEOPLE['manager']['user_id']}"))
         return (await self.ui.get("/ui/state")).json()
 
 
@@ -48,7 +52,7 @@ def test_whole_path_through_fake_max(tmp_path):
         async with Sandbox(tmp_path) as s:
             assert BOT["user_id"] == s.bot.me_id
             state = await s.say(who="manager", text="/manager")
-            assert state["chats"]["manager"][-1]["text"].startswith("Готово")
+            assert "Команды менеджера" in state["chats"]["manager"][-1]["text"]
             state = await s.say(who="anna", start=True)
             assert state["chats"]["anna"][-1]["text"] == s.services.assistant.greeting_message
 
@@ -58,9 +62,10 @@ def test_whole_path_through_fake_max(tmp_path):
             state = await s.say(who="manager", mid=card["mid"], payload=card["buttons"][0][0]["payload"])
             assert "30 000" in state["chats"]["anna"][-1]["text"]
             edited = next(m for m in state["chats"]["manager"] if m["mid"] == card["mid"])
-            assert edited["text"].endswith("Отправлено клиенту.") and edited["buttons"] == [], "кнопки убраны"
+            assert "Отправлено клиенту." in edited["text"] and edited["buttons"] == [], "кнопки убраны"
             assert state["notes"] == [{"who": "manager", "text": "Отправлено клиенту.", "at": state["notes"][0]["at"]}]
 
+            s.services.privacy.set_allowed(f"max:{PEOPLE['manager']['user_id']}", PEOPLE["ildar"]["chat_id"], True)
             await s.say(who="manager", text="/mode observe")
             state = await s.say(who="ildar", media="image")
             forwarded, relay = state["chats"]["manager"][-2:]
@@ -122,3 +127,19 @@ def test_webhook_delivery_with_secret_and_no_polling():
 
     asyncio.run(scenario())
 
+
+
+def test_long_admin_reply_is_delivered_in_full_over_http(tmp_path):
+    async def scenario():
+        async with Sandbox(tmp_path) as s:
+            await s.say(who='manager', text='/manager')
+            await s.say(who='anna', text='Дадите скидку?')
+            s.services.client_senders['max'] = lambda _conn, chat, text: s.bot.send(chat, text)
+            dialog_id = s.services.db.recent_dialogs(1)[0]['id']
+            text = 'Условия: ' + 'пункт договора; ' * 250 + 'ИТОГ: скидка 10%'
+            assert await s.services.decide_draft(dialog_id, 'edit', text) == 'sent'
+            state = (await s.ui.get('/ui/state')).json()
+            sent = [m for m in state['chats']['anna'] if m['bot']]
+            assert ''.join(m['text'] for m in sent) == text
+            assert all(len(m['text']) < 4000 for m in sent)
+    asyncio.run(scenario())

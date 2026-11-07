@@ -31,6 +31,7 @@ from .. import db as D
 from ..services import Services
 from .flow import HOLDING_NOT_SENT, HOLDING_SENT, process_client_message
 from .observation import observe
+from . import voice
 
 log = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ async def on_business_connection(bc: BusinessConnection, bot: Bot, services: Ser
     if not conn.approved:
         # Бот публичный: подключить его может любой, кто знает имя. Чужие аккаунты ждут разрешения,
         # иначе их клиенты тратили бы нашу модель
-        services.event(f"{bc.user.full_name} (id {bc.user.id}) подключил бота к своему аккаунту — "
+        services.event("Новый запрос подключения бота — "
                        "ждёт разрешения: Обзор → Подключения")
         if bc.is_enabled:
             await safe_send(bot, bc.user_chat_id, "Этот бот работает только для менеджеров компании. "
@@ -116,6 +117,8 @@ async def on_business_message(message: Message, bot: Bot, services: Services, bu
     if not conn.approved:
         return  # чужой аккаунт ещё не одобрен в админке — модель не тратим
     chat_id = message.chat.id
+    if conn.mode == D.OBSERVE and not services.privacy.allowed(conn.id, chat_id):
+        return
     chat = chat_title(message)
     services.chat_names[chat_id] = chat
     # Наш же ответ: Telegram присылает его обратно от имени менеджера. Без этой
@@ -133,6 +136,27 @@ async def on_business_message(message: Message, bot: Bot, services: Services, bu
         return
     if conn.mode == "off":
         return  # выключен: ни ответа, ни паузы, ни записи
+    if services.speech.enabled and (message.voice or message.audio):
+        if not voice.allowed(services, conn.id, chat_id):
+            return
+        if is_stale(message.date, services.settings.stale_message_minutes) and conn.mode != D.OBSERVE:
+            return
+        transcript = await voice.telegram_text(services, bot, message)
+        conn = voice.allowed(services, conn.id, chat_id)
+        if not conn:
+            return
+        if transcript:
+            manager_voice = bool(message.from_user and message.from_user.id == conn.owner_user_id)
+            if conn.mode == D.OBSERVE or manager_voice:
+                message = message.model_copy(update={"text": transcript})
+            else:
+                result = await voice.client_draft(services, conn.id, chat_id, transcript, client_name(message))
+                if result:
+                    dialog_id, card, has_draft = result
+                    await safe_send(bot, conn.owner_chat_id, card,
+                                    reply_markup=draft_keyboard(dialog_id) if has_draft else None,
+                                    services=services, connection_id=conn.id)
+                return
     if conn.mode == D.OBSERVE:
         # Наблюдение: журнал с правками и кандидаты в базу (observe), а для нового сообщения — ещё файл переписки
         # и замер, через сколько ответил менеджер. Повторная доставка того же сообщения замер не задваивает
@@ -303,7 +327,11 @@ async def _answer_client(bot: Bot, services: Services, connection_id: str, chat_
                else "клиенту «Уточню и вернусь», вопрос — менеджеру" if out.to_client
                else "черновик менеджеру" if out.with_buttons
                else "вопрос — менеджеру" if out.to_manager else "отвечать не нужно — молчит")
-    services.event(f"{services.chat_names.get(chat_id, chat_id)}: «{short(text, 60)}» — {outcome}")
+    if out.dialog_id and services.db.get_dialog(out.dialog_id)["reason"] == "business_operation":
+        out.to_client = None
+        if out.to_manager:
+            out.to_manager = out.to_manager.replace(HOLDING_SENT, "")
+    services.event(outcome)
 
     sent = False
     if out.to_client:

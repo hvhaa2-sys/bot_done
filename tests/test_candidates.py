@@ -79,6 +79,64 @@ def test_broken_json_from_gigachat_still_gives_facts():
     assert facts == [C.Fact("Делаете ролик?", "Готовый ролик даёт рекламодатель, мы не делаем.")]
 
 
+def test_stray_quote_inside_answer_and_promise_sentence_do_not_lose_the_fact():
+    # Так GigaChat Pro 04.11 трижды подряд ответил на демо холодного старта: кавычка после первой фразы
+    raw = ('{"facts": [{"question": "Есть ли звук на экранах в ВЕЕР Молл?", "answer": "Экраны в ВЕЕР Молл работают '
+           'без звука." Если нужен звук, есть аудиоролик на радио ТРЦ: MP3 до 25 секунд."}])}')
+    assert C.parse_facts(raw) == [C.Fact("Есть ли звук на экранах в ВЕЕР Молл?",
+                                         "Экраны в ВЕЕР Молл работают без звука. Если нужен звук, есть аудиоролик "
+                                         "на радио ТРЦ: MP3 до 25 секунд.")]
+    # …и так же 04.11: ответ разбит на два факта, у второго пустой вопрос, а в первом лишняя кавычка
+    raw = ('{"facts": [{"question": "Можно ли рекламу на тележках в ВЕЕР Молл?", "answer": "Нет, на тележках нет.""}, '
+           '{"question": "", "answer": "Из похожего есть талоны: поле 5×8 см."}]}')
+    assert C.parse_facts(raw) == [C.Fact("Можно ли рекламу на тележках в ВЕЕР Молл?",
+                                         "Нет, на тележках нет. Из похожего есть талоны: поле 5×8 см.")]
+    manager = "Добрый день! Нет, экраны ВЕЕР работают без звука, ролик до 1.5 минут. Пришлю вам примеры роликов."
+    facts, _ = run(C.extract(JsonLLM([{"question": "Есть звук на экранах ВЕЕР?", "answer": manager}]), "Есть звук?", manager))
+    assert [f.answer for f in facts] == ["Добрый день! Нет, экраны ВЕЕР работают без звука, ролик до 1.5 минут."]
+    assert C.raw_facts("Есть звук?", manager) == [C.Fact("Есть звук?", "Нет, экраны ВЕЕР работают без звука, ролик до 1.5 минут.")]
+    assert C.raw_facts("Есть звук?", "Сейчас уточню и напишу вам.") == []
+    assert C.drop_promises("Размер 1.5 м, без звука.") == "Размер 1.5 м, без звука."
+    assert C.tidy("Здравствуйте!\nЭкран без звука\nПришлю примеры") == "Экран без звука Пришлю примеры"
+    assert C.drop_promises("Экран без звука\nПришлю примеры\nРолик 1.5 мин.") == "Экран без звука Ролик 1.5 мин."
+
+
+def test_empty_answer_of_the_model_is_asked_again_only_for_a_substantive_reply():
+    # Песочница 04.11: на тот же ответ про тележки GigaChat то давал факт, то {"facts": []}
+    class Seq(LLMProvider):
+        name = "seq"
+
+        def __init__(self, *raws):
+            self.raws, self.calls = list(raws), 0
+
+        async def complete(self, system, messages):
+            self.calls += 1
+            return self.raws.pop(0)
+
+    fact = json.dumps({"facts": [{"question": "Есть реклама на тележках в ВЕЕР?", "answer": "Нет, рекламы на тележках нет."}]},
+                      ensure_ascii=False)
+    llm = Seq('{"facts": []}', fact)
+    long = ("Добрый день! Нет, рекламы на тележках в ВЕЕР Молл нет. Из похожего есть брендирование парковочных "
+            "талонов: поле 5×8 см. Пришлю вам пример талона.")
+    facts, _ = run(C.extract(llm, "А на тележках можно рекламу?", long))
+    assert llm.calls == 2 and [f.question for f in facts] == ["Есть реклама на тележках в ВЕЕР?"]
+    llm = Seq('{"facts": []}', fact)
+    assert run(C.extract(llm, "Ролики отправили, поставите?", "Получили, всё в порядке, с понедельника ставим ваши ролики."))[0] == []
+    assert llm.calls == 1
+
+
+def test_total_for_this_client_is_personal_but_third_party_contract_is_a_fact():
+    # Экзамен обучения 04.11: «итого для вас» стал кандидатом, а «договор с РАО/ВОИС» выпадал как личный
+    total = "Для вас по трём экранам на 2 месяца итого 189 000 ₽, расчёт сделаю завтра утром."
+    fact = C.Fact("Сколько стоят 3 экрана на 2 месяца?", "Размещение на 3 экранах на 2 месяца — 189 000 ₽.")
+    assert not C.keep(fact, total)
+    price = "Экран в атриуме ВЕЕР — 31 500 ₽ в месяц. Вам сделаю скидку 10% на три месяца."
+    assert C.keep(C.Fact("Сколько стоит экран в атриуме ВЕЕР?", "31 500 ₽ в месяц."), price)
+    rao = "Если на мероприятии звучат популярные треки, организатору нужно заключить договор с РАО/ВОИС."
+    assert C.raw_facts("Что оформить для музыки на промо?", rao) == [C.Fact("Что оформить для музыки на промо?", rao)]
+    assert C.raw_facts("Договор готов?", "Договор согласовали, подписанный скан отправила на почту.") == []
+
+
 def test_pair_without_model_drops_greetings_and_client_contacts():
     # Наблюдение на дневном лимите модели: пара берётся как есть — без «Здравствуйте» и без номера клиента
     facts = C.raw_facts("Здравствуйте! Какой длины ролик на экране в атриуме ВЕЕР? Мой номер +7 912 345-67-89",
@@ -101,6 +159,14 @@ def test_review_note_shows_price_conflict_and_similar_answer(tmp_path):
     assert note.startswith("В прайсе другая цена") and "31 500" in note
     assert C.review_note(kb, "Сколько стоит экран в атриуме ВЕЕР?", "31 500 ₽ в месяц.") == ""
     assert C.review_note(kb, "Какие требования к макету?", "Макет в PDF.").startswith("Похожее уже есть")
+
+
+def test_similar_hint_ignores_mall_names_and_common_words():
+    # Песочница 04.11: «реклама на тележках в ВЕЕР Молл» получила подсказку «похоже на вакансию в ВЕЕР Молл»
+    kb = KnowledgeBase.load(ROOT / "data" / "kb")
+    assert C.review_note(kb, "Можно ли разместить рекламу на тележках для покупок в ВЕЕР Молл?",
+                         "Нет, рекламы на тележках в ВЕЕР Молл нет.") == ""
+    assert C.review_note(kb, "Есть ли звук на экранах в ВЕЕР Молл?", "Нет, экраны без звука.").startswith("Похожее")
 
 
 def test_approved_fact_goes_to_the_mall_note_and_replaces_same_question(tmp_path):
@@ -146,6 +212,17 @@ def test_amount_not_from_price_list_blocks_approval(tmp_path):
                                     manager_text="m", question="Сколько стоит экран в атриуме ВЕЕР?", answer="33 000 ₽ в месяц.")
     ok, error = services.approve_candidates([cid], "Сколько стоит экран в атриуме ВЕЕР?", "33 000 ₽ в месяц.")
     assert not ok and "нет в прайсе" in error and services.db.get_candidate(cid)["status"] == "new"
+
+
+def test_amount_of_another_price_row_blocks_approval(tmp_path):
+    # Песочница 04.11: «фотозона у ёлки ДЕПО — 12 000 ₽» утвердилась, потому что 12 000 ₽ есть у другой позиции
+    services = services_for(tmp_path, JsonLLM())
+    cid = services.db.add_candidate(connection_id="c", chat_id=1, dialog_id=None, source="chat", client_question="q",
+                                    manager_text="m", question="Сколько стоит экран в атриуме ВЕЕР?",
+                                    answer="Экран в атриуме ВЕЕР — 25 000 ₽ в месяц.")
+    ok, error = services.approve_candidates([cid], "Сколько стоит экран в атриуме ВЕЕР?", "Экран в атриуме ВЕЕР — 25 000 ₽ в месяц.")
+    assert not ok and error.startswith("В прайсе другая цена") and "31 500" in error
+    assert services.db.get_candidate(cid)["status"] == "new"
 
 
 def test_admin_shows_candidates_and_approves_or_rejects(tmp_path):

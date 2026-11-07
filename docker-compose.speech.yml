@@ -1,0 +1,16 @@
+# docker compose -f docker-compose.yml -f docker-compose.speech.yml ...
+services:
+  app:
+    image: ai-sales-assistant:speech
+    build:
+      context: .
+      dockerfile: Dockerfile.speech
+    environment:
+      SPEECH_ENABLED: 'true'
+      SPEECH_PYTHON: /opt/speech/bin/python
+      SPEECH_MODEL_DIR: /opt/speech-model
+    volumes:
+      - speech-model:/opt/speech-model
+
+volumes:
+  speech-model:

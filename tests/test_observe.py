@@ -70,6 +70,9 @@ def env(tmp_path):
     feed({"business_connection": {"id": CONN, "user": {"id": OWNER, "is_bot": False, "first_name": "Owner"},
                                    "user_chat_id": OWNER, "date": now, "is_enabled": True,
                                    "rights": {"can_reply": True}}})
+    services.privacy.set_allowed(CONN, CLIENT, True)
+    services.privacy.set_allowed(CONN, CLIENT + 1, True)
+    services.privacy.set_allowed(CONN, 777, True)
     sent.clear()
     return SimpleNamespace(services=services, db=services.db, llm=llm, dp=dp, bot=bot, sent=sent,
                            api_calls=api_calls, feed=feed, msg=msg, now=now)

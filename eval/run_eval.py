@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.config import Settings  # noqa: E402
-from app.core.assistant import Assistant  # noqa: E402
+from app.core.real_flow import BusinessAssistant as Assistant  # noqa: E402
 from app.core.conversation import Conversation  # noqa: E402
 from app.core.facts import contains, norm  # noqa: E402, F401
 from app.core.knowledge import KnowledgeBase, SearchHit  # noqa: E402
@@ -73,10 +73,11 @@ def parse_target(spec: str, settings: Settings) -> tuple[str, Settings]:
 
 
 async def evaluate(label: str, settings: Settings, questions: list[dict],
-                   progress=None) -> tuple[dict, list[dict]]:
+                   progress=None, *, llm=None, kb=None) -> tuple[dict, list[dict]]:
     """progress(сделано, всего) — необязательный колбэк, им пользуется админка."""
-    llm = make_provider(settings)
-    kb = KnowledgeBase.load(settings.kb_dir)
+    owns_llm = llm is None
+    llm = llm or make_provider(settings)
+    kb = kb or KnowledgeBase.load(settings.kb_dir)
     assistant = Assistant(kb, llm, min_score=settings.retrieval_min_score,
                           confidence_threshold=settings.confidence_threshold)
     rows = []
@@ -111,7 +112,8 @@ async def evaluate(label: str, settings: Settings, questions: list[dict],
             if progress:
                 progress(len(rows), len(questions))
     finally:
-        await llm.close()
+        if owns_llm:
+            await llm.close()
     return summarize(label, rows), rows
 
 

@@ -178,6 +178,7 @@ async def run_simulation(folder: Path, *, allow_api: bool = False, max_calls: in
         llm.phase = "observe"
         for i, case in enumerate(cases):
             mid, chat = 0, 500 + i
+            services.privacy.set_allowed(CONNECTION, chat, True)
             for text in case["training"]:
                 mid += 1
                 await message(text, chat, mid)
@@ -185,6 +186,7 @@ async def run_simulation(folder: Path, *, allow_api: bool = False, max_calls: in
                 mid += 1
                 await message(text, chat, mid, owner=True)
         for i, pair in enumerate(manager["noise"]):
+            services.privacy.set_allowed(CONNECTION, 600 + i, True)
             await message(pair["client"], 600 + i, 1)
             await message(pair["manager"], 600 + i, 2, owner=True)
         checks = report["checks"]

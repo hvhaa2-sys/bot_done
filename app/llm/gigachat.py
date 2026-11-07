@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import weakref
 import uuid
 
 import httpx
@@ -31,6 +32,17 @@ def _retry_after(resp: httpx.Response) -> float:
 
 
 _RETRYABLE = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.RemoteProtocolError)
+
+
+# Один слот на цикл приложения, включая экзамены и смену модели.
+_GATES: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def request_gate() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    if loop not in _GATES:
+        _GATES[loop] = asyncio.Semaphore(1)
+    return _GATES[loop]
 
 
 class GigaChatProvider(LLMProvider):
@@ -66,6 +78,10 @@ class GigaChatProvider(LLMProvider):
         return self._token
 
     async def complete(self, system: str, messages: list[dict]) -> str:
+        async with request_gate():
+            return await self._complete(system, messages)
+
+    async def _complete(self, system: str, messages: list[dict]) -> str:
         body = {
             "model": self.model,
             "messages": [{"role": "system", "content": system}, *messages],

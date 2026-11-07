@@ -71,3 +71,23 @@ def active_request(text: str) -> str:
         # Короткая стоп-тема «брон» может не поймать глагол с приставкой «за».
         return text
     return re.sub(r"\s+", " ", result).strip() if result != fix_mixed_script(text) else text
+
+
+# «Берём», «давайте оформим», «хочу на месяц экран», «когда можно начать?» — уже не вопрос, а заказ
+_READY_RE = re.compile(
+    r"бронир|заброниру|оформ(?:им|ляем|ляйте|ите|ить)|\bбер[её]м\b|\bберу\b|возьм[её]м|\bвозьму\b"
+    r"|готов[ыа]? (?:взять|заказать|разместить|начать|купить)|давайте (?:оформ|размест|запуск|начн|брать|возьм|закаж)"
+    r"|когда можно (?:начать|запустить|разместить|выйти)|хоч\w* (?:на|с) (?:\d|месяц|недел|полгода|год|декабр|январ|ноябр)"
+    r"|хоч\w* (?:заказать|забронировать|взять)", re.IGNORECASE)
+
+
+_NOT_READY_RE = re.compile(r"\b(?:не|если|пока|подумаю|подумаем)\b[^.!?]*?(?:бер|возьм|оформ|запуск|соглас|устраива)",
+                           re.IGNORECASE)
+_READY_MORE_RE = re.compile(r"\bзапускаем\b|\bсогласн[ыа]\b|нас устраивает|\bоформляем\b", re.IGNORECASE)
+
+
+def is_ready_to_buy(text: str) -> bool:
+    text = text.replace("ё", "е")
+    if _NOT_READY_RE.search(text):
+        return False
+    return bool(_READY_RE.search(text) or _READY_MORE_RE.search(text))

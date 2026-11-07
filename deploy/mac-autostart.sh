@@ -29,7 +29,7 @@ cat > "$PLIST" <<EOF
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/caffeinate</string><string>-i</string>
+    <string>/usr/bin/caffeinate</string><string>-s</string>
     <string>$DIR/.venv/bin/python</string><string>-m</string><string>app</string>
   </array>
   <key>WorkingDirectory</key><string>$DIR</string>

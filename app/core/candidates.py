@@ -44,9 +44,16 @@ EXTRACT_PROMPT = """Ты помогаешь собрать базу знаний
 MAX_FACTS = 3
 MIN_MANAGER_TEXT = 20   # «Добрый день!», «Сейчас уточню» — фактов там нет
 MIN_ANSWER = 15
+RETRY_TEXT = 80         # ответ менеджера, ради которого стоит второй раз спросить модель
 # Личное и разовое: это решает менеджер в каждом случае, в базу не переносим
-_PERSONAL_RE = re.compile(r"скидк|бронь|брониру|забронир|свободн|занят|перезвон|пришлю|пришлём|уточню|договор"
-                          r"|счёт|счет\b|оплатит|реквизит|ваш\w* заказ", re.IGNORECASE)
+_PERSONAL_RE = re.compile(r"скидк|бронь|брониру|забронир|свободн|занят|перезвон|пришлю|пришлём|уточню"
+                          r"|договор(?!\w* с РАО)|счёт|счет\b|оплатит|реквизит|ваш\w* заказ", re.IGNORECASE)
+# Сумма, посчитанная этому клиенту: «Для вас по трём экранам итого 189 000 ₽» — не прайс, а расчёт
+_FOR_CLIENT_RE = re.compile(r"\b(?:итог\w*|для вас|вам|ваш\w*)\b", re.IGNORECASE)
+# Обещание этому клиенту — отдельная фраза, которую можно убрать, не трогая общий факт рядом:
+# «Экраны без звука. Пришлю вам примеры роликов.» → «Экраны без звука.»
+_PROMISE_RE = re.compile(r"\b(?:пришл(?:ю|ём|ем)|перезвон\w*|уточн(?:ю|им)|напишу|скину|отправл(?:ю|им)|вышл(?:ю|ем))\b",
+                         re.IGNORECASE)
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 _SENTENCE_RE = re.compile(r"[^.!?\n]+[.!?]*")
 _PD_MARK_RE = re.compile(r"\[(?:телефон|почта|карта)\]")
@@ -54,7 +61,10 @@ _GREETING_RE = re.compile(r"(?:здравствуйте|здрасьте|доб�
                           r"\b[!,.\s]*", re.IGNORECASE)
 _STRING = r'"((?:[^"\\]|\\.)*)"'
 _PAIR_RE = re.compile(r'\{\s*"question"\s*:\s*' + _STRING + r'\s*,\s*"answer"\s*:\s*' + _STRING + r"\s*\}")
+# Лишняя кавычка внутри строки: «"answer": "Экраны без звука." Если нужен звук, …"}» — поле до «"}»
+_LOOSE_PAIR_RE = re.compile(r'"question"\s*:\s*"(.*?)"\s*,\s*"answer"\s*:\s*"(.*?)"\s*\}', re.DOTALL)
 SIMILARITY = 0.45
+_COMMON_WORDS = frozenset({"молл", "тц", "трц", "торгов", "центр", "размест", "нужн", "подскаж"})
 NOTES_FOLDER = "Из переписки"
 
 
@@ -73,8 +83,9 @@ def parse_facts(raw: str) -> list[Fact] | None:
     try:
         data = json.loads(match.group(0))
     except json.JSONDecodeError:
-        pairs = [(json.loads(f'"{q}"'), json.loads(f'"{a}"')) for q, a in _PAIR_RE.findall(match.group(0))]
-        return [Fact(" ".join(q.split()), " ".join(a.split())) for q, a in pairs][:MAX_FACTS] or None
+        strict = [(json.loads(f'"{q}"'), json.loads(f'"{a}"')) for q, a in _PAIR_RE.findall(match.group(0))]
+        loose = [(_loose(q), _loose(a)) for q, a in _LOOSE_PAIR_RE.findall(match.group(0))]
+        return joined([Fact(" ".join(q.split()), " ".join(a.split())) for q, a in max(strict, loose, key=len)]) or None
     items = data.get("facts") if isinstance(data, dict) else None
     if not isinstance(items, list):
         return None
@@ -82,32 +93,70 @@ def parse_facts(raw: str) -> list[Fact] | None:
     for item in items:
         if isinstance(item, dict) and isinstance(item.get("question"), str) and isinstance(item.get("answer"), str):
             facts.append(Fact(" ".join(item["question"].split()), " ".join(item["answer"].split())))
-    return facts[:MAX_FACTS]
+    return joined(facts)
+
+
+def joined(facts: list[Fact]) -> list[Fact]:
+    """Продолжение без вопроса — к предыдущему факту: GigaChat делит один ответ на два,
+    у второго {"question": ""} («Нет, на тележках нет.» + «Из похожего есть талоны…»)."""
+    out: list[Fact] = []
+    for f in facts:
+        if not f.question and out:
+            out[-1] = Fact(out[-1].question, f"{out[-1].answer} {f.answer}".strip())
+        else:
+            out.append(f)
+    return out[:MAX_FACTS]
+
+
+def _loose(text: str) -> str:
+    """Поле с неэкранированной кавычкой внутри: кавычку убираем, остальное как в JSON."""
+    text = re.sub(r'(?<!\\)"', "", text)
+    try:
+        return json.loads(f'"{text}"')
+    except json.JSONDecodeError:
+        return text.replace('\\"', '"')
+
+
+def drop_promises(text: str) -> str:
+    """Убрать фразы-обещания этому клиенту («Пришлю примеры.»): общий факт рядом остаётся."""
+    return without_sentences(text, _PROMISE_RE.search) if _PROMISE_RE.search(text) else text
+
+
+def without_sentences(text: str, drop) -> str:
+    """Текст без фраз, для которых drop(фраза) истинно. Разделители остаются на месте: «1.5 м» не рвётся."""
+    out, last = [], 0
+    for m in _SENTENCE_RE.finditer(text):
+        out.append(text[last:m.start()])
+        if not drop(m.group()):
+            out.append(m.group())
+        last = m.end()
+    return " ".join("".join(out + [text[last:]]).split())
 
 
 def keep(fact: Fact, manager_text: str) -> bool:
-    """Факт годится в кандидаты: не пустой, не личный и без сумм, которых не было у менеджера."""
+    """Факт годится в кандидаты: не пустой, не личный и без сумм, которых не было у менеджера
+    или которые он посчитал этому клиенту («для вас итого 189 000 ₽»)."""
     if len(fact.answer) < MIN_ANSWER or not fact.question:
         return False
     if _PERSONAL_RE.search(fact.answer) or _PERSONAL_RE.search(fact.question):
         return False
-    return set(extract_amounts(fact.answer)) <= set(extract_amounts(manager_text))
+    amounts = set(extract_amounts(fact.answer))
+    if any(amounts & set(extract_amounts(s)) and _FOR_CLIENT_RE.search(s) for s in _SENTENCE_RE.findall(manager_text)):
+        return False
+    return amounts <= set(extract_amounts(manager_text))
 
 
 def raw_facts(client_question: str, manager_text: str) -> list[Fact]:
     """Без модели: пара «вопрос клиента → ответ менеджера», если она похожа на факт. Приветствия
     и фразы клиента со своими контактами («Мой номер [телефон]») в базу не переносим."""
     client_question, manager_text = mask_pd(client_question), mask_pd(manager_text)
-    fact = Fact(tidy(client_question, drop_contacts=True), tidy(manager_text))
+    fact = Fact(tidy(client_question, drop_contacts=True), drop_promises(tidy(manager_text)))
     return [fact] if len(fact.answer) >= MIN_MANAGER_TEXT and keep(fact, manager_text) else []
 
 
 def tidy(text: str, drop_contacts: bool = False) -> str:
     """«Здравствуйте! Какой длины ролик? Мой номер [телефон]» → «Какой длины ролик?»."""
-    sentences = [s.strip() for s in _SENTENCE_RE.findall(text) if s.strip()]
-    if drop_contacts:
-        sentences = [s for s in sentences if not _PD_MARK_RE.search(s)]
-    out = " ".join(" ".join(sentences).split())
+    out = without_sentences(text, lambda s: drop_contacts and bool(_PD_MARK_RE.search(s)))
     while (m := _GREETING_RE.match(out)) and m.end():
         out = out[m.end():]
     return out  # одно приветствие — пустая строка: такой пары в базу нет
@@ -119,20 +168,42 @@ async def extract(llm, client_question: str, manager_text: str) -> tuple[list[Fa
     if len(manager_text) < MIN_MANAGER_TEXT:
         return [], 0
     tokens = 0
+    prompt = [{"role": "user", "content": f"Вопрос клиента: {client_question}\nОтвет менеджера: {manager_text}"}]
     try:
-        raw = await llm.complete(EXTRACT_PROMPT, [{"role": "user", "content":
-                                                   f"Вопрос клиента: {client_question}\nОтвет менеджера: {manager_text}"}])
-        tokens = getattr(llm, "last_tokens", 0) or (len(EXTRACT_PROMPT) + len(manager_text)) // 3
-        facts = parse_facts(raw)
-        if facts is None:
-            raise ValueError("ответ модели не разобрать")
+        facts = None
+        for _ in range(2):
+            raw = await llm.complete(EXTRACT_PROMPT, prompt)
+            tokens += getattr(llm, "last_tokens", 0) or (len(EXTRACT_PROMPT) + len(manager_text)) // 3
+            facts = parse_facts(raw)
+            if facts is None:
+                raise ValueError("ответ модели не разобрать")
+            facts = [f for f in (Fact(f.question, drop_promises(f.answer)) for f in facts) if keep(f, manager_text)]
+            # GigaChat на том же ответе иногда не даёт ни одного годного факта (в прогоне песочницы 04.11 пропали 2 из 3):
+            # содержательный ответ без личного спрашиваем ещё раз, короткое «получили, ставим» — нет
+            if facts or sum(len(f.answer) for f in raw_facts(client_question, manager_text)) < RETRY_TEXT:
+                break
     except Exception:  # noqa: BLE001 — без модели кандидат всё равно полезен менеджеру
         return raw_facts(client_question, manager_text), tokens
-    return [f for f in facts if keep(f, manager_text)], tokens
+    return facts, tokens
 
 
 def review_note(kb: KnowledgeBase, question: str, answer: str) -> str:
     """Подсказка менеджеру при утверждении: противоречие прайсу или похожий ответ, который уже есть."""
+    if conflict := price_conflict(kb, question, answer):
+        return conflict
+    asked = topic_words(kb, question)
+    for h in kb.retrieve(question):
+        if h.chunk.kind != "faq":
+            continue
+        title = h.chunk.text.split("\n", 1)[0].split("Вопрос: ", 1)[-1]
+        if same_topic(asked, topic_words(kb, title)):
+            return f"Похожее уже есть в базе: {title}"
+    return ""
+
+
+def price_conflict(kb: KnowledgeBase, question: str, answer: str) -> str:
+    """«В прайсе другая цена: …» — в ответе сумма, а у того же ТЦ и формата в прайсе другие. Такой факт
+    не утверждается: та же сумма может быть у другой позиции прайса (12 000 ₽ — не цена фотозоны)."""
     hits = kb.retrieve(question)
     amounts = set(extract_amounts(answer))
     words = set(tokenize(f"{question} {answer}"))
@@ -143,14 +214,12 @@ def review_note(kb: KnowledgeBase, question: str, answer: str) -> str:
         listed = "; ".join(f"{r.format}, {r.placement.split(' — ')[0]} — {r.price_rub:,} ₽".replace(",", " ")
                            for r in rows[:3])
         return f"В прайсе другая цена: {listed}"
-    asked = set(tokenize(question))
-    for h in hits:
-        if h.chunk.kind != "faq":
-            continue
-        title = h.chunk.text.split("\n", 1)[0].split("Вопрос: ", 1)[-1]
-        if same_topic(asked, set(tokenize(title))):
-            return f"Похожее уже есть в базе: {title}"
     return ""
+
+
+def topic_words(kb: KnowledgeBase, text: str) -> set[str]:
+    """Слова темы без ТЦ и общих слов: «реклама на тележках в ВЕЕР» не похожа на «вакансию в ВЕЕР»."""
+    return set(tokenize(text)) - kb._all_venues - _COMMON_WORDS
 
 
 def same_topic(a: set[str], b: set[str]) -> bool:

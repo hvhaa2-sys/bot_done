@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import csv
+from contextlib import AsyncExitStack
 import datetime as dt
 import hmac
 import io
 import json
 import re
 import secrets
+import sqlite3
 import tempfile
 import time
 from pathlib import Path
@@ -977,16 +979,30 @@ def create_app(services: Services) -> FastAPI:
         except ValueError:
             return Response(status_code=400)
         queue = services.max_updates
-        if queue is None or queue.full() or not isinstance(update, dict):  # не приняли — MAX доставит ещё раз
-            return Response(status_code=503 if isinstance(update, dict) else 400)
-        queue.put_nowait(update)
+        if not isinstance(update, dict):
+            return Response(status_code=400)
+        if queue is None:
+            return Response(status_code=503)
+        if not services.max_observation_allowed(update):
+            return Response('{"ok": true}', media_type="application/json")
+        try:
+            queue.put_nowait(update)  # SQLite commit до HTTP 200
+        except (asyncio.QueueFull, sqlite3.Error):
+            return Response(status_code=503)
         return Response('{"ok": true}', media_type="application/json")
 
     @app.get("/health")
     async def health() -> Response:
         """Для мониторинга на сервере: без токена, без подробностей."""
-        services.db.conn.execute("SELECT 1").fetchone()
-        return Response('{"ok": true}', media_type="application/json")
+        try:
+            services.db.conn.execute("SELECT 1").fetchone()
+            ok = not services.settings.max_bot_token or bool((services.max_status or {}).get("ok"))
+            if services.settings.max_bot_token and services.settings.max_webhook_url:
+                ok = ok and services.max_worker is not None and not services.max_worker.done()
+                ok = ok and services.max_updates is not None and services.max_inbox.accepting
+        except sqlite3.Error:
+            ok = False
+        return Response(json.dumps({"ok": bool(ok)}), status_code=200 if ok else 503, media_type="application/json")
 
     # --- перевод клиентов в бота MAX ---
     @app.get("/invite", dependencies=[Depends(auth)])
@@ -1188,6 +1204,29 @@ def create_app(services: Services) -> FastAPI:
     async def observe_page(conn: str = "", chat: str = "", q: str = "", keep: str = "") -> HTMLResponse:
         return page("Наблюдение", observe_html(services, conn, chat, q, keep=keep), "/observe", wide=True,
                     poll=LIVE_SECONDS)
+
+    @app.post("/observe/access", dependencies=[Depends(auth)])
+    async def observation_access(connection_id: str = Form(...), chat_id: int = Form(...),
+                                 allowed: int = Form(0)) -> RedirectResponse:
+        conn = services.db.get_connection(connection_id)
+        if not conn or not conn.approved:
+            raise HTTPException(400, "Выберите одобренное подключение")
+        services.privacy.set_allowed(connection_id, chat_id, bool(allowed))
+        return RedirectResponse("/observe", status_code=303)
+
+    @app.post("/observe/erase", dependencies=[Depends(auth)])
+    async def erase_client(chat_id: int = Form(...), confirm_chat_id: str = Form("")) -> RedirectResponse:
+        if confirm_chat_id != str(chat_id):
+            raise HTTPException(400, "Повторите номер чата для удаления")
+        # Завершившийся после удаления разбор кандидатов не должен вернуть данные.
+        async with AsyncExitStack() as stack:
+            for conn in services.db.connections():
+                await stack.enter_async_context(services.chat_lock(conn.id, chat_id))
+            services.privacy.erase(chat_id, services.watch_log)
+            services.chat_names.pop(chat_id, None)
+            services.events.clear()
+        services.event("Данные клиента удалены из рабочей базы и файла наблюдения")
+        return RedirectResponse("/observe", status_code=303)
 
     @app.post("/dialogs/{dialog_id}/flag", dependencies=[Depends(auth)])
     async def flag(dialog_id: int, flagged: int = Form(...), back: str = Form("/dialogs")) -> RedirectResponse:
@@ -1526,13 +1565,14 @@ async def run_exam(services: Services, state: dict) -> None:
         questions = load_questions(QUESTIONS)
         state["total"] = len(questions)
         label, target = parse_target(model_key(services.settings), services.settings)
-        summary, rows = await evaluate(label, target, questions, progress)
+        version = services.kb_version
+        summary, rows = await evaluate(label, target, questions, progress, llm=services.llm, kb=services.kb)
         day = services.local_now().strftime("%Y-%m-%d")
         for row in rows:  # экзамен тоже тратит модель — пусть это видно в «Модель сегодня»
             if row.get("llm_called"):
                 services.db.add_usage(day, row.get("tokens", 0))
         record = {"at": dt.datetime.now().strftime("%d.%m.%Y %H:%M"), "model": model_title(services.settings),
-                  "kb_version": services.kb_version, "summary": summary, "rows": rows}
+                  "kb_version": version, "summary": summary, "rows": rows}
         services.db.set_settings({EXAM_KEY: json.dumps(record, ensure_ascii=False)})
     except Exception as exc:  # сеть, ключ, файл вопросов
         state["error"] = f"{type(exc).__name__}: {exc}"
@@ -1616,11 +1656,40 @@ data-chat="{escape(f"{picked['connection_id']}|{picked['chat_id']}")}">
 <h2>{escape(name(picked['chat_id']))}</h2>
 <span class="muted">{plural(picked['n'], 'сообщение', 'сообщения', 'сообщений')}</span></div>
 <div class="thread-body"><div class="chat">{''.join(lines)}</div></div></div></div>"""
+    access = observation_access_html(services)
     file_card = watch_log_html(services)
     return f"""<h1>Наблюдение</h1>{note(msg)}<div class="card">{state}
 <p class="hint">Телефоны, почты и номера карт скрыты. Голосовые и файлы сохраняются только как отметки.
-Факты из ваших ответов — в <a href="/learn">«Обучении»</a>.</p></div>{kpis}{search}{body}
+Факты из ваших ответов — в <a href="/learn">«Обучении»</a>.</p></div>{access}{kpis}{search}{body}
 {f'<div class="card">{file_card}</div>' if file_card else ''}"""
+
+
+def observation_access_html(services: Services) -> str:
+    options = "".join(f'<option value="{escape(c.id)}">{escape(c.id)}</option>'
+                      for c in services.db.connections() if c.approved)
+    rows = "".join(
+        f'<tr><td>{escape(r["connection_id"])}</td><td>{r["chat_id"]}</td>'
+        f'<td>{"Разрешён" if r["allowed"] else "Не записывается"}</td><td>'
+        f'<form method="post" action="/observe/access">'
+        f'<input type="hidden" name="connection_id" value="{escape(r["connection_id"])}">'
+        f'<input type="hidden" name="chat_id" value="{r["chat_id"]}">'
+        f'<input type="hidden" name="allowed" value="{0 if r["allowed"] else 1}">'
+        f'<button class="light">{"Запретить" if r["allowed"] else "Разрешить"}</button></form></td></tr>'
+        for r in services.privacy.rows())
+    return f'''<details class="card"><summary>Какие чаты записывать</summary>
+<p>Новые чаты не записываются до вашего разрешения. Здесь появляется только номер чата.</p>
+<div class="scroll"><table><tr><th>Подключение</th><th>Чат</th><th>Наблюдение</th><th></th></tr>{rows}</table></div>
+<form method="post" action="/observe/access" class="row">
+<select name="connection_id" aria-label="Подключение">{options}</select>
+<input name="chat_id" type="number" required placeholder="Номер чата" aria-label="Номер чата">
+<input type="hidden" name="allowed" value="1"><button>Разрешить</button></form>
+<hr><h3>Удалить данные клиента</h3>
+<p class="hint">Удаляет переписку, кандидатов, заявки и очередь по номеру чата во всех каналах.
+Старые резервные копии и уже утверждённые знания нужно проверить отдельно.</p>
+<form method="post" action="/observe/erase" class="row">
+<input type="number" name="chat_id" required placeholder="Номер чата" aria-label="Номер для удаления">
+<input name="confirm_chat_id" required placeholder="Повторите номер" aria-label="Подтверждение номера">
+<button class="light">Удалить данные</button></form></details>'''
 
 
 def watch_log_html(services: Services) -> str:

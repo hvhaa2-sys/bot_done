@@ -41,6 +41,7 @@ def env(tmp_path):
         "id": CONN, "user": {"id": OWNER, "is_bot": False, "first_name": "Manager"}, "user_chat_id": OWNER,
         "date": NOW, "is_enabled": True, "rights": {"can_reply": True}}})
     services.db.set_mode(D.WATCH, connection_id=CONN)
+    services.privacy.set_allowed(CONN, CLIENT, True)
     sent.clear()
     return services, dp, bot, sent, calls
 

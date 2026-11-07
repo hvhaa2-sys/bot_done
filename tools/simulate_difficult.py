@@ -137,6 +137,7 @@ async def run_batch(folder: Path, inputs: Path, *, allow_api: bool = False, resu
             for i, case in enumerate(cases):
                 llm.phase = "learning:" + case["id"]
                 chat_id = 5000 + len(report["learning"])
+                services.privacy.set_allowed(conn.id, chat_id, True)
                 for mid, item in enumerate(case["messages"], 1):
                     message = Message.model_validate({
                         "message_id": mid, "date": now + dt.timedelta(seconds=mid), "text": item["text"],

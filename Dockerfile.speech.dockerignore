@@ -1,0 +1,8 @@
+**
+!requirements-speech.txt
+!requirements-speech-overrides.txt
+!app/
+!app/speech_worker.py
+!app/speech_models.py
+!tools/
+!tools/prepare_speech.py

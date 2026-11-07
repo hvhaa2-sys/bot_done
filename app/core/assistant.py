@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from ..llm.base import LLMProvider
 from .conversation import MAX_CLARIFICATIONS, Conversation
 from .answer_grounding import budget_issues, price_period_issues, property_issues
-from .client_intent import active_request
+from .client_intent import active_request, is_ready_to_buy
 from .knowledge import KnowledgeBase, PriceRow, SearchHit, _format_words, format_rub, parse_budget
 from .price_guard import (drop_bracket_totals, computed_totals, drop_numbers, extract_amounts, extract_numbers,
                           row_multipliers, ungrounded_numbers,
@@ -45,6 +45,7 @@ R_TERMS = "terms_mismatch"
 R_VENUE = "venue_mismatch"
 R_PERIOD = "period_mismatch"
 R_FORMAT = "format_mismatch"
+R_ORDER = "order_talk"
 R_OFF_RANGE = "off_range"
 R_CATALOG = "catalog"
 R_FOREIGN = "foreign_words"
@@ -254,7 +255,8 @@ class Assistant:
         except Exception as exc:  # сеть, лимиты, ключ
             return Reply(ESCALATE, self.holding_message, 0.0, f"{R_LLM_ERROR}:{type(exc).__name__}", sources,
                          llm_called=True, tokens=tokens)
-        reply = self._decide(raw, query, history, context, sources, hits, state)
+        ready = is_ready_to_buy(from_translit(question))
+        reply = self._decide(raw, query, history, context, sources, hits, state, ready)
         if reply.decision == ESCALATE and (fix := retry_hint(reply.reason, reply.text, self.holding_message, query)):
             # Проверка нашла конкретную ошибку — одна попытка исправить: модель получает, что не так,
             # новый ответ проходит те же проверки. Не вышло — к менеджеру с первым черновиком
@@ -262,7 +264,7 @@ class Assistant:
                 messages += [{"role": "assistant", "content": raw}, {"role": "user", "content": fix}]
                 raw2 = await self.llm.complete(system, messages)
                 tokens += self._spent(system, question, raw2)
-                second = self._decide(raw2, query, history, context, sources, hits, state)
+                second = self._decide(raw2, query, history, context, sources, hits, state, ready)
                 unsure = reply.reason.startswith(R_MODEL_UNSURE)
                 if second.decision == ANSWER and not (unsure and _NO_DATA_RE.search(second.text)):
                     reply = second
@@ -292,8 +294,10 @@ class Assistant:
         return getattr(self.llm, "last_tokens", 0) or (len(system) + len(question) + len(raw or "")) // 3
 
     def _decide(self, raw: str, question: str, history: list[tuple[str, str]], context: str,
-                sources: list[str], hits: list[SearchHit] | None = None, state: Conversation | None = None) -> Reply:
-        """Что делать с ответом модели: отправить, передать менеджеру или отбросить."""
+                sources: list[str], hits: list[SearchHit] | None = None, state: Conversation | None = None,
+                ready: bool = False) -> Reply:
+        """Что делать с ответом модели: отправить, передать менеджеру или отбросить.
+        ready — клиент пишет о готовности к заказу («ок берём на месяц»)."""
         text, confidence, needs_manager = parse_model_output(raw)
         # Подпись из контекста («Условия и доплаты: возможна промо-стойка») клиенту не нужна
         text = _LABEL_RE.sub(lambda m: m.group(1).upper(), fix_mixed_script(text))
@@ -308,6 +312,11 @@ class Assistant:
         # «…280 000 ₽ в месяц. Хотите забронировать даты?» — ответ полный, а бронь решает менеджер:
         # заключительный вопрос-предложение убираем, а не отдаём весь ответ менеджеру
         text = drop_offer_question(text)
+        # «Вы выбрали… Сумма к оплате 42 000 ₽» — это уже оформление сделки, а цена в чате может быть офертой.
+        # Без повтора: подсказка модели вернула бы тот же итог, клиент ждёт человека
+        text, order_left = drop_order_talk(text, context, ready)
+        if order_left:
+            return Reply(ESCALATE, text, confidence, R_ORDER, sources, raw=raw)
         # Обещание без слова «менеджер»: «я уточню и напишу», «место свободно», «забронирую»
         if _COMMITMENT_RE.search(text):
             needs_manager = True
@@ -439,6 +448,44 @@ _COMMITMENT_RE = re.compile(r"\b(?:уточню|пришлю|напишу|свя
                             r"|специальн\w* (?:услови|предложени|цен)\w*|индивидуальн\w* (?:услови|цен)\w*"
                             r"|обсуд\w*[^.!?\n]{0,30}по телефону",  # «экран свободен», но не «свободных витрин»
                             re.IGNORECASE)
+# Бот подводит итог или оформляет сделку: это делает только менеджер. «Оформление зоны», «заявку подаёт менеджер»,
+# «к оплате отдельно: монтаж…», «если вы выбрали…», «какой экран вы выбрали?» — не оно
+_ORDER_RE = re.compile(r"\b(?:итого|всего|сумм\w*|стоимост\w*)\s+к\s+оплате\b"
+                       r"|(?<!дополнительно )(?<!отдельно )\bк\s+оплате\b(?![^.!?\n]*\b(?:отдельно|дополнительно)\b)"
+                       r"|\bподлежит\s+оплате\b|\bсч[её]т\s+на\s+оплату\b|\bвыстав\w*\s+сч[её]т"
+                       r"|(?<!если )(?<!когда )\bвы\s+(?:уже\s+)?(?:выбрали|заказали)\b(?![^.!?\n]*\?)"
+                       r"|\bоформ(?:ил\w*|лю|ляю)\b"
+                       r"|\bоформ(?:им|ляем)\b(?!\s+(?:\w+\s+)?(?:зон|витрин|стенд|[её]лк|фасад|каток|катк))"
+                       r"|\bоформ\w*\s+(?:ваш\w*\s+|эт\w+\s+)?(?:заказ(?:а|у|ом)?\b|заявк|брон|размещени|сделк)"
+                       r"|\b(?:заказ|заявк\w*|брон\w*|размещени\w*|сделк\w*)\s+(?:ваш\w*\s+|уже\s+)?"
+                       r"(?:принят\w*|принял\w*|оформлен\w*|подтвержд[её]н\w*|создан\w*|зарегистрирован\w*)"
+                       r"|\bпринял\w*\s+(?:ваш\w*\s+)?(?:заказ(?:а|у|ом)?\b|заявк)"
+                       # живой прогон 31.10: «Для завершения бронирования мне нужно уточнить детали», «Мы зафиксируем место»
+                       r"|\bзавершени\w*\s+(?:брон|заказ|оформлени|заявк|сделк)|\bдля\s+брон|\bзафиксиру(?:ем|ю)\b", re.IGNORECASE)
+# На «берём» и обычная по виду сумма звучит как итог сделки: «Общая стоимость 42 000 ₽», «Итого 42 000 ₽». На обычный
+# вопрос такие итоги разбирает защита цен («итого» из цены и доплаты вырезается, цены остаются)
+_READY_TOTAL_RE = re.compile(r"\b(?:итого|всего)\b|\b(?:общ|итогов)\w+\s+(?:сумм|стоимост|цен)\w*"
+                             r"|\bсумм\w+\s+(?:заказа|состав\w+|будет)|\bс вас\b", re.IGNORECASE)
+
+
+def drop_order_talk(text: str, context: str, ready: bool = False) -> tuple[str, bool]:
+    """Убрать фразы итога и оформления. (текст, остался ли он без ответа): нет настоящего ответа без них,
+    потеряна цена из базы или на заказ не осталось ни одной цены — такой ответ решает менеджер, текст не меняем."""
+    kept, dropped = [], []
+    for sentence in re.findall(r"[^.!?\n]+[.!?]*\s*", text):
+        total = ready and _READY_TOTAL_RE.search(sentence) and extract_amounts(sentence)
+        (dropped if total or _ORDER_RE.search(sentence) else kept).append(sentence)
+    if not dropped:
+        return text, False
+    rest = "".join(kept).strip()
+    named = set(extract_amounts(rest))
+    lost = set(extract_amounts("".join(dropped))) & set(extract_amounts(context)) - named
+    statement = "".join(s for s in kept if not s.rstrip().endswith("?")).strip()
+    if lost or len(statement) < _MANAGER_TAIL_MIN or (ready and not named):
+        return text, True
+    return rest, False
+
+
 _LABEL_RE = re.compile(r"(?:Условия и доплаты|Условия|Подробности|Дополнительная информация|Требования|Включено"
                        r"|В условиях указано|Оплачивается отдельно, разово|Не входит в цену, доплата):\s*(\w)")
 FOLLOW_UP_WORDS = 4

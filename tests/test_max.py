@@ -85,13 +85,16 @@ def reply_to(card, text):
 
 def connect(bot):
     feed(bot, message("/manager", MANAGER, MANAGER_CHAT))
+    bot.services.db.approve_connection(CONN)
+    feed(bot, message("/manager", MANAGER, MANAGER_CHAT))
+    bot.services.privacy.set_allowed(CONN, CLIENT_CHAT, True)
 
 
 def to(api, chat):
     return [m for m in api.sent if m["chat_id"] == chat]
 
 
-def test_first_manager_is_approved_and_stranger_waits(env):
+def test_approved_manager_connects_and_stranger_waits(env):
     services, bot, api = env
     connect(bot)
     conn = services.db.get_connection(CONN)
@@ -151,7 +154,7 @@ def test_send_button_sends_draft_once(env):
     assert "PDF" in to(api, CLIENT_CHAT)[-1]["text"]
     assert services.db.get_dialog(dialog_id)["status"] == D.DRAFT_SENT
     answer = api.answers[-1]
-    assert answer["notification"] == "Отправлено клиенту." and answer["text"].endswith("Отправлено клиенту.")
+    assert answer["notification"] == "Отправлено клиенту." and "Отправлено клиенту." in answer["text"]
     assert answer["buttons"] is None, "кнопки убраны"
     feed(bot, callback(f"send:{dialog_id}", card, callback_id="cb2"))
     assert len(to(api, CLIENT_CHAT)) == 1 and api.answers[-1]["notification"] == "Черновик уже обработан."
@@ -188,7 +191,7 @@ def test_manager_reply_to_card_goes_to_client(env):
     dialog = services.db.recent_dialogs(1)[0]
     assert dialog["status"] == D.DRAFT_EDITED and to(api, MANAGER_CHAT)[-1]["text"] == "Ваш вариант отправлен клиенту."
     feed(bot, reply_to(card, "ещё раз"))
-    assert to(api, MANAGER_CHAT)[-1]["text"] == "Этот черновик уже обработан."
+    assert to(api, CLIENT_CHAT)[-1]["text"] == "ещё раз"
 
 
 def test_manager_text_without_card_gets_help(env):
@@ -608,7 +611,7 @@ def test_run_max_survives_bad_answer_and_shows_lost_connection(env, monkeypatch)
 
     asyncio.run(scenario())
     assert False in states, "пока связи нет, админка это показывает"
-    assert services.max_status["ok"], "связь вернулась — статус снова хороший"
+    assert not services.max_status["ok"], "после остановки статус не должен оставаться хорошим"
 
 
 FILE = {"type": "file", "payload": {"url": "https://x/1", "token": "tok1"}, "filename": "kp.pdf", "size": 1}
@@ -737,7 +740,7 @@ def test_run_webhook_subscribes_replaces_foreign_and_restores_lost(env, monkeypa
         asyncio.run(run_webhook(Api(), bot, services, ready))
     assert calls == [("del", "https://old.test"), ("sub", "https://bot.test/max/webhook", "s", True),
                      ("sub", "https://bot.test/max/webhook", "s", True)]
-    assert services.max_status == ready and services.max_updates is None
+    assert not services.max_status["ok"] and services.max_updates is None
 
 
 def test_run_webhook_refuses_insecure_settings(env):
@@ -822,11 +825,13 @@ def test_menu_on_start_and_greeting_but_not_in_observe(env):
     feed(bot, message("/start"))
     assert to(api, CLIENT_CHAT)[-1]["buttons"] == CLIENT_MENU
     feed(bot, message("/mode observe", MANAGER, MANAGER_CHAT))
+    before = len(to(api, CLIENT_CHAT))
     feed(bot, {"update_type": "bot_started", "chat_id": CLIENT_CHAT, "user": {"user_id": CLIENT}})
-    assert to(api, CLIENT_CHAT)[-1]["buttons"] is None, "в наблюдении бот сам ничего не делает"
+    assert len(to(api, CLIENT_CHAT)) == before, "в наблюдении бот не здоровается сам"
     before = len(api.sent)
     press(bot, "menu:catalog")
     assert api.answers[-1]["notification"] == OBSERVE_MENU and len(api.sent) == before, "старая кнопка в наблюдении"
+
 
 
 def test_catalog_button_needs_no_model_and_works_in_drafts(env, monkeypatch):
@@ -892,7 +897,7 @@ def test_phone_by_text_after_lead_button_and_not_otherwise(env):
     press(bot, "menu:lead")
     feed(bot, message("мой номер 8 912 345-67-89"))
     assert "Телефон: 8 912 345-67-89" in to(api, MANAGER_CHAT)[-1]["text"]
-    assert services.db.recent_dialogs(1)[0]["question"] == "[заявка]"
+    assert services.db.recent_dialogs(1)[0]["question"] == "[заявка]\nмой номер [телефон]"
     press(bot, "menu:lead")
     feed(bot, message("а сначала скажите, сколько стоит экран в атриуме?"))
     assert "Заявка" not in to(api, MANAGER_CHAT)[-1]["text"], "вопрос вместо телефона — обычный вопрос"
@@ -1021,3 +1026,147 @@ def test_invite_page_links_qr_stats_and_new_source(env):
     client.cookies.clear()
     assert client.get("/invite", follow_redirects=False).status_code != 200, "только после входа"
 
+
+
+@pytest.mark.parametrize('mode', ['draft', 'observe'])
+def test_regression_long_and_forwarded_client_text_reaches_manager(env, mode):
+    services, bot, api = env
+    connect(bot)
+    services.db.set_mode(mode, connection_id=CONN)
+    text = 'Нужно размещение. ' * 145 + 'ВАЖНО: запуск после согласования'
+    feed(bot, message(text))
+    assert text in '\n'.join(m['text'] for m in to(api, MANAGER_CHAT))
+    feed(bot, message('', link={'type': 'forward', 'message': {'text': 'Пересланное ТЗ'}}))
+    assert 'Пересланное ТЗ' in to(api, MANAGER_CHAT)[-1]['text']
+
+
+def test_regression_unapproved_manager_can_still_be_client(env):
+    services, bot, api = env
+    connect(bot)
+    feed(bot, message('/manager'))
+    assert not services.db.get_connection(f'max:{CLIENT}').approved
+    feed(bot, message('Сколько стоит экран в атриуме?'))
+    assert 'атриуме' in to(api, MANAGER_CHAT)[-1]['text']
+    press(bot, 'menu:catalog')
+    assert api.answers[-1]['notification'] != 'Это кнопка для клиентов.'
+
+
+def test_regression_notice_number_cannot_route_to_another_client(env):
+    services, bot, api = env
+    connect(bot)
+    services.db.set_mode('auto', connection_id=CONN)
+    feed(bot, message('Дадите скидку?', user=666, chat=6660))
+    wrong_id = services.db.recent_dialogs(1)[0]['id']
+    before = len(to(api, 6660))
+    feed(bot, message(f'Берём экран на месяц. Вопрос #{wrong_id}'))
+    notice = next(m['text'] for m in reversed(to(api, MANAGER_CHAT)) if 'готов к заказу' in m['text'])
+    feed(bot, reply_to(notice, 'Отвечаю на заявку'))
+    assert to(api, CLIENT_CHAT)[-1]['text'] == 'Отвечаю на заявку'
+    assert len(to(api, 6660)) == before
+    feed(bot, reply_to(f'Текст клиента: Вопрос #{wrong_id}', 'Подложная карточка'))
+    assert len(to(api, 6660)) == before
+
+
+def test_regression_lead_on_pause_keeps_full_contact_message(env):
+    services, bot, api = env
+    connect(bot)
+    services.db.set_mode('auto', connection_id=CONN)
+    press(bot, 'menu:human')
+    press(bot, 'menu:lead')
+    text = '+7 999 123-45-67, звонить после 18, спросить Ольгу'
+    feed(bot, message(text))
+    card = to(api, MANAGER_CHAT)[-1]['text']
+    assert text in card
+    assert services.db.recent_dialogs(1)[0]['reason'] == 'lead'
+    feed(bot, reply_to(card, 'Первый ответ'))
+    feed(bot, reply_to(card, 'Второй ответ'))
+    assert [m['text'] for m in to(api, CLIENT_CHAT)][-2:] == ['Первый ответ', 'Второй ответ']
+
+
+def test_regression_failed_auto_answer_card_has_own_number(env):
+    services, bot, api = env
+    connect(bot)
+    services.db.set_mode('auto', connection_id=CONN)
+    original = api.send
+
+    async def fail_client(text, *, chat_id=None, **kwargs):
+        if chat_id == CLIENT_CHAT:
+            raise MaxError(503, 'down')
+        return await original(text, chat_id=chat_id, **kwargs)
+
+    api.send = fail_client
+    feed(bot, message('Сколько стоит экран в атриуме?'))
+    card = to(api, MANAGER_CHAT)[-1]['text']
+    api.send = original
+    feed(bot, reply_to(card, 'Мой ответ'))
+    assert to(api, CLIENT_CHAT)[-1]['text'] == 'Мой ответ'
+
+
+def test_first_max_manager_also_requires_admin_approval(env):
+    services, bot, api = env
+    feed(bot, message('/manager', MANAGER, MANAGER_CHAT))
+    assert not services.db.get_connection(CONN).approved
+    feed(bot, message('Вопрос другого клиента'))
+    assert not any('другого клиента' in m['text'] for m in to(api, MANAGER_CHAT))
+
+
+def test_followup_to_card_after_send_button_keeps_recipient(env):
+    services, bot, api = env
+    connect(bot)
+    feed(bot, message('Какие требования к макету?'))
+    card = to(api, MANAGER_CHAT)[-1]['text']
+    dialog_id = services.db.recent_dialogs(1)[0]['id']
+    feed(bot, callback(f'send:{dialog_id}', card))
+    feed(bot, reply_to(api.answers[-1]['text'], 'И ещё одно уточнение'))
+    assert to(api, CLIENT_CHAT)[-1]['text'] == 'И ещё одно уточнение'
+
+
+def test_partial_files_retry_only_unsent_attachment(env):
+    _, bot, api = env
+    connect(bot)
+    feed(bot, message('Пришлите КП'))
+    card = to(api, MANAGER_CHAT)[-1]['text']
+    original = api.send
+    attempts = 0
+
+    async def flaky(text, *, chat_id=None, **kwargs):
+        nonlocal attempts
+        if chat_id == CLIENT_CHAT:
+            attempts += 1
+            if attempts == 2:
+                raise MaxError(503, 'temporary')
+        return await original(text, chat_id=chat_id, **kwargs)
+
+    api.send = flaky
+    files = [{'type': 'file', 'payload': {'token': token}} for token in ('first', 'second')]
+    for _ in range(2):
+        update = reply_to(card, 'Документы')
+        update['message']['body']['attachments'] = files
+        feed(bot, update)
+    sent = to(api, CLIENT_CHAT)
+    assert [m['text'] for m in sent] == ['Документы', '']
+    assert [m['files'][0]['payload']['token'] for m in sent] == ['first', 'second']
+
+
+def test_rate_limit_preserves_text_without_spamming_manager(env):
+    services, bot, api = env
+    connect(bot)
+    asyncio.run(services.update_settings({'chat_hourly_limit': '3'}))
+    for i in range(4):
+        feed(bot, message(f'Непонятный вопрос {i}'))
+    count = len(to(api, MANAGER_CHAT))
+    for i in range(50):
+        feed(bot, message(f'Ещё сообщение {i}'))
+    assert len(to(api, MANAGER_CHAT)) - count <= 5
+    assert services.db.recent_dialogs(1)[0]['question'] == 'Ещё сообщение 49'
+
+
+def test_caption_album_has_no_second_holding(env):
+    services, bot, api = env
+    connect(bot)
+    services.db.set_mode('auto', connection_id=CONN)
+    for i in range(3):
+        feed(bot, message('Сколько стоит экран в атриуме?' if i == 0 else '',
+                          attachments=[{'type': 'image', 'payload': {'token': str(i)}}]))
+    assert len(to(api, CLIENT_CHAT)) == 1
+    assert sum(bool(m['forward']) for m in to(api, MANAGER_CHAT)) == 3
