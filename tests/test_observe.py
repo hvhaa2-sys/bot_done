@@ -312,3 +312,21 @@ def test_admin_observe_journal_and_settings(env):
     result = asyncio.run(env.services.update_settings({"default_mode": "observe"}))
     assert not result and env.services.settings.default_mode == "observe"
     assert 'value="observe" selected' in client.get("/settings").text
+
+
+def test_access_table_names_chats_that_wait_for_permission(env):
+    # 07.11: после обновления все чаты наблюдения стояли «не записывается», а в таблице были одни номера —
+    # владелец не мог понять, какие из них рабочие. Имя берём только из памяти, в журнал оно не пишется.
+    env.feed({"business_message": {"message_id": 1, "date": env.now, "business_connection_id": CONN,
+                                   "text": "Сколько стоит экран?", "chat": {"id": 888, "type": "private",
+                                                                          "first_name": "Агентство", "last_name": "Север"},
+                                   "from": {"id": 888, "is_bot": False, "first_name": "Агентство"}}})
+    assert env.db.observation_stats()["messages"] == 0
+    client = TestClient(create_app(env.services))
+    client.get("/?token=test-observe")
+    page = client.get("/observe").text
+    assert "Агентство Север" in page and "ждут решения 1" in page
+    client.post("/observe/access", data={"connection_id": CONN, "chat_id": 888, "allowed": 1})
+    env.msg("А на месяц?", 2, chat_id=888)
+    assert env.db.observation_stats()["messages"] == 1
+    assert "Агентство" not in json.dumps([dict(r) for r in env.db.observed_chat(CONN, 888)], ensure_ascii=False)
