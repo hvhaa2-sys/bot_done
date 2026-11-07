@@ -23,20 +23,24 @@ import collections
 import contextlib
 import datetime as dt
 import logging
+import json
 import re
 import time
 
 import httpx
 
 from .. import db as D
+from . import voice
+from ..max_inbox import MaxInbox, event_key
 from ..core.assistant import R_CATALOG
+from ..core.real_flow import business_operation, named_thanks
 from ..core.conversation import Conversation
 from ..core.pii import find_phone
 from ..services import Services
-from .flow import HOLDING_SENT, process_client_message
+from .flow import HOLDING_SENT, cut, process_client_message
 from .observation import collect_observed
 from .max_api import REQUEST_CONTACT, Buttons, MaxApi, MaxError
-from .telegram_business import (_DRAFT_ID_RE, MEDIA_KINDS, MessageBuffer, build_candidates_message, build_summary,
+from .telegram_business import (MEDIA_KINDS, MessageBuffer, build_candidates_message, build_summary,
                                 collect_quietly, mode_name, short, wait_text)
 
 log = logging.getLogger(__name__)
@@ -75,6 +79,7 @@ WAITING_SECONDS = 1800   # столько бот считает, что след
 HUMAN_REPEAT_SECONDS = 600  # повторное нажатие «Позвать менеджера» не дёргает его ещё раз
 _WANTS_HUMAN_RE = re.compile(r"\b(?:позов\w*|позвать|соедин\w*|переключ\w*|свяж\w*|хочу|нужен|нужна|дайте|можно)\b"
                              r".{0,25}\b(?:менеджер\w*|человек\w*|оператор\w*|сотрудник\w*|консультант\w*)", re.I)
+_CARD_ID_RE = re.compile(r"(?:^|\n)(?:Черновик|Вопрос) #(\d+)\. [^\n]+\s*$")
 _SOURCE_RE = re.compile(r"^[\w-]{1,64}$")
 _VCF_TEL_RE = re.compile(r"^TEL[^:\r\n]*:\s*([+\d][\d\s()-]{5,})", re.I | re.M)
 NO_MANAGER = "Менеджер сейчас не на связи. Напишите, пожалуйста, чуть позже."
@@ -86,6 +91,18 @@ HELP = ("Команды менеджера:\n"
         "/status — статистика\n"
         "/resume — снять паузы в чатах клиентов\n\n"
         "Чтобы ответить клиенту, ответьте на его карточку своим текстом.")
+
+
+def text_parts(text: str, limit: int = 3999) -> list[str]:
+    parts = []
+    while len(text) > limit:
+        cut_at = text.rfind("\n", 0, limit)
+        if cut_at < limit // 2:
+            cut_at = text.rfind(" ", 0, limit)
+        end = cut_at + 1 if cut_at >= limit // 2 else limit
+        parts.append(text[:end])
+        text = text[end:]
+    return [*parts, text]
 
 
 def draft_buttons(dialog_id: int) -> Buttons:
@@ -148,6 +165,15 @@ class MaxBot:
         self.api, self.services, self.me_id = api, services, me_id
         self.buffer = MessageBuffer()
         self.seen: collections.OrderedDict[str, None] = collections.OrderedDict()
+        self.receipts: dict[tuple[str, int], list[dict]] = {}
+        self.inbox: MaxInbox | None = None
+        self.answer_tasks: set[asyncio.Task] = set()
+        self.voice_tasks: dict[int, asyncio.Task] = {}
+        self.voice_gate = asyncio.Semaphore(4)
+        self.stopping = False
+        self.last_send_error: dict[int, str] = {}
+        self.throttled: dict[int, float] = {}
+        self.last_media: dict[int, float] = {}
         self.waiting: dict[int, tuple[str, float]] = {}  # чат → чего бот ждёт после кнопки: budget или lead
         self.called: dict[int, float] = {}               # чат → когда клиент последний раз звал менеджера
 
@@ -164,15 +190,53 @@ class MaxBot:
     async def send_message(self, chat_id: int, text: str, buttons: Buttons | None = None, forward: str | None = None,
                            files: list[dict] | None = None) -> dict | None:
         """Отправленное сообщение (нужен его номер для журнала наблюдения) или None, если не получилось."""
+        chunks = text_parts(text)
+        parts = [{"text": chunks[0], "buttons": buttons, "forward": forward, "files": (files or [])[:1] or None}]
+        parts += [{"text": chunk} for chunk in chunks[1:]]
+        parts += [{"text": "", "files": [extra]} for extra in (files or [])[1:]]
+        key = event_key({"chat": chat_id, "parts": parts})
+        conn = self.services.db.conn
+        row = conn.execute("SELECT next_part,receipt FROM max_delivery WHERE request_key=?", (key,)).fetchone()
+        start, sent = (row[0], json.loads(row[1])) if row else (0, {})
         try:
-            # Файл должен быть единственным вложением в сообщении: остальные — отдельными сообщениями
-            sent = await self.api.send(text, chat_id=chat_id, buttons=buttons, forward=forward, files=(files or [])[:1] or None)
-            for extra in (files or [])[1:]:
-                await self.api.send("", chat_id=chat_id, files=[extra])
-            return (sent or {}).get("message") or {}
+            for index in range(start, len(parts)):
+                result = await self.api.send(chat_id=chat_id, **parts[index])
+                message = (result or {}).get("message") or {}
+                if not sent:
+                    body = message.get("body") or {}
+                    sent = {"body": {"mid": body.get("mid"), "seq": body.get("seq")},
+                            "timestamp": message.get("timestamp")}
+                with conn:
+                    conn.execute("""INSERT INTO max_delivery(request_key,chat_id,next_part,receipt) VALUES(?,?,?,?)
+                        ON CONFLICT(request_key) DO UPDATE SET next_part=excluded.next_part,receipt=excluded.receipt""",
+                                 (key, chat_id, index + 1, json.dumps(sent)))
+            with conn:
+                conn.execute("DELETE FROM max_delivery WHERE request_key=?", (key,))
+            self.last_send_error.pop(chat_id, None)
+            return sent
         except (MaxError, httpx.HTTPError) as exc:
-            log.warning("MAX: не удалось отправить сообщение в чат %s: %s", chat_id, exc)
+            partial = conn.execute("SELECT next_part FROM max_delivery WHERE request_key=?", (key,)).fetchone()
+            self.last_send_error[chat_id] = (
+                "Часть сообщения отправлена. Повторите тот же ответ — отправлю оставшиеся части."
+                if partial and partial[0] else
+                "MAX не разрешает отправить сообщение этому клиенту. Проверьте доступ к чату."
+                if isinstance(exc, MaxError) and exc.status == 403 else
+                "Не отправлено: нет связи с MAX. Попробуйте ещё раз.")
+            log.warning("MAX: отправка не удалась (%s)", type(exc).__name__)
             return None
+
+    async def send_card(self, chat_id: int, text: str, dialog_id: int, buttons: Buttons | None = None) -> bool:
+        kind = "Черновик" if buttons else "Вопрос"
+        suffix = f"\n\n{kind} #{dialog_id}. {_MAX_CARD_HINT} — ответ уйдёт клиенту."
+        # Общий flow ограничивает карточки Telegram; в MAX отправляем полный текст по частям.
+        text = text.rstrip()
+        size = 3999 - len(suffix)
+        for part in text_parts(text, size):
+            if not await self.send(chat_id, part + suffix, buttons):
+                if self.inbox:
+                    raise RuntimeError("Карточка MAX не доставлена; событие остаётся в очереди")
+                return False
+        return True
 
     async def answer(self, callback_id: str, note: str, text: str | None = None, buttons: Buttons | None = None) -> None:
         with contextlib.suppress(MaxError, httpx.HTTPError):
@@ -181,11 +245,7 @@ class MaxBot:
     # --- события ---
     def repeated(self, update: dict) -> bool:
         """Вебхук и перезапуск могут доставить событие второй раз: второго ответа клиенту быть не должно."""
-        kind = update.get("update_type")
-        key = ((update.get("message") or {}).get("body") or {}).get("mid") if kind == "message_created" \
-            else (update.get("callback") or {}).get("callback_id") if kind == "message_callback" else None
-        if not key:
-            return False
+        key = event_key(update)
         if key in self.seen:
             return True
         self.seen[key] = None
@@ -211,7 +271,7 @@ class MaxBot:
     async def on_started(self, update: dict) -> None:
         """Клиент нажал «Начать» в боте компании — здороваемся шаблоном, модель не тратим."""
         user = update.get("user") or {}
-        if self.services.db.get_connection(f"{CONN_PREFIX}{user.get('user_id')}"):
+        if (manager := self.services.db.get_connection(f"{CONN_PREFIX}{user.get('user_id')}")) and manager.approved:
             await self.send(update.get("chat_id"), HELP)
             return
         self.remember_source(update.get("chat_id"), update.get("payload"))
@@ -228,8 +288,9 @@ class MaxBot:
             await self.send(chat_id, services.sign(NO_MANAGER))
             return
         # В наблюдении бот сам ничего не делает, поэтому и кнопок нет: вопрос просто уходит менеджеру
-        menu = None if conn.mode in D.SILENT_MODES else CLIENT_MENU
-        await self.send(chat_id, services.sign(services.assistant.greeting_message), menu)
+        if conn.mode in D.SILENT_MODES:
+            return
+        await self.send(chat_id, services.sign(services.assistant.greeting_message), CLIENT_MENU)
 
     async def on_message(self, message: dict) -> None:
         sender, recipient, body = message.get("sender") or {}, message.get("recipient") or {}, message.get("body") or {}
@@ -240,13 +301,20 @@ class MaxBot:
         if recipient.get("chat_type") != "dialog":
             return  # бота добавили в групповой чат — там не отвечаем
         chat_id, text = recipient.get("chat_id"), (body.get("text") or "").strip()
+        if (message.get("link") or {}).get("type") == "forward":
+            forwarded = (message["link"].get("message") or {})
+            forwarded = forwarded.get("body") or forwarded
+            body = {**body, "text": "\n".join(filter(None, (text, forwarded.get("text")))),
+                    "attachments": [*(body.get("attachments") or []), *(forwarded.get("attachments") or [])]}
+            message = {**message, "body": body}
+            text = body["text"].strip()
         services = self.services
         manager = services.db.get_connection(f"{CONN_PREFIX}{user_id}")
         # Команды — менеджеру; клиенту только /start и /manager, остальное со слэшем — обычное сообщение
         if text.startswith("/") and (manager or text.split()[0].split("@")[0].lower() in ("/start", "/manager")):
             await self.on_command(text, sender, chat_id, manager)
             return
-        if manager:
+        if manager and manager.approved:
             await self.on_manager_message(message, manager, chat_id, text)
             return
 
@@ -255,9 +323,30 @@ class MaxBot:
             services.event("MAX: пишет клиент, но менеджер ещё не подключён (/manager в боте)")
             await self.send(chat_id, services.sign(NO_MANAGER))
             return
+        if conn.mode == D.OBSERVE and not services.privacy.allowed(conn.id, chat_id):
+            return
         client = user_name(sender)
         services.chat_names[chat_id] = client
         attachments = body.get("attachments") or []
+        if conn.mode == "off" or chat_id in services.privacy.erased:
+            return
+        if services.speech.enabled and any(a.get("type") == "audio" for a in attachments) \
+                and (conn.mode == D.OBSERVE or age_minutes(message.get("timestamp")) <= services.settings.stale_message_minutes):
+            transcript = await voice.max_text(services, body)
+            conn = voice.allowed(services, conn.id, chat_id)
+            if not conn:
+                return
+            if transcript:
+                if conn.mode == D.OBSERVE:
+                    message = {**message, "body": {**body, "text": "[Голосовое]\n" + transcript}}
+                else:
+                    result = await voice.client_draft(services, conn.id, chat_id, transcript, client)
+                    if result:
+                        dialog_id, card, has_draft = result
+                        await self.show_media(conn.owner_chat_id, body)
+                        await self.send_card(conn.owner_chat_id, card, dialog_id,
+                                             draft_buttons(dialog_id) if has_draft else None)
+                    return
         if conn.mode == D.OBSERVE:
             await self.relay(conn, chat_id, message, client)
             return
@@ -272,9 +361,15 @@ class MaxBot:
             await self.relay(conn, chat_id, message, client, "написал(а), пока бот был выключен")
             return
         paused = services.db.is_paused(conn.id, chat_id)
+        waiting = self.take_waiting(chat_id)
+        if waiting == "lead" and (find_phone(text) or re.search(r"[\w.+-]+@[\w.-]+|(?:[+\d][\d .()-]*){7,}", text)):
+            await self.take_lead(conn, chat_id, client, find_phone(text), body)
+            return
         if not text:
             kind = media_kind(body.get("attachments") or [])
-            if kind and not paused:
+            if kind == _MEDIA["image"] and time.time() - self.last_media.get(chat_id, 0) < 10:
+                await self.show_media(conn.owner_chat_id, body)
+            elif kind and not paused:
                 await self.hand_media_to_manager(conn, chat_id, kind, client, body)
             elif kind:  # следующие фото альбома: карточка уже ушла, пересылаем только сами фото
                 await self.show_media(conn.owner_chat_id, body)
@@ -282,16 +377,13 @@ class MaxBot:
         if paused:
             await self.relay(conn, chat_id, message, client, "пишет в чат на паузе — бот молчит, ответьте сами")
             return
-        waiting = self.take_waiting(chat_id)
-        if waiting == "lead" and (phone := find_phone(text)):
-            await self.take_lead(conn, chat_id, client, phone)
-            return
         if wants_human(text):
-            await self.call_human(conn, chat_id, client)
+            await self.call_human(conn, chat_id, client, text)
             return
-        if waiting == "budget" and any(c.isdigit() for c in text) and "бюджет" not in text.lower():
+        if waiting == "budget" and "бюджет" not in text.lower():
             text = f"Бюджет {text}"  # ответ на кнопку: без этого слова «50» — не бюджет
         if media_kind(body.get("attachments") or []):
+            self.last_media[chat_id] = time.time()
             # Фото с подписью: бот отвечает на подпись, а само фото менеджер иначе не увидит
             await self.show_media(conn.owner_chat_id, body)
 
@@ -299,7 +391,7 @@ class MaxBot:
         self.buffer.parts.setdefault(key, []).append((body.get("mid"), text))
         self.buffer.names[key] = client
         delay = float(services.current()["merge_seconds"])
-        if delay <= 0:
+        if delay <= 0 or self.stopping:
             await self.answer_client(conn.id, chat_id, self.buffer.take(key), self.buffer.names.pop(key, ""))
             return
         # Клиент ещё печатает: ждём паузу и отвечаем на всё разом
@@ -322,8 +414,16 @@ class MaxBot:
         key = (conn.id if conn else "", update.get("chat_id"))
         if key in self.buffer.parts:
             self.buffer.parts[key] = [(mid, t) for mid, t in self.buffer.parts[key] if mid != update.get("message_id")]
+            # Удалённое сообщение не должно вернуться из SQLite после аварии до склейки.
+            for receipt in list(self.receipts.get(key, [])):
+                if ((receipt.get("message") or {}).get("body") or {}).get("mid") == update.get("message_id"):
+                    if self.inbox:
+                        self.inbox.complete(receipt)
+                    self.receipts[key].remove(receipt)
             if not self.buffer.parts[key]:
                 self.buffer.parts.pop(key)
+                self.buffer.names.pop(key, None)
+                self.receipts.pop(key, None)
                 if (timer := self.buffer.timers.pop(key, None)) is not None:
                     timer.cancel()
 
@@ -333,13 +433,42 @@ class MaxBot:
         except asyncio.CancelledError:
             return  # пришло ещё сообщение — ответим на всё вместе позже
         self.buffer.timers.pop(key, None)
-        text, client = self.buffer.take(key), self.buffer.names.pop(key, "")
-        if not text:
-            return
         try:
-            await self.answer_client(*key, text, client)
-        except Exception:  # noqa: BLE001 — фоновая задача: ошибку только в лог
-            log.exception("MAX: не удалось ответить в чате %s", key[1])
+            await self.flush_key(key)
+        except Exception:  # noqa: BLE001 — событие уже возвращено в очередь
+            log.exception("MAX: ответ из буфера не завершён")
+
+    async def flush_key(self, key: tuple[str, int]) -> None:
+        text, client = self.buffer.take(key), self.buffer.names.pop(key, "")
+        receipts = self.receipts.pop(key, [])
+        task = asyncio.current_task()
+        self.answer_tasks.add(task)
+        try:
+            if text:
+                await self.answer_client(*key, text, client)
+            if self.inbox:
+                for update in receipts:
+                    self.inbox.complete(update)
+        except BaseException:
+            if self.inbox:
+                for update in receipts:
+                    self.seen.pop(event_key(update), None)
+                    self.inbox.retry(update)
+            raise
+        finally:
+            self.answer_tasks.discard(task)
+
+    async def flush(self) -> None:
+        timers = list(self.buffer.timers.values())
+        self.buffer.timers.clear()
+        for timer in timers:
+            timer.cancel()
+        await asyncio.gather(*timers, return_exceptions=True)
+        for key in list(self.buffer.parts):
+            await self.flush_key(key)
+        if self.answer_tasks:
+            await asyncio.gather(*self.answer_tasks)
+
 
     async def answer_client(self, connection_id: str, chat_id: int, text: str, client: str = "") -> None:
         async with self.services.chat_lock(connection_id, chat_id):
@@ -348,14 +477,23 @@ class MaxBot:
     async def _answer_client(self, connection_id: str, chat_id: int, text: str, client: str) -> None:
         services = self.services
         conn = services.db.get_connection(connection_id)
-        if not conn or not conn.enabled:
+        if not conn or not conn.enabled or not conn.approved or conn.mode == "off" or chat_id in services.privacy.erased:
+            return
+        if named_thanks(text):
+            return
+        if conn.mode == D.OBSERVE or services.db.is_paused(conn.id, chat_id) or business_operation(text):
+            await self.relay(conn, chat_id, {"body": {"text": text}}, client)
             return
         out = await process_client_message(services, conn, chat_id, text, client)
         outcome = ("бот ответил сам" if out.to_client and not out.to_manager
                    else "клиенту «Уточню и вернусь», вопрос — менеджеру" if out.to_client
                    else "черновик менеджеру" if out.with_buttons
                    else "вопрос — менеджеру" if out.to_manager else "отвечать не нужно — молчит")
-        services.event(f"MAX, {client or chat_id}: «{short(text, 60)}» — {outcome}")
+        services.event(f"MAX: {outcome}")
+        if out.to_manager and not out.dialog_id:
+            await self.relay(conn, chat_id, {"body": {"text": text}}, client, "пишет после лимита сообщений")
+            self.throttled[chat_id] = time.time()
+            return
         sent = False
         if out.greeting:
             # В Telegram менеджер видит «Здравствуйте» в своём чате, а здесь клиент остался бы в тишине
@@ -367,15 +505,16 @@ class MaxBot:
             if not sent and out.dialog_id and not out.to_manager:
                 # Автоответ не дошёл — вопрос забирает менеджер
                 services.db.set_dialog_status(out.dialog_id, D.ESCALATED)
-                await self.send(conn.owner_chat_id, f"Не получилось отправить ответ клиенту {client} через MAX.\n\n"
-                                                    f"Вопрос клиента:\n«{text}»")
+                await self.send_card(conn.owner_chat_id, f"Не получилось отправить ответ клиенту {client} через MAX.\n\n"
+                                                        f"Вопрос клиента:\n«{text}»", out.dialog_id)
         if out.notice and sent:
-            await self.send(conn.owner_chat_id, out.notice)
+            await self.send_card(conn.owner_chat_id, out.notice.replace(cut(text), text), out.dialog_id)
             self.waiting[chat_id] = ("lead", time.time())  # клиент готов к заказу — самое время попросить контакт
             await self.send(chat_id, services.sign(LEAD_ASK), ASK_CONTACT)
         if out.to_manager:
             card = out.to_manager if sent or not out.to_client else out.to_manager.replace(HOLDING_SENT, HOLDING_NOT_SENT)
-            await self.send(conn.owner_chat_id, for_max(card), draft_buttons(out.dialog_id) if out.with_buttons else None)
+            await self.send_card(conn.owner_chat_id, _CARD_ID_RE.sub("", for_max(card)).replace(cut(text), text), out.dialog_id,
+                                 draft_buttons(out.dialog_id) if out.with_buttons else None)
 
     def take_waiting(self, chat_id: int) -> str:
         kind, since = self.waiting.pop(chat_id, ("", 0.0))
@@ -394,17 +533,22 @@ class MaxBot:
         """Заявка: готовая карточка менеджеру. Телефон — только в карточке, в журнал не пишем."""
         services = self.services
         known = self.what_is_known(conn, chat_id)
-        dialog_id = services.db.log_dialog(
-            connection_id=conn.id, chat_id=chat_id, question="[заявка]", answer="", decision="escalate", reason="lead",
+        details = (body or {}).get("text") or ""
+        previous = services.db.conn.execute(
+            "SELECT id FROM dialogs WHERE connection_id=? AND chat_id=? AND reason='lead' AND status=? AND created_at>? "
+            "ORDER BY id DESC LIMIT 1", (conn.id, chat_id, D.ESCALATED, time.time() - WAITING_SECONDS)).fetchone()
+        dialog_id = previous[0] if previous else services.db.log_dialog(
+            connection_id=conn.id, chat_id=chat_id, question="[заявка]" + ("\n" + details if details else ""),
+            answer="", decision="escalate", reason="lead",
             confidence=0.0, status=D.ESCALATED, sources=[], latency_ms=0, mode=conn.mode, kb_version=services.kb_version)
         services.event("MAX: клиент оставил заявку")
-        if body and not phone:  # телефон не разобрали — пусть менеджер увидит сам контакт
+        if body and not phone and has_contact(body.get("attachments") or []):  # не разобрали vCard
             await self.show_media(conn.owner_chat_id, body)
         contact = f"Телефон: {phone}\n" if phone else ""
-        sent = await self.send(conn.owner_chat_id, f"Заявка: {client}\n{contact}{known}\nВопрос #{dialog_id}. {_RELAY_HINT}")
+        sent = await self.send_card(conn.owner_chat_id, f"Заявка: {client}\n{contact}{details}\n{known}", dialog_id)
         await self.send(chat_id, services.sign(LEAD_DONE if sent else NOT_DELIVERED))
 
-    async def call_human(self, conn: D.Connection, chat_id: int, client: str) -> None:
+    async def call_human(self, conn: D.Connection, chat_id: int, client: str, text: str = "") -> None:
         """Клиент просит человека. В автоответе бот замолкает, чтобы не перебивать менеджера."""
         services = self.services
         if time.time() - self.called.get(chat_id, 0.0) < HUMAN_REPEAT_SECONDS:
@@ -412,11 +556,11 @@ class MaxBot:
             return
         known = self.what_is_known(conn, chat_id)
         dialog_id = services.db.log_dialog(
-            connection_id=conn.id, chat_id=chat_id, question="[просит менеджера]", answer="", decision="escalate",
+            connection_id=conn.id, chat_id=chat_id, question=text or "[просит менеджера]", answer="", decision="escalate",
             reason="human", confidence=0.0, status=D.ESCALATED, sources=[], latency_ms=0, mode=conn.mode,
             kb_version=services.kb_version)
         services.event("MAX: клиент попросил менеджера")
-        sent = await self.send(conn.owner_chat_id, f"{client} просит менеджера.\n{known}\nВопрос #{dialog_id}. {_RELAY_HINT}")
+        sent = await self.send_card(conn.owner_chat_id, f"{client} просит менеджера.\n{text}\n{known}", dialog_id)
         if sent:
             self.called[chat_id] = time.time()
             if conn.mode == "auto":
@@ -428,7 +572,8 @@ class MaxBot:
         services = self.services
         chat_id = (message.get("recipient") or {}).get("chat_id")
         conn = active_connection(services)
-        if not chat_id or services.db.get_connection(f"{CONN_PREFIX}{user.get('user_id')}"):
+        manager = services.db.get_connection(f"{CONN_PREFIX}{user.get('user_id')}")
+        if not chat_id or (manager and manager.approved):
             await self.answer(callback_id, "Это кнопка для клиентов.")
             return
         if not conn:
@@ -444,6 +589,8 @@ class MaxBot:
             reply = await services.answer("Хочу рекламу", [])  # именно эта фраза даёт каталог шаблоном, без модели
             await self.send(chat_id, services.sign(reply.text if reply.reason == R_CATALOG else services.assistant.greeting_message),
                             AFTER_ANSWER)
+        elif choice == "budget" and services.db.is_paused(conn.id, chat_id):
+            await self.answer(callback_id, "В чате отвечает менеджер. Напишите ему бюджет сообщением.")
         elif choice == "budget":
             self.waiting[chat_id] = ("budget", time.time())
             await self.answer(callback_id, "Жду бюджет")
@@ -469,6 +616,8 @@ class MaxBot:
         shown = text or f"[{kind}]"
         sent_at = (message.get("timestamp") or time.time() * 1000) / 1000
         if conn.mode == D.OBSERVE:
+            if not services.privacy.allowed(conn.id, chat_id):
+                return
             # Как наблюдение в Telegram: журнал переписки, файл, замер времени ответа менеджера
             services.db.observe_message(connection_id=conn.id, chat_id=chat_id, message_id=message_seq(message),
                                         role="client", text=shown, sent_at=sent_at)
@@ -481,12 +630,14 @@ class MaxBot:
                 reason="relayed", confidence=0.0, status=D.ESCALATED, sources=[], latency_ms=0, mode=conn.mode,
                 kb_version=services.kb_version)
             services.event(f"MAX: клиент {why} — переслано менеджеру")
+        if time.time() - self.throttled.get(chat_id, 0) < 60:
+            return  # текст сохранён в Диалогах; защита от спама не должна спамить менеджеру
         if kind:
             await self.show_media(conn.owner_chat_id, body)
         head = f"{client} {why}" if why else client
         phone = contact_phone(body.get("attachments") or [])
-        quote = f"«{short(text, 1500)}»" if text else f"прислал(а) {kind}" + (f": {phone}" if phone else "")
-        await self.send(conn.owner_chat_id, f"{head}:\n{quote}\n\nВопрос #{dialog_id}. {_RELAY_HINT}")
+        quote = f"«{text}»" if text else f"прислал(а) {kind}" + (f": {phone}" if phone else "")
+        await self.send_card(conn.owner_chat_id, f"{head}:\n{quote}", dialog_id)
 
     async def hand_media_to_manager(self, conn: D.Connection, chat_id: int, kind: str, client: str,
                                     body: dict | None = None) -> None:
@@ -502,13 +653,12 @@ class MaxBot:
             decision="escalate", reason="media", confidence=0.0, status=D.ESCALATED, sources=[], latency_ms=0,
             mode=conn.mode, kb_version=services.kb_version)
         sent = auto and await self.send(chat_id, services.sign(holding))
-        services.event(f"MAX, {client}: {kind} — бот такие не разбирает, передал менеджеру")
+        services.event(f"MAX: {kind} — передал менеджеру")
         if body:
             await self.show_media(conn.owner_chat_id, body)
-        await self.send(conn.owner_chat_id,
-                        f"{client} прислал(а) {kind} — бот такие не разбирает.\n"
-                        f"{HOLDING_SENT + ' ' if sent else ''}"
-                        f"Вопрос #{dialog_id}. {_MAX_CARD_HINT} — бот перешлёт его клиенту.")
+        await self.send_card(conn.owner_chat_id,
+                             f"{client} прислал(а) {kind} — бот такие не разбирает.\n"
+                             f"{HOLDING_SENT if sent else ''}", dialog_id)
 
     # --- менеджер ---
     async def on_command(self, text: str, sender: dict, chat_id: int, manager: D.Connection | None) -> None:
@@ -549,17 +699,23 @@ class MaxBot:
 
     async def register_manager(self, sender: dict, chat_id: int) -> None:
         services, user_id = self.services, sender["user_id"]
+        previous = services.db.get_connection(f"{CONN_PREFIX}{user_id}")
         conn = services.db.upsert_connection(f"{CONN_PREFIX}{user_id}", user_id, chat_id, True, True,
                                              services.settings.default_mode)
+        if previous is None:
+            # Публичный бот: даже первый /manager должен подтвердить владелец админки.
+            with services.db.conn:
+                services.db.conn.execute("UPDATE connections SET approved=0 WHERE id=?", (conn.id,))
+            conn = services.db.get_connection(conn.id)
         services.owner_names[user_id] = f"MAX: {user_name(sender)}"
         if not conn.approved:
             # Бот публичный: /manager может написать любой. Чужие ждут разрешения, иначе тратили бы нашу модель
-            services.event(f"MAX: {user_name(sender)} (id {user_id}) просит доступ менеджера — "
+            services.event("MAX: новый запрос доступа менеджера — "
                            "ждёт разрешения: Обзор → Подключения")
             await self.send(chat_id, "Запрос отправлен администратору. Когда он разрешит доступ, "
                                      "сюда начнут приходить вопросы клиентов.")
             return
-        services.event(f"MAX: менеджер {user_name(sender)} подключён, режим: {mode_name(conn.mode)}")
+        services.event(f"MAX: менеджер подключён, режим: {mode_name(conn.mode)}")
         await self.send(chat_id, f"Готово: сюда будут приходить вопросы клиентов и черновики. "
                                  f"Режим: {mode_name(conn.mode)}.\n\n{HELP}")
 
@@ -573,43 +729,77 @@ class MaxBot:
             await self.send(chat_id, HELP)
             return
         # Номер карточки — последний: в тексте вопроса клиента тоже может встретиться «Вопрос #5»
-        ids = _DRAFT_ID_RE.findall(((link.get("message") or {}).get("text")) or "")
+        ids = _CARD_ID_RE.findall(((link.get("message") or {}).get("text")) or "")
         if not ids:
             await self.send(chat_id, HELP)
             return
         services = self.services
         dialog = services.db.get_dialog(int(ids[-1]))
         if dialog and dialog["status"] == D.WATCH and dialog["connection_id"] == manager.id:
-            await self.reply_observed(manager, chat_id, dialog, text, files)
+            sent = await self.reply_observed(manager, chat_id, dialog, text, files)
+            if sent:
+                self.learn_voice(manager, chat_id, dialog, message)
             return
-        if not dialog or dialog["status"] not in (D.DRAFT_PENDING, D.ESCALATED):
+        if dialog and dialog["id"] in services.sending_dialogs:
+            await self.send(chat_id, "Ответ на эту карточку ещё отправляется. Дождитесь подтверждения.")
+            return
+        if not dialog or dialog["status"] not in (D.DRAFT_PENDING, D.ESCALATED, D.DRAFT_EDITED, D.DRAFT_SENT, D.SENT_AUTO):
             await self.send(chat_id, "Этот черновик уже обработан.")
             return
         if dialog["connection_id"] != manager.id:
+            await self.send(chat_id, "Это карточка другого менеджера.")
             return
-        if not services.db.claim_dialog(dialog["id"], D.DRAFT_EDITED, answer=text or "[файл]"):
-            await self.send(chat_id, "Этот черновик уже обработан.")
+        async with services.chat_lock(manager.id, dialog["chat_id"]):
+            sent = await self.reply_to_dialog(manager, chat_id, dialog, text, files)
+        if sent:
+            self.learn_voice(manager, chat_id, dialog, message)
+
+    def learn_voice(self, manager, chat_id, dialog, message):
+        if self.services.speech.enabled and any(a.get("type") == "audio"
+                                               for a in (message.get("body") or {}).get("attachments") or []):
+            self.services.in_background(voice.manager_learning(
+                self.services, manager.id, dialog["chat_id"], dialog["id"], dialog["question"],
+                message.get("body") or {}, lambda text: self.send(chat_id, text)))
+
+    async def reply_to_dialog(self, manager, chat_id, dialog, text, files) -> bool | None:
+        services = self.services
+        dialog = services.db.get_dialog(dialog["id"])
+        if not dialog:
             return
-        if await self.send(dialog["chat_id"], text, files=files):
+        services.sending_dialogs.add(dialog["id"])
+        try:
+            sent = await self.send(dialog["chat_id"], text, files=files)
+        finally:
+            services.sending_dialogs.discard(dialog["id"])
+        if sent:
+            previous = dialog["answer"] if dialog["status"] == D.DRAFT_EDITED else ""
+            services.db.set_dialog_status(dialog["id"], D.DRAFT_EDITED,
+                                         answer="\n".join(filter(None, (previous, text or "[файл]"))))
             if manager.mode == "auto":
                 # Менеджер взял разговор на себя: бот не перебивает, следующие сообщения идут ему (снять: /resume)
                 services.db.pause_chat(manager.id, dialog["chat_id"], services.settings.manager_pause_minutes)
             await self.send(chat_id, "Ваш вариант отправлен клиенту.")
             if text:
-                await collect_quietly(services, "card", manager.id, dialog["chat_id"], dialog["id"], dialog["question"], text)
+                services.in_background(collect_quietly(
+                    services, "card", manager.id, dialog["chat_id"], dialog["id"], dialog["question"], text))
         else:
             services.db.set_dialog_status(dialog["id"], dialog["status"], answer=dialog["answer"])
-            await self.send(chat_id, "Не отправлено: нет связи с MAX. Попробуйте ещё раз.")
+            await self.send(chat_id, self.last_send_error.get(dialog["chat_id"], "Не отправлено. Попробуйте ещё раз."))
+
+        return sent
 
     async def reply_observed(self, manager: D.Connection, chat_id: int, dialog, text: str,
-                             files: list[dict] | None = None) -> None:
+                             files: list[dict] | None = None) -> bool | None:
         """Наблюдение: ответ менеджера на пересланный вопрос уходит клиенту; бот замеряет, через сколько
         менеджер ответил, и собирает из ответа предложения в базу знаний. На одну карточку можно ответить
         несколькими сообщениями — они допишутся к ответу."""
         services, client_chat = self.services, dialog["chat_id"]
         sent = await self.send_message(client_chat, text, files=files)
         if sent is None:
-            await self.send(chat_id, "Не отправлено: нет связи с MAX. Попробуйте ещё раз.")
+            await self.send(chat_id, self.last_send_error.get(dialog["chat_id"], "Не отправлено. Попробуйте ещё раз."))
+            return
+        if not services.privacy.allowed(manager.id, client_chat):
+            await self.send(chat_id, "Отправлено клиенту. Наблюдение для этого чата запрещено, ответ не записан.")
             return
         now = (sent.get("timestamp") or time.time() * 1000) / 1000
         shown = text or "[файл]"
@@ -623,7 +813,13 @@ class MaxBot:
         await self.send(chat_id, "Отправлено клиенту.")
         # Ответ на старую карточку после нового вопроса нельзя сопоставить по порядку сообщений
         if text and new and latest and latest["id"] == dialog["id"]:
-            await collect_observed(services, manager.id, client_chat, message_seq(sent))
+            services.in_background(self.collect_observed_locked(manager.id, client_chat, message_seq(sent)))
+
+        return True
+
+    async def collect_observed_locked(self, connection_id: str, chat_id: int, message_id: int) -> None:
+        async with self.services.chat_lock(connection_id, chat_id):
+            await collect_observed(self.services, connection_id, chat_id, message_id)
 
     async def on_callback(self, callback: dict, message: dict) -> None:
         payload, callback_id = callback.get("payload") or "", callback.get("callback_id") or ""
@@ -658,7 +854,11 @@ class MaxBot:
             claimed = services.db.claim_dialog(dialog["id"], D.DRAFT_SENT)
             note = ""
             if claimed:
-                ok = await self.send(dialog["chat_id"], services.sign(dialog["answer"]), AFTER_ANSWER)
+                services.sending_dialogs.add(dialog["id"])
+                try:
+                    ok = await self.send(dialog["chat_id"], services.sign(dialog["answer"]), AFTER_ANSWER)
+                finally:
+                    services.sending_dialogs.discard(dialog["id"])
                 note = "Отправлено клиенту." if ok else "Не отправлено: нет связи с MAX. Попробуйте ещё раз."
                 if not ok:  # вернуть черновик: менеджер сможет нажать ещё раз
                     services.db.set_dialog_status(dialog["id"], dialog["status"])
@@ -667,8 +867,9 @@ class MaxBot:
             return
         card = ((message.get("body") or {}).get("text")) or ""
         # Кнопки убираем, только если всё получилось; при сбое оставляем, чтобы нажать ещё раз
-        await self.answer(callback_id, note, text=f"{card}\n\n{note}" if card else None,
-                          buttons=None if ok else draft_buttons(dialog["id"]))
+        footer = f"\n\n{note}\n\nВопрос #{dialog['id']}. {_RELAY_HINT}"
+        updated = _CARD_ID_RE.sub('', card).rstrip()[:3999 - len(footer)] + footer if card else None
+        await self.answer(callback_id, note, text=updated, buttons=None if ok else draft_buttons(dialog["id"]))
 
     async def on_candidate(self, callback_id: str, user_id: int, rest: str) -> None:
         """Предложение в базу знаний из вечерней сводки: ✓ утвердить, ✗ отклонить."""
@@ -752,10 +953,14 @@ async def run_max(api: MaxApi, services: Services) -> None:
     log.info("Бот MAX %s запущен", me.get("username") or me.get("first_name") or me.get("user_id"))
     summary = asyncio.create_task(summary_loop(bot))
     marker, delay = None, 5
+    polling_worker = None
     try:
         if services.settings.max_webhook_url:
             await run_webhook(api, bot, services, ready)
             return
+        services.max_inbox.accepting = True
+        polling_worker = asyncio.create_task(handle_queue(bot, services.max_inbox))
+        services.max_worker = polling_worker
         # Вебхук отключили в настройках: пока подписка жива, MAX не отдаёт события опросом
         with contextlib.suppress(MaxError, httpx.HTTPError):
             for hook in await api.subscriptions():
@@ -782,14 +987,34 @@ async def run_max(api: MaxApi, services: Services) -> None:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 60)
                 continue
-            marker = data.get("marker", marker)
+            if polling_worker.done():
+                await polling_worker
+                raise RuntimeError("Обработчик MAX остановлен")
             for update in data.get("updates") or []:
-                try:
-                    await bot.handle(update)
-                except Exception:  # noqa: BLE001 — одно сломанное событие не должно останавливать бота
-                    log.exception("MAX: не удалось обработать событие %s", update.get("update_type"))
+                if not services.max_observation_allowed(update):
+                    continue
+                while services.max_inbox.full():
+                    await asyncio.sleep(.1)
+                services.max_inbox.put_nowait(update)
+            marker = data.get("marker", marker)
+            await asyncio.sleep(0)
     finally:
         summary.cancel()
+        await asyncio.gather(summary, return_exceptions=True)
+        if polling_worker:
+            services.max_inbox.accepting = False
+            bot.stopping = True
+            try:
+                await asyncio.wait_for(drain(bot, services.max_inbox, polling_worker), timeout=40)
+            except Exception:  # noqa: BLE001
+                log.warning("MAX: необработанные события опроса оставлены в SQLite")
+            finally:
+                polling_worker.cancel()
+                pending = [*bot.buffer.timers.values(), *bot.answer_tasks]
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(polling_worker, *pending, return_exceptions=True)
+        services.max_status = {**(services.max_status or {}), "ok": False, "error": "MAX остановлен"}
 
 
 async def run_webhook(api: MaxApi, bot: MaxBot, services: Services, ready: dict) -> None:
@@ -801,8 +1026,10 @@ async def run_webhook(api: MaxApi, bot: MaxBot, services: Services, ready: dict)
         services.max_status = {"ok": False, "error": "для вебхука нужны MAX_WEBHOOK_URL с https:// и MAX_WEBHOOK_SECRET"}
         log.error(services.max_status["error"])
         return
-    services.max_updates = asyncio.Queue(maxsize=1000)
-    worker = asyncio.create_task(handle_queue(bot, services.max_updates))
+    services.max_updates = services.max_inbox
+    services.max_inbox.accepting = True
+    worker = asyncio.create_task(handle_queue(bot, services.max_inbox))
+    services.max_worker = worker
     try:
         while True:
             try:
@@ -824,19 +1051,103 @@ async def run_webhook(api: MaxApi, bot: MaxBot, services: Services, ready: dict)
             except httpx.HTTPError as exc:
                 services.max_status = {"ok": False, "error": f"нет связи с MAX ({type(exc).__name__}) — пробую снова"}
                 log.warning("MAX: %s", services.max_status["error"])
+            if worker.done():
+                await worker
+                raise RuntimeError("Обработчик MAX остановлен")
             await asyncio.sleep(SUBSCRIPTION_CHECK_SECONDS if services.max_status["ok"] else 30)
     finally:
         services.max_updates = None
-        worker.cancel()
+        services.max_inbox.accepting = False
+        bot.stopping = True
+        try:
+            await asyncio.wait_for(drain(bot, services.max_inbox, worker), timeout=40)
+        except Exception:  # noqa: BLE001 — очередь остаётся на диске
+            log.warning("MAX: необработанные события оставлены в SQLite до следующего запуска")
+        finally:
+            worker.cancel()
+            pending = [*bot.buffer.timers.values(), *bot.answer_tasks]
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(worker, *pending, return_exceptions=True)
+            services.max_status = {**(services.max_status or {}), "ok": False, "error": "MAX остановлен"}
 
 
-async def handle_queue(bot: MaxBot, queue: asyncio.Queue) -> None:
+async def drain(bot: MaxBot, queue: MaxInbox, worker: asyncio.Task) -> None:
+    if worker.done():
+        await worker
+        return
+    # Сначала закрываем уже накопленный буфер, новые сообщения при остановке обрабатываются сразу.
+    await bot.flush()
+    await queue.join()
+    await bot.flush()
+
+
+async def handle_queue(bot: MaxBot, queue: asyncio.Queue | MaxInbox) -> None:
+    durable = isinstance(queue, MaxInbox)
+    if durable:
+        bot.inbox = queue
     while True:
         update = await queue.get()
+        if not durable:
+            await handle_update(bot, queue, update)
+            continue
         try:
-            await bot.handle(update)
-        except Exception:  # noqa: BLE001 — одно сломанное событие не должно останавливать бота
-            log.exception("MAX: не удалось обработать событие %s", update.get("update_type"))
+            message = update.get("message") or {}
+            chat_id = (message.get("recipient") or {}).get("chat_id")
+            audio = any(a.get("type") == "audio" for a in (message.get("body") or {}).get("attachments") or [])
+            previous = bot.voice_tasks.get(chat_id)
+        except (AttributeError, TypeError):
+            await handle_update(bot, queue, update)
+            continue
+        if durable and chat_id is not None and (previous or (audio and bot.services.speech.enabled)):
+            task = asyncio.create_task(handle_voice_update(bot, queue, update, previous, chat_id))
+            bot.voice_tasks[chat_id] = task
+            bot.answer_tasks.add(task)
+        else:
+            await handle_update(bot, queue, update)
+
+
+async def handle_voice_update(bot, queue, update, previous, chat_id):
+    try:
+        if previous:
+            await asyncio.shield(previous)
+        async with bot.voice_gate:
+            await handle_update(bot, queue, update)
+    finally:
+        task = asyncio.current_task()
+        bot.answer_tasks.discard(task)
+        if bot.voice_tasks.get(chat_id) is task:
+            bot.voice_tasks.pop(chat_id, None)
+        if event_key(update) in queue.active:
+            queue.retry(update)
+
+
+async def handle_update(bot, queue, update):
+    durable = isinstance(queue, MaxInbox)
+    try:
+        await bot.handle(update)
+        message = update.get("message") or {}
+        mid = (message.get("body") or {}).get("mid")
+        key = next((key for key, parts in bot.buffer.parts.items()
+                    if any(part[0] == mid for part in parts)), None) if mid else None
+        if durable:
+            if key:
+                bot.receipts.setdefault(key, []).append(update)
+            else:
+                queue.complete(update)
+    except asyncio.CancelledError:
+        if durable:
+            bot.seen.pop(event_key(update), None)
+            queue.retry(update)
+        raise
+    except Exception:  # noqa: BLE001 — повтор остаётся в SQLite, ошибку не выдаём клиенту
+        log.exception("MAX: не удалось обработать событие %s", update.get("update_type"))
+        if durable:
+            bot.seen.pop(event_key(update), None)
+            queue.retry(update)
+    finally:
+        if not durable:
+            queue.task_done()
 
 
 async def summary_loop(bot: MaxBot) -> None:

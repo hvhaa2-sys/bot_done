@@ -14,8 +14,12 @@ from pathlib import Path
 from dataclasses import dataclass, replace
 from zoneinfo import ZoneInfo
 
+from .max_inbox import MaxInbox
+from .privacy import ChatPrivacy
+from .speech import SpeechRecognizer
 from .config import ROOT, Settings
-from .core.assistant import GREETING_MESSAGE, HOLDING_MESSAGE, Assistant
+from .core.assistant import GREETING_MESSAGE, HOLDING_MESSAGE
+from .core.real_flow import BusinessAssistant as Assistant
 from .core import candidates, versions
 from .core.candidate_review import NOTE_PREFIX, review_candidate
 from .core.knowledge import KnowledgeBase, format_rub
@@ -146,6 +150,7 @@ def apply(settings: Settings, values: dict[str, str]) -> Settings:
 
 class Services:
     def __init__(self, settings: Settings, llm: LLMProvider | None = None):
+        self.speech = SpeechRecognizer(settings.speech_enabled, settings.speech_python)
         self.base_settings = settings
         self.db = Database(settings.db_path)
         self.overrides = self._load_overrides()
@@ -162,7 +167,10 @@ class Services:
         self.assistant = self._make_assistant()
         # Заполняется при запуске бота: {ok, username, business} или {ok: False, error}
         self.bot_status: dict | None = None
-        self.max_updates: asyncio.Queue | None = None  # очередь вебхука MAX: админка кладёт, run_max разбирает
+        self.max_inbox = MaxInbox(self.db.conn)
+        self.privacy = ChatPrivacy(self.db.conn)
+        self.max_updates: MaxInbox | None = None
+        self.max_worker: asyncio.Task | None = None
         self.max_status: dict | None = None  # то же для MAX: {ok, username, name} или {ok: False, error}
         self._chat_locks: dict[tuple[str, int], asyncio.Lock] = {}
         # Лента «что делает бот» для админки и имена чатов (только в памяти, в базу не пишутся)
@@ -172,9 +180,22 @@ class Services:
         # Отправка клиенту из админки: канал при запуске кладёт сюда свою функцию (conn_id, chat_id, text) → bool:
         # «telegram» — __main__, «max» — run_max. Без неё ответить с сайта нельзя — админка так и скажет
         self.client_senders: dict = {}
+        self.sending_dialogs: set[int] = set()
         self._background: set[asyncio.Task] = set()
         if self.draft_changed():  # заметки правили в Obsidian или файлы заменили, пока бот был выключен
             logging.getLogger(__name__).info(self.kb_changed("Правка файлов базы вне админки"))
+
+    def max_observation_allowed(self, update: dict) -> bool:
+        message = update.get("message") or {}
+        if update.get("update_type") not in ("message_created", "message_edited"):
+            return True
+        sender = message.get("sender") or {}
+        manager = self.db.get_connection(f"max:{sender.get('user_id')}")
+        if manager and manager.approved:
+            return True
+        conn = next((c for c in self.db.connections() if c.id.startswith("max:") and c.approved and c.enabled), None)
+        chat_id = (message.get("recipient") or {}).get("chat_id")
+        return not conn or conn.mode != D.OBSERVE or (chat_id is not None and self.privacy.allowed(conn.id, chat_id))
 
     def in_background(self, coro) -> None:
         """Долгая работа после ответа админки (кандидаты в базу из ответа менеджера): сбой — только в лог."""
@@ -231,6 +252,11 @@ class Services:
 
     def event(self, text: str) -> None:
         """Записать решение бота: видно в админке на «Обзоре» и в логе."""
+        text = mask_pd(text)
+        for name in sorted({*self.chat_names.values(), *self.owner_names.values()}, key=len, reverse=True):
+            if name:
+                text = text.replace(name, "[собеседник]")
+        text = re.sub(r"«[^»]*»", "[текст скрыт]", text)
         self.events.append((self.local_now().strftime("%H:%M:%S"), text))
         logging.getLogger("app.bot").info(text)
 
@@ -256,12 +282,18 @@ class Services:
                                  observation_id: int | None = None, source_message_ids: tuple[int, ...] = ()) -> int:
         """Ответ менеджера клиенту → кандидаты в базу знаний. До утверждения бот их не видит.
         Возвращает, сколько кандидатов добавлено."""
+        if chat_id in self.privacy.erased:
+            return 0
+        if source == "observe" and not self.privacy.allowed(connection_id, chat_id):
+            return 0
         if self.llm_limit_reached():  # дневной лимит модели — сохраняем пару как есть, менеджер разберёт
             facts, tokens = candidates.raw_facts(client_question, manager_text), 0
         else:
             facts, tokens = await candidates.extract(self.llm, client_question, manager_text)
         if tokens:
             self.db.add_usage(self.local_now().strftime("%Y-%m-%d"), tokens)
+        if chat_id in self.privacy.erased or (source == "observe" and not self.privacy.allowed(connection_id, chat_id)):
+            return 0
         for fact in facts:
             notes = [candidates.review_note(self.kb, fact.question, fact.answer),
                      *(NOTE_PREFIX + warning for warning in
@@ -299,6 +331,9 @@ class Services:
             sums = ", ".join(format_rub(a) for a in bad)
             return False, (f"В ответе сумма {sums}, которой нет в прайсе: бот не сможет её назвать. "
                            "Добавьте позицию в прайс («База знаний») или уберите сумму из ответа.")
+        if conflict := candidates.price_conflict(draft, question, answer):
+            return False, (f"{conflict}. Клиентам бот называет цены только из прайса: исправьте прайс («База знаний») "
+                           "или уберите сумму из ответа.")
         if warnings := self.candidate_warnings(rows, question, answer):
             if not source_reviewed:
                 return False, ("Нужна сверка с исходным ответом. " + " ".join(warnings) +

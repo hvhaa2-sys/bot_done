@@ -1608,3 +1608,155 @@ def test_works_in_production_row_are_not_unfounded_inclusion():
     assert unsupported_inclusions("Борта — 1 500 000 ₽, производство — 318 720 ₽. Включены печать и монтаж.", known)
     # Услуга, которой нет в строке работ
     assert unsupported_inclusions("Производство — 318 720 ₽. Включён дизайн.", known) == ["дизайн"]
+
+
+# --- итог и оформление сделки в ответе бота ---
+_FOOD_COURT = PriceRow("Цифровой экран", "ВЕЕР Молл, Екатеринбург — фуд-корт", "1 месяц", 42000,
+                       "с НДС 5%; ролик 10 сек, 144 выхода в день; в ноябре–декабре 50 400 ₽ в месяц")
+_FOOD_COURT_CONTEXT = "Цифровой экран, ВЕЕР Молл — фуд-корт: 42 000 ₽ за месяц, в ноябре–декабре 50 400 ₽ в месяц."
+_INCIDENT = ("Отлично! Вы выбрали размещение на экране на фуд-корте в ВЕЕР Молл на 1 месяц. "
+             "Общая сумма к оплате составит 42 000 ₽.")
+
+
+def test_order_summary_from_live_chat_goes_to_manager():
+    # Живой случай: клиенту ушло «сумма к оплате 42 000 ₽», а размещение придётся на цену 50 400 ₽
+    kb = KnowledgeBase.load(ROOT / "data" / "kb")
+    llm = FakeLLM(_INCIDENT)
+    r = run(Assistant(kb, llm, min_score=0).answer("ок берём на месяц", [
+        ("сколько экран на фуд-корте в веере?", "Экран на фуд-корте ВЕЕР Молл — 42 000 ₽ за месяц, в ноябре–декабре 50 400 ₽.")]))
+    assert (r.decision, r.reason) == (ESCALATE, "order_talk")
+    assert len(llm.calls) == 1  # без повтора: решает менеджер
+
+
+@pytest.mark.parametrize("phrase", [
+    "Итого к оплате 42 000 ₽.", "К оплате: 42 000 ₽.", "Сумма к оплате — 42 000 ₽, верно?",
+    "Вы выбрали экран за 42 000 ₽.", "Вы уже выбрали экран за 42 000 ₽.", "Вы заказали экран за 42 000 ₽.",
+    "Оформил размещение за 42 000 ₽.", "Оформила заявку на 42 000 ₽.", "Оформили за 42 000 ₽.", "Оформляю за 42 000 ₽.",
+    "Оформим за 42 000 ₽.", "Заказ принят, 42 000 ₽.", "Ваш заказ оформлен: 42 000 ₽.", "Заявка принята, 42 000 ₽.",
+    "Бронь подтверждена, 42 000 ₽.", "Приняли ваш заказ на 42 000 ₽.", "Выставим счёт на 42 000 ₽.",
+    "Счёт на оплату 42 000 ₽.", "Сумма подлежит оплате: 42 000 ₽.", "ВЫ ВЫБРАЛИ экран за 42 000 ₽.",
+    "Для завершения бронирования 42 000 ₽.", "Для бронирования нужно 42 000 ₽.", "Мы зафиксируем место за 42 000 ₽.",
+])
+def test_order_phrase_with_the_only_price_goes_to_manager(phrase):
+    from app.core.assistant import drop_order_talk
+    assert drop_order_talk(phrase, _FOOD_COURT_CONTEXT) == (phrase, True)
+
+
+@pytest.mark.parametrize("phrase", [
+    "Вы выбрали хороший вариант.", "Заказ принят.", "Оформила заявку.", "Сумма к оплате такая же.",
+    "Хотите оформить заказ?", "Для оформления заявки нужны даты.",
+])
+def test_order_phrase_is_cut_when_real_answer_remains(phrase):
+    from app.core.assistant import drop_order_talk
+    answer = "Экран на фуд-корте ВЕЕР Молл — 42 000 ₽ за месяц, в ноябре–декабре 50 400 ₽ в месяц."
+    assert drop_order_talk(f"{answer} {phrase}", _FOOD_COURT_CONTEXT) == (answer, False)
+    assert drop_order_talk(f"{phrase} {answer}", _FOOD_COURT_CONTEXT) == (answer, False)
+
+
+def test_cut_answer_still_gets_season_price():
+    # После вырезания итога остаётся обычная цена, и сезонную дописывает код
+    kb = KnowledgeBase([], [_FOOD_COURT], [])
+    text = "Экран на фуд-корте в ВЕЕР Молл — 42 000 ₽ за месяц. Вы выбрали хороший вариант."
+    r = run(Assistant(kb, FakeLLM(text), min_score=0).answer("экран на фуд-корте в веере ок берём на месяц"))
+    assert r.decision == ANSWER and r.reason == ""
+    assert "выбрали" not in r.text and "42 000 ₽" in r.text and "50 400 ₽" in r.text
+
+
+@pytest.mark.parametrize("text", [
+    "Отлично! Вы выбрали экран.",                                 # «Отлично!» — не ответ
+    "Отлично! Хотите начать показ с ноября или с декабря? Заказ принят.",  # остался только вопрос
+    "Баннер — 25 000 ₽ в месяц, это хороший выбор. Вы выбрали экран за 42 000 ₽ в месяц.",  # цена из базы ушла бы с фразой
+])
+def test_order_phrase_without_real_answer_left_goes_to_manager(text):
+    from app.core.assistant import drop_order_talk
+    assert drop_order_talk(text, "Баннер 25 000 ₽. Экран 42 000 ₽.") == (text, True)
+
+
+def test_booking_talk_with_question_only_goes_to_manager():
+    # Живой прогон Pro: без фразы остаются «Отлично!» и вопрос, а клиент решил бы, что бронь уже идёт
+    kb = KnowledgeBase([], [_FOOD_COURT], [])
+    text = ("Отлично! Для завершения бронирования мне понадобится уточнить некоторые детали. "
+            "Вы планируете размещение в обычный месяц или в период с ноября по декабрь?")
+    r = run(Assistant(kb, FakeLLM(text), min_score=0).answer("экран на фуд-корте в веере ок берём на месяц"))
+    assert (r.decision, r.reason) == (ESCALATE, "order_talk")
+
+
+def test_made_up_total_is_cut_with_its_phrase():
+    from app.core.assistant import drop_order_talk
+    text = "Экран на фуд-корте ВЕЕР Молл — 42 000 ₽ за месяц. Итого к оплате за три месяца 126 000 ₽."
+    assert drop_order_talk(text, _FOOD_COURT_CONTEXT) == ("Экран на фуд-корте ВЕЕР Молл — 42 000 ₽ за месяц.", False)
+
+
+@pytest.mark.parametrize("text", [
+    "Экран на фуд-корте в ВЕЕР Молл стоит 42 000 ₽ за месяц, в ноябре–декабре 50 400 ₽.",
+    "Стоимость размещения составит 42 000 ₽ в месяц.",
+    "Цена на месяц — 42 000 ₽, с НДС 5%. Подскажите, какой срок вас интересует?",
+    "Оформление зоны, промо-персонал и уборку обеспечивает заказчик.",
+    "Основание ёлки — 43 000 ₽, оформление ёлки 100 украшениями заказчика — 85 000 ₽.",
+    "Оформление заказчик делает сам, стоимость места 42 000 ₽ за месяц.",
+    "Каждое размещение согласует управляющая компания ТРЦ, заявку подаёт наш менеджер.",
+    "Для заявки нужны период размещения, схема и макеты.",
+    "Стоимость зависит от выбранного места: место № 1 — 280 000 ₽ в месяц.",
+    "В Бутово размещение флага стоит от 35 000 ₽ до 48 000 ₽ в зависимости от выбранного места.",
+    "Если вы выбрали экран в атриуме, цена 31 500 ₽ за месяц.",
+    "Какой экран вы выбрали?",
+    "Монтаж к оплате отдельно: 16 800 ₽.",
+    "Печать и монтаж дополнительно к оплате: 14 000 ₽ и 16 800 ₽.",
+    "После оплаты оформляется разрешение на ввоз и работу на территории.",
+    "Оформляем зону не мы: это делает заказчик.",
+    "Для принятия решения учитывайте расположение кофейни.",
+    "Экран всего 25 000 ₽ в месяц.",
+    "Всего за месяц кинотеатр посещают около 39 000 человек.",
+    "Менеджер проверит доступные места и сообщит стоимость размещения.",
+    "Брендирование на весь сезон оплачивается помесячно; подробности уточните при бронировании.",
+    "Рекорд был зафиксирован 31 мая 2025 года — 60 065 посетителей.",
+])
+def test_ordinary_answers_are_not_order_talk(text):
+    from app.core.assistant import drop_order_talk
+    assert drop_order_talk(text, _FOOD_COURT_CONTEXT) == (text, False)
+
+
+@pytest.mark.parametrize("text", [
+    "Итого 42 000 ₽.", "Всего 42 000 ₽ за месяц.", "Общая стоимость 42 000 ₽.", "Итоговая сумма составит 42 000 ₽.",
+    "Сумма заказа 42 000 ₽.", "С вас 42 000 ₽.",
+])
+def test_total_wording_only_on_ready_client(text):
+    from app.core.assistant import drop_order_talk
+    assert drop_order_talk(text, _FOOD_COURT_CONTEXT) == (text, False)  # обычный вопрос: разбирает защита цен
+    assert drop_order_talk(text, _FOOD_COURT_CONTEXT, ready=True) == (text, True)
+
+
+@pytest.mark.parametrize("text", [
+    "Стоимость размещения составит 42 000 ₽ в месяц, в ноябре–декабре 50 400 ₽.",
+    "Экран на фуд-корте ВЕЕР Молл — 42 000 ₽ за месяц.",
+    "Отлично! Экран на фуд-корте в ВЕЕР Молл стоит 42 000 ₽ за месяц.",
+    "Итоговая сумма зависит от выбранной точки и площади размещения в ТРЦ.",  # итог без суммы — не итог сделки
+    "Всего за месяц кинотеатр посещают около 39 000 человек.",
+])
+def test_ready_client_still_gets_ordinary_price(text):
+    from app.core.assistant import drop_order_talk
+    assert drop_order_talk(text, _FOOD_COURT_CONTEXT, ready=True) == (text, False)
+
+
+def test_ready_client_needs_price_in_what_remains():
+    from app.core.assistant import drop_order_talk
+    text = "Вы выбрали экран. Спасибо за выбор, будем рады сотрудничеству с вашей компанией."
+    assert drop_order_talk(text, _FOOD_COURT_CONTEXT, ready=True) == (text, True)
+    assert drop_order_talk(text, _FOOD_COURT_CONTEXT) == ("Спасибо за выбор, будем рады сотрудничеству с вашей компанией.", False)
+
+
+def test_order_talk_reaches_manager_not_client(services):
+    conn = make_conn(services, "auto")
+    services.assistant.llm = FakeLLM("Отлично! Заказ принят, сумма к оплате 25 000 ₽.")
+    out = run(process_client_message(services, conn, 555, "Берём лайтбокс у главного входа на месяц"))
+    assert out.to_client == HOLDING_MESSAGE and out.notice is None
+    assert "итог или оформлять заказ" in out.to_manager and "к оплате" in out.to_manager  # черновик менеджер видит
+    assert services.db.get_dialog(out.dialog_id)["reason"] == "order_talk"
+    assert not services.db.to_learn()  # не пробел в базе, в «Обучение» не идёт
+
+
+def test_ready_client_with_plain_price_still_answered_with_notice(services):
+    conn = make_conn(services, "auto")
+    services.assistant.llm = FakeLLM("Лайтбокс у главного входа стоит 25 000 ₽ за месяц.")
+    out = run(process_client_message(services, conn, 555, "Берём лайтбокс у главного входа на месяц"))
+    assert "25 000 ₽" in out.to_client and out.to_manager is None and "готов к заказу" in out.notice

@@ -5,11 +5,11 @@
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 from .. import db as D
 from ..core.assistant import R_GREETING, R_NO_CONTEXT, SKIP, Reply
+from ..core.client_intent import is_ready_to_buy
 from ..core.conversation import Conversation
 from ..core.text import is_short_reaction
 from ..db import Connection
@@ -26,6 +26,7 @@ REASONS = {
     "venue_mismatch": "бот назвал цену другого ТЦ",
     "period_mismatch": "бот назвал цену для другого срока или других дней размещения (будни/выходные)",
     "format_mismatch": "бот назвал цену другого формата",
+    "order_talk": "бот начал подводить итог или оформлять заказ: это решает менеджер",
     "foreign_words": "в ответе английские слова",
     "off_range": "такого формата у нас нет",
     "ungrounded": "клиент спрашивает о том, чего нет в базе знаний",
@@ -121,26 +122,6 @@ async def process_client_message(services: Services, conn: Connection, chat_id: 
                         summary=summary)
     return Outgoing(dialog_id, to_client=to_client, to_manager=card,
                     with_buttons=has_draft or mode == "draft")
-
-
-# «Берём», «давайте оформим», «хочу на месяц экран», «когда можно начать?» — уже не вопрос, а заказ
-_READY_RE = re.compile(
-    r"бронир|заброниру|оформ(?:им|ляем|ляйте|ите|ить)|\bбер[её]м\b|\bберу\b|возьм[её]м|\bвозьму\b"
-    r"|готов[ыа]? (?:взять|заказать|разместить|начать|купить)|давайте (?:оформ|размест|запуск|начн|брать|возьм|закаж)"
-    r"|когда можно (?:начать|запустить|разместить|выйти)|хоч\w* (?:на|с) (?:\d|месяц|недел|полгода|год|декабр|январ|ноябр)"
-    r"|хоч\w* (?:заказать|забронировать|взять)", re.IGNORECASE)
-
-
-_NOT_READY_RE = re.compile(r"\b(?:не|если|пока|подумаю|подумаем)\b[^.!?]*?(?:бер|возьм|оформ|запуск|соглас|устраива)",
-                           re.IGNORECASE)
-_READY_MORE_RE = re.compile(r"\bзапускаем\b|\bсогласн[ыа]\b|нас устраивает|\bоформляем\b", re.IGNORECASE)
-
-
-def is_ready_to_buy(text: str) -> bool:
-    text = text.replace("ё", "е")
-    if _NOT_READY_RE.search(text):
-        return False
-    return bool(_READY_RE.search(text) or _READY_MORE_RE.search(text))
 
 
 def human_reason(reason: str) -> str:

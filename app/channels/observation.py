@@ -14,6 +14,8 @@ log = logging.getLogger(__name__)
 async def observe(message: Message, services: Services, conn: Connection, text: str) -> bool:
     """Сохранить сообщение в журнал наблюдения и, если это ответ менеджера, собрать кандидатов.
     Возвращает, новое ли это сообщение (False — повторная доставка без изменений)."""
+    if not services.privacy.allowed(conn.id, message.chat.id):
+        return False
     # Модель может работать несколько секунд: порядок сообщений и пересборка кандидатов — под одним замком.
     async with services.chat_lock(conn.id, message.chat.id):
         manager = bool(message.from_user and message.from_user.id == conn.owner_user_id)
@@ -31,6 +33,8 @@ async def observe(message: Message, services: Services, conn: Connection, text: 
 
 async def collect_observed(services: Services, connection_id: str, chat_id: int, message_id: int) -> None:
     """Ответ менеджера из журнала наблюдения → предложения в базу знаний (вопрос клиента берём из журнала)."""
+    if not services.privacy.allowed(connection_id, chat_id):
+        return
     context = services.db.observation_context(connection_id, chat_id, message_id)
     if not context:
         return

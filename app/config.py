@@ -58,6 +58,8 @@ class Settings:
     max_webhook_secret: str = ""  # MAX шлёт его в заголовке, чужие запросы отбрасываем
     telegram_api_url: str = ""  # свой релей к Telegram: с российских серверов api.telegram.org не отвечает
     admin_login: str = ""          # вход в админку по логину и паролю (python -m app.password); пусто — по токену
+    speech_enabled: bool = False
+    speech_python: str = ""
     admin_password_hash: str = ""
 
     @classmethod
@@ -98,5 +100,7 @@ class Settings:
             max_webhook_secret=env("MAX_WEBHOOK_SECRET", ""),
             telegram_api_url=env("TELEGRAM_API_URL", ""),
             admin_login=env("ADMIN_LOGIN", ""),
+            speech_enabled=_bool(env("SPEECH_ENABLED", "false")),
+            speech_python=env("SPEECH_PYTHON", ""),
             admin_password_hash=env("ADMIN_PASSWORD_HASH", ""),
         )

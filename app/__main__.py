@@ -119,7 +119,7 @@ async def main() -> None:
         tasks.append(polling)
     else:
         log.warning("TELEGRAM_BOT_TOKEN не задан — работает только админка и тестовый чат")
-    max_api = None
+    max_api = max_task = None
     if settings.max_bot_token:
         from .channels.max_api import MaxApi
         from .channels.max_bot import run_max
@@ -146,7 +146,15 @@ async def main() -> None:
                 await asyncio.wait_for(asyncio.shield(polling), timeout=5)
         for task in tasks:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=45)
+        except TimeoutError:
+            log.warning("Остановка MAX не завершилась: события сохранены для следующего запуска")
+        if services._background:
+            try:
+                await asyncio.wait_for(asyncio.gather(*services._background, return_exceptions=True), timeout=5)
+            except TimeoutError:
+                log.warning("Разбор кандидатов прерван при остановке")
         if bot:
             await bot.session.close()
         if max_api:

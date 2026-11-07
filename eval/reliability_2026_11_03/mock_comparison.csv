@@ -1,0 +1,15 @@
+file,phase,provider,questions,decision_accuracy,unsafe_answers,missed,content_hit,price_guard_trips,fact_errors,latency_avg_ms,latency_p95_ms,latency_answer_avg_ms
+questions.csv,before,before,37,0.8918918918918919,0,4,0.8461538461538461,4,0,5,11,6
+questions.csv,after,after,37,0.8918918918918919,0,4,0.8461538461538461,4,0,5,11,6
+questions_kb.csv,before,before,115,0.9217391304347826,3,6,0.7875,7,0,6,10,6
+questions_kb.csv,after,after,115,0.9304347826086956,2,6,0.7875,7,0,6,10,6
+questions_live.csv,before,before,32,0.9375,0,2,0.5384615384615384,2,0,5,11,6
+questions_live.csv,after,after,32,0.9375,0,2,0.5384615384615384,2,0,5,11,6
+questions_personas.csv,before,before,169,0.9289940828402367,4,8,0.6057692307692307,8,0,8,22,11
+questions_personas.csv,after,after,169,0.9289940828402367,4,8,0.6057692307692307,8,0,8,21,10
+questions_real_style.csv,before,before,69,0.6521739130434783,18,6,0.625,2,0,9,20,12
+questions_real_style.csv,after,after,69,0.8260869565217391,6,6,0.625,2,0,7,19,13
+questions_sales.csv,before,before,20,1.0,0,0,0.6842105263157895,0,0,8,16,8
+questions_sales.csv,after,after,20,1.0,0,0,0.6842105263157895,0,0,8,16,8
+questions_stress.csv,before,before,107,0.9439252336448598,0,6,0.6470588235294118,5,0,5,8,5
+questions_stress.csv,after,after,107,0.9439252336448598,0,6,0.6470588235294118,5,0,5,8,5

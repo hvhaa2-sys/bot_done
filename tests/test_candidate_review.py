@@ -232,6 +232,7 @@ def test_false_premise_in_question_is_not_answer_and_quote_is_not_evidence(servi
 
 def test_collect_keeps_old_note_and_adds_local_warning(services, monkeypatch):
     monkeypatch.setattr("app.core.candidates.review_note", lambda *args: "Похожее уже есть в базе: ролик")
+    services.privacy.set_allowed("test", 1, True)
     services.llm.facts = [{"question": VIDEO_Q, "answer": VIDEO_LOSS}]
     assert asyncio.run(services.collect_candidates(source="observe", connection_id="test", chat_id=1,
                                                    dialog_id=None, client_question=VIDEO_Q,
@@ -319,6 +320,7 @@ def test_ui_checks_all_group_sources_and_escapes_them(services):
 
 
 def test_ui_does_not_duplicate_stored_warnings_or_show_them_after_repair(services):
+    services.privacy.set_allowed("test", 1, True)
     services.llm.facts = [{"question": VIDEO_Q, "answer": VIDEO_LOSS}]
     asyncio.run(services.collect_candidates(source="observe", connection_id="test", chat_id=1,
                                            dialog_id=None, client_question=VIDEO_Q, manager_text=VIDEO_SOURCE))

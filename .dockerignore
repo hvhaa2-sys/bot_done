@@ -1,6 +1,8 @@
 **
 !Dockerfile
 !requirements.lock
+!requirements-speech.txt
+!requirements-speech-overrides.txt
 !app/
 !app/**/*.py
 !app/static/
