@@ -18,6 +18,7 @@ data/watch/
 !eval/simulation/difficult_clients.json
 !eval/simulation/difficult_learning.json
 !eval/simulation/heldout_clients.json
+!eval/ci_baseline.json
 eval/simulation/runs/
 !eval/retrieval_results/report.json
 !Итерации/04_18_ноября_Сравнение_поиска/Материалы/BM25_21-10-2026_report.json
@@ -45,3 +46,6 @@ htmlcov/
 eval/retrieval_results/*
 !eval/retrieval_results/report.json
 !eval/retrieval_results/metrics.csv
+
+# Факты, утверждённые из настоящей переписки, на GitHub не уходят: живут в рабочей базе бота
+data/kb/notes/Из переписки/
