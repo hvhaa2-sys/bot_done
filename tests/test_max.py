@@ -8,12 +8,14 @@ from dataclasses import replace
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
 from app import db as D
+from app.admin import create_app
 from app.channels.max_api import MaxApi, MaxError, keyboard
-from app.channels.max_bot import (AFTER_ANSWER, ASK_CONTACT, BUDGET_ASK, CLIENT_MENU, CONN_PREFIX, HELP, HUMAN_AGAIN, HUMAN_DONE,
-                                  LEAD_ASK, LEAD_DONE, NO_MANAGER, NOT_DELIVERED, OBSERVE_MENU, MaxBot, handle_queue, run_max,
-                                  run_webhook)
+from app.channels.max_bot import (AFTER_ANSWER, ASK_CONTACT, BUDGET_ASK, CLIENT_MENU, CONN_PREFIX, CONSENT_BUTTONS,
+                                  CONSENT_NO, HELP, HUMAN_AGAIN, HUMAN_DONE, LEAD_ASK, LEAD_DONE, LEAD_IN_CHAT, NO_MANAGER,
+                                  NOT_DELIVERED, OBSERVE_MENU, REVOKED_DONE, MaxBot, handle_queue, run_max, run_webhook)
 from app.config import ROOT, Settings
 from app.services import Services
 
@@ -810,6 +812,17 @@ def press(bot, payload, user=CLIENT, chat=CLIENT_CHAT):
                "message": {"recipient": {"chat_id": chat, "chat_type": "dialog"}, "body": {"mid": "x", "seq": 1, "text": "меню"}}})
 
 
+def consent_ready(services, short="Чтобы передать заявку, нужен ваш контакт. Оператор: ИП Тест, Екатеринбург."):
+    """Текст согласия заполнен юристом — без плейсхолдеров; бот просит контакт только после «Согласен»."""
+    return services.consents.save_text(short, "Я разрешаю ИП Тест обрабатывать мой контакт для ответа на заявку.")
+
+
+def agree(bot, services):
+    consent_ready(services)
+    press(bot, "menu:lead")
+    press(bot, "consent:yes")
+
+
 def contact(phone="+7 999 000-11-22", mid=None):
     vcf = f"BEGIN:VCARD\nVERSION:3.0\nFN:Иван\nTEL;TYPE=cell:{phone}\nEND:VCARD"
     return message("", attachments=[{"type": "contact", "payload": {"vcf_info": vcf, "max_info": {}, "hash": "h"}}], mid=mid)
@@ -876,7 +889,7 @@ def test_contact_button_makes_lead_card_with_context_and_no_phone_in_journal(env
     services, bot, api = env
     connect(bot)
     feed(bot, message("Сколько стоит экран в атриуме?"))
-    press(bot, "menu:lead")
+    agree(bot, services)
     assert to(api, CLIENT_CHAT)[-1]["text"] == LEAD_ASK and to(api, CLIENT_CHAT)[-1]["buttons"] == ASK_CONTACT
     feed(bot, contact())
     card = to(api, MANAGER_CHAT)[-1]["text"]
@@ -894,7 +907,7 @@ def test_contact_button_makes_lead_card_with_context_and_no_phone_in_journal(env
 def test_phone_by_text_after_lead_button_and_not_otherwise(env):
     services, bot, api = env
     connect(bot)
-    press(bot, "menu:lead")
+    agree(bot, services)
     feed(bot, message("мой номер 8 912 345-67-89"))
     assert "Телефон: 8 912 345-67-89" in to(api, MANAGER_CHAT)[-1]["text"]
     assert services.db.recent_dialogs(1)[0]["question"] == "[заявка]\nмой номер [телефон]"
@@ -944,10 +957,13 @@ def test_call_human_by_button_and_by_words(env):
 
 
 def test_ready_to_buy_asks_for_contact(env):
-    _, bot, api = env
+    services, bot, api = env
     connect(bot)
+    consent_ready(services)
     feed(bot, message("/mode auto", MANAGER, MANAGER_CHAT))
     feed(bot, message("Хочу на месяц экран в атриуме, берём"))
+    assert to(api, CLIENT_CHAT)[-1]["buttons"] == CONSENT_BUTTONS, "сначала согласие, потом кнопка контакта"
+    press(bot, "consent:yes")
     assert to(api, CLIENT_CHAT)[-1]["text"] == LEAD_ASK and to(api, CLIENT_CHAT)[-1]["buttons"] == ASK_CONTACT
     feed(bot, contact())
     assert to(api, MANAGER_CHAT)[-1]["text"].startswith("Заявка:")
@@ -1072,7 +1088,7 @@ def test_regression_lead_on_pause_keeps_full_contact_message(env):
     connect(bot)
     services.db.set_mode('auto', connection_id=CONN)
     press(bot, 'menu:human')
-    press(bot, 'menu:lead')
+    agree(bot, services)
     text = '+7 999 123-45-67, звонить после 18, спросить Ольгу'
     feed(bot, message(text))
     card = to(api, MANAGER_CHAT)[-1]['text']
@@ -1170,3 +1186,72 @@ def test_caption_album_has_no_second_holding(env):
                           attachments=[{'type': 'image', 'payload': {'token': str(i)}}]))
     assert len(to(api, CLIENT_CHAT)) == 1
     assert sum(bool(m['forward']) for m in to(api, MANAGER_CHAT)) == 3
+
+
+# --- согласие на обработку контакта ---
+
+def test_without_filled_consent_bot_never_asks_for_contact(env):
+    # Черновик согласия с [плейсхолдерами] клиентам не показываем: заявка без телефона, ответ — в этом чате
+    services, bot, api = env
+    connect(bot)
+    assert not services.consents.text().ready
+    press(bot, "menu:lead")
+    assert to(api, CLIENT_CHAT)[-1]["text"] == LEAD_IN_CHAT
+    assert all(m.get("buttons") != ASK_CONTACT for m in to(api, CLIENT_CHAT))
+    assert to(api, MANAGER_CHAT)[-1]["text"].startswith("Заявка: Иван Петров") and "Телефон" not in to(api, MANAGER_CHAT)[-1]["text"]
+    feed(bot, message("/mode auto", MANAGER, MANAGER_CHAT))
+    before = len(to(api, MANAGER_CHAT))
+    feed(bot, message("Хочу на месяц экран в атриуме, берём"))
+    assert all(m.get("buttons") not in (ASK_CONTACT, CONSENT_BUTTONS) for m in to(api, CLIENT_CHAT))
+    assert len(to(api, MANAGER_CHAT)) == before + 1, "готовность к заказу — один сигнал менеджеру, без второй заявки"
+
+
+def test_consent_step_text_refusal_and_new_version(env):
+    services, bot, api = env
+    connect(bot)
+    text = consent_ready(services)
+    press(bot, "menu:lead")
+    shown = to(api, CLIENT_CHAT)[-1]
+    assert text.short in shown["text"] and shown["buttons"] == CONSENT_BUTTONS
+    press(bot, "consent:text")
+    assert to(api, CLIENT_CHAT)[-2]["text"] == text.full and to(api, CLIENT_CHAT)[-1]["buttons"] == CONSENT_BUTTONS
+    press(bot, "consent:no")
+    assert to(api, CLIENT_CHAT)[-1]["text"] == CONSENT_NO
+    assert to(api, MANAGER_CHAT)[-1]["text"].startswith("Заявка:") and "Телефон" not in to(api, MANAGER_CHAT)[-1]["text"]
+    press(bot, "menu:lead")
+    assert to(api, CLIENT_CHAT)[-1]["buttons"] == CONSENT_BUTTONS, "отказ не согласие: спрашиваем снова"
+    press(bot, "consent:yes")
+    assert services.consents.given(CLIENT_CHAT, text.version)
+    new = consent_ready(services, short="Чтобы передать заявку, нужен ваш контакт. Оператор: ИП Тест, г. Екатеринбург.")
+    assert new.version != text.version and not services.consents.given(CLIENT_CHAT, new.version)
+    press(bot, "menu:lead")
+    assert to(api, CLIENT_CHAT)[-1]["buttons"] == CONSENT_BUTTONS, "текст поменялся — нужно новое согласие"
+    rows = services.db.conn.execute("SELECT * FROM consent_log").fetchall()
+    assert [r["decision"] for r in rows] == ["no", "yes"] and all("Иван" not in str(dict(r)) for r in rows)
+
+
+def test_revoking_consent_tells_manager_what_to_delete(env):
+    services, bot, api = env
+    connect(bot)
+    agree(bot, services)
+    feed(bot, message("Отзываю согласие на обработку данных"))
+    assert to(api, CLIENT_CHAT)[-1]["text"] == REVOKED_DONE
+    assert "отозвал(а) согласие" in to(api, MANAGER_CHAT)[-1]["text"] and str(CLIENT_CHAT) in to(api, MANAGER_CHAT)[-1]["text"]
+    assert not services.consents.given(CLIENT_CHAT, services.consents.text().version)
+    press(bot, "menu:lead")
+    assert to(api, CLIENT_CHAT)[-1]["buttons"] == CONSENT_BUTTONS
+    press(bot, "consent:yes", user=MANAGER, chat=MANAGER_CHAT)
+    assert api.answers[-1]["notification"] == "Это кнопка для клиентов."
+
+
+def test_admin_shows_consent_state_and_saves_text(env):
+    services, _, _ = env
+    services.settings = services.settings.__class__(**{**vars(services.settings), "admin_token": "test-secret"})
+    client = TestClient(create_app(services))
+    client.get("/?token=test-secret")
+    page = client.get("/invite").text
+    assert "Согласие на обработку данных" in page and "бот не просит контакт" in page
+    client.post("/invite/consent", data={"short": "Нужен ваш контакт. Оператор: ИП Тест.", "full": "Я разрешаю ИП Тест…"})
+    text = services.consents.text()
+    assert text.ready and text.version in client.get("/invite").text
+

@@ -15,6 +15,7 @@ from dataclasses import dataclass, replace
 from zoneinfo import ZoneInfo
 
 from .max_inbox import MaxInbox
+from .consent import Consents
 from .privacy import ChatPrivacy
 from .speech import SpeechRecognizer
 from .config import ROOT, Settings
@@ -169,6 +170,7 @@ class Services:
         self.bot_status: dict | None = None
         self.max_inbox = MaxInbox(self.db.conn)
         self.privacy = ChatPrivacy(self.db.conn)
+        self.consents = Consents(self.db.conn)
         self.max_updates: MaxInbox | None = None
         self.max_worker: asyncio.Task | None = None
         self.max_status: dict | None = None  # то же для MAX: {ok, username, name} или {ok: False, error}

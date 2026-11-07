@@ -9,7 +9,7 @@ import re
 from dataclasses import replace
 
 from .assistant import Assistant, ESCALATE, SKIP, Reply
-from .knowledge import SearchHit
+from .knowledge import SearchHit, parse_budget
 from .conversation import Conversation
 
 OPERATIONS = "business_operation"
@@ -59,7 +59,8 @@ class BusinessAssistant(Assistant):
         reply = await super().answer(question, history, allow_llm, last_question, conversation)
         if reply.is_answer:
             prices = [SearchHit(c, 0.0) for c in self.kb.chunks if c.kind == "price"]
-            if self.kb.mismatched_amounts(reply.text, prices, question):
+            # Бюджет клиента («в Бутово до 40 тысяч» → «за 40 000 ₽ доступны…») — его слова, а не цена чужого ТЦ
+            if set(self.kb.mismatched_amounts(reply.text, prices, question)) - {parse_budget(question.lower())}:
                 reply = replace(reply, decision=ESCALATE, text=self.holding_message, reason="venue_mismatch")
         if reply.is_answer and _REFUSAL.search(reply.text):
             reply = replace(reply, decision=ESCALATE, text=self.holding_message, reason="model_unsure")

@@ -243,7 +243,34 @@ class KnowledgeBase:
             hits += [SearchHit(c, 0.0) for c in self.catalog]
         if _OFF_RANGE_RE.search(low) and not any(h.chunk.kind == "catalog" for h in hits):
             hits += [SearchHit(c, 0.0) for c in self.catalog]
-        return self._for_position(hits + self._parts_hits(query, hits, named, min_score), query)
+        return self._for_position(self._with_tiers(hits + self._parts_hits(query, hits, named, min_score), query), query)
+
+    def _with_tiers(self, hits: list[SearchHit], query: str) -> list[SearchHit]:
+        """Ступени одной позиции («при размещении до 3 / от 3 / от 6 / на 12 месяцев») — все вместе и по порядку.
+        Иначе в выдачу попадали две ступени пакета ВЕЕР из четырёх, остальные суммы модель брала из заметки,
+        и проверка цен честно отправляла ответ менеджеру. Группа встаёт на место первой найденной ступени.
+        Только если вопрос про саму позицию (слово из её названия): на «экран на фуд-корте или медиа-куб?»
+        ступени пакета, где медиа-куб лишь в составе, были шумом, и проверка периода останавливала ответ."""
+        asked = set(self.normalize(query)) - set(self.normalize(_TIER_SKIP))
+        chunks = {c.id: c for c in self.chunks if c.kind == "price"}
+        done: set[str] = set()
+        out = []
+        for hit in hits:
+            if hit.chunk.id in done:
+                continue
+            row = self.prices[int(hit.chunk.id.split("-")[1])] if hit.chunk.kind == "price" else None
+            if row is None or not _TIER_RE.search(row.period) \
+                    or not {w for w in self.normalize(row.format) if not w.isdigit()} & asked:
+                out.append(hit)
+                continue
+            group = [(i, r) for i, r in enumerate(self.prices) if f"price-{i}" in chunks and r.format == row.format
+                     and r.placement == row.placement and _TIER_RE.search(r.period)]
+            group.sort(key=lambda ir: (int(_TIER_RE.search(ir[1].period).group(2)),
+                                       "до от на".split().index(_TIER_RE.search(ir[1].period).group(1))))
+            for i, _ in group:
+                done.add(f"price-{i}")
+                out.append(hit if f"price-{i}" == hit.chunk.id else SearchHit(chunks[f"price-{i}"], hit.score))
+        return out
 
     def _for_position(self, hits: list[SearchHit], query: str) -> list[SearchHit]:
         """Явный номер места ограничивает прайс: цена соседнего места не подтверждает ответ."""
@@ -617,6 +644,8 @@ def position_ranges(text: str) -> tuple[tuple[int, int], ...]:
 
 # «1 месяц при размещении от 6 месяцев»: до N — от месяца, от N и на N — от N месяцев
 _TIER_RE = re.compile(r"при размещении (до|от|на) (\d+) месяц")
+# Слова из названий позиций, которые ничего не говорят о самой позиции («внешних рекламодателей» — тип клиента)
+_TIER_SKIP = "внешних рекламодателей трц ролик видео медиа"
 LIST_LIMIT = 20
 LIST_FAQ_LIMIT = 3  # в перечне — немного разделов заметок, иначе модель теряет строки прайса
 SMALL_VENUE_FORMATS = 3
