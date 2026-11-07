@@ -426,3 +426,10 @@ make security
 `/mode observe` в чате с ботом включает сбор переписки без ответов клиентам и черновиков менеджеру.
 Переписка видна в «Диалоги → Наблюдение», кандидаты в знания — в «Обучении»; до утверждения они
 не используются в ответах. Настройка и проверка на своём Telegram: [docs/OBSERVE.md](docs/OBSERVE.md).
+
+## CI/CD
+
+На каждый push в `main` GitHub Actions (`.github/workflows/ci.yml`) запускает линтер и тесты на Python 3.11 и 3.13,
+экзамены на заглушке против эталона (`python -m eval.ci_gate`), pip-audit, gitleaks, Bandit и Docker smoke.
+Выкладка на сервер по тегу `v*` с бэкапом, проверкой `/health` и автоматическим откатом —
+`deploy/release.sh` и `.github/workflows/deploy.yml`, включается переменной `DEPLOY_HOST`. Подробно — `docs/CI-CD.md`.

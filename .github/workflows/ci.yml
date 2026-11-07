@@ -1,0 +1,91 @@
+# Проверки на каждый push в main и на каждый pull request. Сеть нужна только для установки зависимостей
+# и базы уязвимостей: модель — заглушка (mock), Telegram и MAX не подключаются, ключей и секретов здесь нет.
+name: Проверки
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:  # те же проверки перед выкладкой (deploy.yml)
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LLM_PROVIDER: mock
+  TELEGRAM_BOT_TOKEN: ""
+  MAX_BOT_TOKEN: ""
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  tests:
+    name: Линтер, тесты, экзамены (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+      - name: Зависимости (по хешам из lock-файла)
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --require-hashes -r requirements-dev.lock
+      - name: Линтер и тесты с покрытием
+        run: make check
+      - name: Экзамены на заглушке и экзамен обучения — не хуже эталона
+        run: .venv/bin/python -m eval.ci_gate
+
+  security:
+    name: Безопасность
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # gitleaks смотрит всю историю, а не только последний коммит
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+      - name: Зависимости
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --require-hashes -r requirements-dev.lock
+      - name: Известные уязвимости зависимостей (pip-audit)
+        run: make audit
+      - name: Ключи и пароли в истории git (gitleaks)
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSLO "$base/$archive"
+          curl -fsSL "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt" | grep " $archive\$" | sha256sum -c -
+          tar -xzf "$archive" gitleaks
+          ./gitleaks git . --redact --no-banner
+      - name: Опасные места в коде (Bandit)
+        run: |
+          .venv/bin/python -m pip install bandit==1.8.6
+          .venv/bin/python -m bandit -r app tools eval -q -ll
+
+  docker:
+    name: Сборка и запуск в Docker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Чистая установка, /health, пересоздание контейнера, бэкап и восстановление
+        run: bash deploy/container/smoke.sh

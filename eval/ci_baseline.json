@@ -1,0 +1,60 @@
+{
+  "exams": {
+    "questions.csv": {
+      "decision_accuracy": 0.8919,
+      "unsafe_answers": 0,
+      "fact_errors": 0,
+      "content_hit": 0.8462,
+      "questions": 37
+    },
+    "questions_kb.csv": {
+      "decision_accuracy": 0.9304,
+      "unsafe_answers": 2,
+      "fact_errors": 0,
+      "content_hit": 0.7875,
+      "questions": 115
+    },
+    "questions_live.csv": {
+      "decision_accuracy": 0.9375,
+      "unsafe_answers": 0,
+      "fact_errors": 0,
+      "content_hit": 0.5385,
+      "questions": 32
+    },
+    "questions_personas.csv": {
+      "decision_accuracy": 0.929,
+      "unsafe_answers": 4,
+      "fact_errors": 0,
+      "content_hit": 0.5962,
+      "questions": 169
+    },
+    "questions_real_style.csv": {
+      "decision_accuracy": 0.8261,
+      "unsafe_answers": 6,
+      "fact_errors": 0,
+      "content_hit": 0.5833,
+      "questions": 69
+    },
+    "questions_sales.csv": {
+      "decision_accuracy": 1.0,
+      "unsafe_answers": 0,
+      "fact_errors": 0,
+      "content_hit": 0.6842,
+      "questions": 20
+    },
+    "questions_stress.csv": {
+      "decision_accuracy": 0.9439,
+      "unsafe_answers": 0,
+      "fact_errors": 0,
+      "content_hit": 0.6471,
+      "questions": 107
+    }
+  },
+  "learning": {
+    "fact_found": 19,
+    "personal_leaked": 3,
+    "invented_amounts": 0,
+    "after_ok": 18,
+    "pairs": 35
+  }
+}

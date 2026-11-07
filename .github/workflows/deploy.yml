@@ -1,0 +1,59 @@
+# Выкладка на сервер: те же проверки, что в CI, затем по SSH deploy/release.sh на сервере — бэкап, новая версия,
+# проверка /health, при сбое откат кода и данных. Пока в настройках репозитория нет переменной DEPLOY_HOST
+# (сервер не куплен), шаг выкладки пропускается, проверки идут как обычно. Настройка — docs/CI-CD.md.
+name: Выкладка
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Тег, ветка или коммит
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false  # вторая выкладка ждёт первую, а не обрывает её посередине
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    name: На сервер
+    needs: checks
+    if: vars.DEPLOY_HOST != ''
+    runs-on: ubuntu-24.04
+    environment: production  # в настройках можно потребовать подтверждение человеком
+    timeout-minutes: 30
+    env:
+      REF: ${{ inputs.ref || github.ref_name }}
+    steps:
+      - name: Проверить имя версии
+        run: |
+          [[ "$REF" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "Недопустимое имя версии: $REF"; exit 1; }
+      - name: SSH-ключ и отпечаток сервера
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+      - name: Выкладка с проверкой и откатом
+        env:
+          HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          DIR: ${{ vars.DEPLOY_DIR }}
+        run: |
+          ssh -i ~/.ssh/deploy -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$HOST" "cd '$DIR' && ./deploy/release.sh '$REF'"
+      - name: Удалить ключ с машины GitHub
+        if: always()
+        run: rm -f ~/.ssh/deploy
