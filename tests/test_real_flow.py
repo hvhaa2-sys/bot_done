@@ -63,3 +63,30 @@ def test_negotiation_and_production_permission_are_manager_decisions(env, text):
     services, _, _ = env
     reply = asyncio.run(services.answer(text))
     assert reply.decision == 'escalate' and not reply.llm_called
+
+
+def test_client_budget_is_not_a_price_of_another_mall():
+    # stress 07.11: «что можно в бутово до 40 тысяч?» → «за 40 000 ₽ доступны…»: 40 000 ₽ — цена позиции другого ТЦ,
+    # и общая сверка по всему прайсу отправляла ответ менеджеру
+    import json
+
+    from app.core.knowledge import KnowledgeBase, PriceRow
+    from app.llm.base import LLMProvider
+
+    class Says(LLMProvider):
+        name = "says"
+
+        def __init__(self, answer):
+            self.answer = answer
+
+        async def complete(self, system, messages):
+            return json.dumps({"answer": self.answer, "confidence": 1, "needs_manager": False}, ensure_ascii=False)
+
+    kb = KnowledgeBase([], [PriceRow("Лайтбокс", "Бутово Молл, Москва — парковка", "", 36000, ""),
+                            PriceRow("Баннер", "ДЕПО, Нижний Тагил — переход", "1 месяц", 40000, "")], [])
+    ok = asyncio.run(BusinessAssistant(kb, Says("В Бутово Молл за 40 000 ₽ доступен лайтбокс на парковке — 36 000 ₽."))
+                     .answer("что можно в бутово до 40 тысяч?"))
+    assert ok.reason != "venue_mismatch"
+    wrong = asyncio.run(BusinessAssistant(kb, Says("Лайтбокс в Бутово Молл — 40 000 ₽."))
+                        .answer("сколько стоит лайтбокс в бутово?"))
+    assert not wrong.is_answer, "чужая цена без бюджета клиента — по-прежнему к менеджеру"

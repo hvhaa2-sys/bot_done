@@ -29,6 +29,7 @@ import time
 
 import httpx
 
+from .. import consent
 from .. import db as D
 from . import voice
 from ..max_inbox import MaxInbox, event_key
@@ -74,6 +75,15 @@ LEAD_DONE = "Спасибо! Передал заявку менеджеру, о�
 HUMAN_DONE = "Передал менеджеру, он ответит здесь, в этом чате."
 HUMAN_AGAIN = "Менеджер уже получил вашу просьбу и ответит здесь."
 NOT_DELIVERED = "Не получилось передать менеджеру. Попробуйте, пожалуйста, ещё раз чуть позже."
+LEAD_IN_CHAT = "Передал заявку менеджеру, он ответит вам здесь, в этом чате."
+# Согласие на обработку контакта (app/consent.py): отдельный шаг, кнопка контакта — только после «Согласен»
+CONSENT_ASK = "Согласны на обработку этих данных? Без согласия менеджер ответит вам здесь, в чате."
+CONSENT_BUTTONS: Buttons = [[("Согласен", "consent:yes"), ("Не согласен", "consent:no")],
+                            [("Прочитать согласие полностью", "consent:text")]]
+CONSENT_NO = "Хорошо, контакт не нужен: передал заявку менеджеру, он ответит вам здесь, в этом чате."
+REVOKED_DONE = "Принято: согласие отозвано, бот больше не попросит ваш контакт. Менеджер удалит ваши данные."
+_REVOKE_RE = re.compile(r"\b(?:отзыва\w*|отозва\w*|отозв\w*|забира\w*)\s+(?:сво\w+\s+)?согласи\w*"
+                        r"|удалит\w*\s+(?:все\s+)?(?:мои|мой|мою)\s+(?:данн|контакт|телефон|номер)\w*", re.I)
 OBSERVE_MENU = "Напишите вопрос сообщением — менеджер ответит здесь."
 WAITING_SECONDS = 1800   # столько бот считает, что следующее сообщение — ответ на кнопку
 HUMAN_REPEAT_SECONDS = 600  # повторное нажатие «Позвать менеджера» не дёргает его ещё раз
@@ -330,6 +340,9 @@ class MaxBot:
         attachments = body.get("attachments") or []
         if conn.mode == "off" or chat_id in services.privacy.erased:
             return
+        if _REVOKE_RE.search(text):
+            await self.revoke_consent(conn, chat_id, client)
+            return
         if services.speech.enabled and any(a.get("type") == "audio" for a in attachments) \
                 and (conn.mode == D.OBSERVE or age_minutes(message.get("timestamp")) <= services.settings.stale_message_minutes):
             transcript = await voice.max_text(services, body)
@@ -509,8 +522,8 @@ class MaxBot:
                                                         f"Вопрос клиента:\n«{text}»", out.dialog_id)
         if out.notice and sent:
             await self.send_card(conn.owner_chat_id, out.notice.replace(cut(text), text), out.dialog_id)
-            self.waiting[chat_id] = ("lead", time.time())  # клиент готов к заказу — самое время попросить контакт
-            await self.send(chat_id, services.sign(LEAD_ASK), ASK_CONTACT)
+            # Клиент готов к заказу — самое время попросить контакт; менеджер уже получил сигнал
+            await self.ask_contact(conn, chat_id, client, notified=True)
         if out.to_manager:
             card = out.to_manager if sent or not out.to_client else out.to_manager.replace(HOLDING_SENT, HOLDING_NOT_SENT)
             await self.send_card(conn.owner_chat_id, _CARD_ID_RE.sub("", for_max(card)).replace(cut(text), text), out.dialog_id,
@@ -528,8 +541,66 @@ class MaxBot:
         return ((f"Что известно: {known}\n" if known else "")
                 + (f"Последний вопрос: «{short(last, 500)}»\n" if last and not last.startswith("[") else ""))
 
+    async def ask_contact(self, conn: D.Connection, chat_id: int, client: str, notified: bool = False) -> None:
+        """Попросить контакт для заявки. Текст согласия не оформлен — не просим вовсе: заявка без телефона,
+        менеджер ответит в этом чате. Оформлен — сначала отдельный шаг «Согласен / Не согласен»."""
+        services = self.services
+        text = services.consents.text()
+        if not text.ready:
+            if not notified:
+                await self.take_lead(conn, chat_id, client, reply=LEAD_IN_CHAT)
+            return
+        if services.consents.given(chat_id, text.version):
+            self.waiting[chat_id] = ("lead", time.time())
+            await self.send(chat_id, services.sign(LEAD_ASK), ASK_CONTACT)
+            return
+        await self.send(chat_id, f"{text.short}\n\n{CONSENT_ASK}", CONSENT_BUTTONS)
+
+    async def on_consent(self, callback_id: str, choice: str, user: dict, message: dict) -> None:
+        """Кнопки шага согласия. Решение пишется с версией текста; «Не согласен» — заявка без контакта."""
+        services = self.services
+        chat_id = (message.get("recipient") or {}).get("chat_id")
+        conn = active_connection(services)
+        manager = services.db.get_connection(f"{CONN_PREFIX}{user.get('user_id')}")
+        if not chat_id or (manager and manager.approved):
+            await self.answer(callback_id, "Это кнопка для клиентов.")
+            return
+        text = services.consents.text()
+        if not conn or not text.ready:
+            await self.answer(callback_id, "Кнопка устарела.")
+            return
+        client = user_name(user)
+        if choice == "text":
+            await self.answer(callback_id, "Текст согласия")
+            await self.send(chat_id, text.full)
+            await self.send(chat_id, CONSENT_ASK, CONSENT_BUTTONS)
+        elif choice == "yes":
+            services.consents.record(chat_id, consent.YES, text.version)
+            services.event("MAX: клиент дал согласие на обработку контакта")
+            await self.answer(callback_id, "Спасибо")
+            self.waiting[chat_id] = ("lead", time.time())
+            await self.send(chat_id, services.sign(LEAD_ASK), ASK_CONTACT)
+        elif choice == "no":
+            services.consents.record(chat_id, consent.NO, text.version)
+            services.event("MAX: клиент не дал согласие — заявка без контакта")
+            await self.answer(callback_id, "Хорошо")
+            await self.take_lead(conn, chat_id, client, reply=CONSENT_NO)
+        else:
+            await self.answer(callback_id, "Кнопка устарела.")
+
+    async def revoke_consent(self, conn: D.Connection, chat_id: int, client: str) -> None:
+        """«Отзываю согласие», «удалите мои данные»: отзыв в журнал, менеджеру — что удалить и где."""
+        services = self.services
+        services.consents.record(chat_id, consent.REVOKED, services.consents.text().version)
+        self.waiting.pop(chat_id, None)
+        services.event("MAX: клиент отозвал согласие")
+        await self.send(conn.owner_chat_id, f"{client} отозвал(а) согласие на обработку данных. Если нет другого "
+                                            f"законного основания хранить их, удалите данные клиента: админка → "
+                                            f"«Наблюдение» → «Удалить данные клиента», номер чата {chat_id}.")
+        await self.send(chat_id, services.sign(REVOKED_DONE))
+
     async def take_lead(self, conn: D.Connection, chat_id: int, client: str, phone: str = "",
-                        body: dict | None = None) -> None:
+                        body: dict | None = None, reply: str = "") -> None:
         """Заявка: готовая карточка менеджеру. Телефон — только в карточке, в журнал не пишем."""
         services = self.services
         known = self.what_is_known(conn, chat_id)
@@ -546,7 +617,7 @@ class MaxBot:
             await self.show_media(conn.owner_chat_id, body)
         contact = f"Телефон: {phone}\n" if phone else ""
         sent = await self.send_card(conn.owner_chat_id, f"Заявка: {client}\n{contact}{details}\n{known}", dialog_id)
-        await self.send(chat_id, services.sign(LEAD_DONE if sent else NOT_DELIVERED))
+        await self.send(chat_id, services.sign((reply or LEAD_DONE) if sent else NOT_DELIVERED))
 
     async def call_human(self, conn: D.Connection, chat_id: int, client: str, text: str = "") -> None:
         """Клиент просит человека. В автоответе бот замолкает, чтобы не перебивать менеджера."""
@@ -596,9 +667,8 @@ class MaxBot:
             await self.answer(callback_id, "Жду бюджет")
             await self.send(chat_id, services.sign(BUDGET_ASK))
         elif choice == "lead":
-            self.waiting[chat_id] = ("lead", time.time())
-            await self.answer(callback_id, "Оставьте контакт")
-            await self.send(chat_id, services.sign(LEAD_ASK), ASK_CONTACT)
+            await self.answer(callback_id, "Заявка")
+            await self.ask_contact(conn, chat_id, client)
         elif choice == "human":
             await self.answer(callback_id, "Зову менеджера")
             await self.call_human(conn, chat_id, client)
@@ -831,6 +901,9 @@ class MaxBot:
             return
         if action == "menu":
             await self.on_menu(callback_id, rest, callback.get("user") or {}, message)
+            return
+        if action == "consent":
+            await self.on_consent(callback_id, rest, callback.get("user") or {}, message)
             return
         if action not in {"send", "skip", "flag"} or not rest.isdigit():
             return

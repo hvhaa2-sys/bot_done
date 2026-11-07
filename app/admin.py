@@ -1019,6 +1019,13 @@ def create_app(services: Services) -> FastAPI:
             services.db.set_settings({SOURCES_KEY: json.dumps([*sources, {"id": source, "title": title}], ensure_ascii=False)})
         return RedirectResponse("/invite", status_code=303)
 
+    @app.post("/invite/consent", dependencies=[Depends(auth)])
+    async def invite_consent(short: str = Form(""), full: str = Form("")) -> RedirectResponse:
+        text = services.consents.save_text(short[:2000], full[:20000])
+        msg = (f"Текст согласия сохранён, версия {text.version}: бот спрашивает согласие перед запросом контакта."
+               if text.ready else "Сохранено, но в тексте остались [скобки] — бот по-прежнему не просит контакт.")
+        return RedirectResponse("/invite?" + urlencode({"msg": msg}), status_code=303)
+
     @app.get("/invite/qr/{source}.svg", dependencies=[Depends(auth)])
     async def invite_qr(source: str, download: int = 0) -> Response:
         username = (services.max_status or {}).get("username")
@@ -2110,10 +2117,32 @@ def invite_html(services: Services, msg: str = "") -> str:
 <div class="row"><button type="button" class="light small" data-copy="old-text">Скопировать</button></div></div>"""
     return f"""<h1>Клиенты в MAX</h1>{f'<p class="ok">{escape(msg)}</p>' if msg else ""}{empty}
 <p class="muted">У каждого места своя ссылка: так видно, откуда пришёл клиент и кто оставил заявку.</p>
-<div class="sources">{"".join(card(s) for s in sources)}</div>{unmarked}{text}
+<div class="sources">{"".join(card(s) for s in sources)}</div>{unmarked}{text}{consent_html(services)}
 <div class="card"><h2>Новое место</h2><form method="post" action="/invite/source" class="row">
 <label for="source-title">Название</label><input id="source-title" name="title" maxlength="40" required placeholder="Например, листовка в ТЦ">
 <button class="small">Добавить</button></form></div>"""
+
+
+def consent_html(services: Services) -> str:
+    """Согласие на обработку контакта: пока в тексте [скобки] черновика, бот контакт не просит вовсе."""
+    text, counts = services.consents.text(), services.consents.counts(services.consents.text().version)
+    if text.ready:
+        state = (f'<p><span class="pill ok">Действует</span> версия {text.version} · '
+                 f'согласились {counts["yes"]}, отказались {counts["no"]}, отозвали {counts["revoked"]}</p>'
+                 '<p class="muted">Перед кнопкой «Отправить мой контакт» клиент видит короткий текст и кнопки «Согласен» и '
+                 '«Не согласен». Изменили текст — согласия по старой версии не считаются, бот спросит снова.</p>')
+    else:
+        left = ", ".join(dict.fromkeys(text.placeholders[:4]))
+        state = (f'<p><span class="pill warn">Не оформлено</span> бот не просит контакт: заявка уходит менеджеру без '
+                 f'телефона, вы отвечаете клиенту в этом чате.</p><p class="muted">Заполните с юристом: {escape(left)}. '
+                 'Черновик и вопросы к юристу — docs/MAX-CONSENT.md.</p>')
+    return f"""<div class="card" id="consent"><h2>Согласие на обработку данных</h2>{state}
+<form method="post" action="/invite/consent" data-dirty>
+<label for="consent-short">Перед запросом контакта</label>
+<textarea id="consent-short" name="short" rows="3" maxlength="2000">{escape(text.short)}</textarea>
+<label for="consent-full">Полный текст (кнопка «Прочитать согласие полностью»)</label>
+<textarea id="consent-full" name="full" rows="8" maxlength="20000">{escape(text.full)}</textarea>
+<div class="row"><button class="small">Сохранить</button></div></form></div>"""
 
 
 def learn_html(services: Services, msg: str = "", check: str = "", *, tab: str = "", n: int = 0,

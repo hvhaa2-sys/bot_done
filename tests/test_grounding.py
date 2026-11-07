@@ -94,3 +94,37 @@ def test_usually_placed_and_may_depend_are_guesses():
     reply = ask("Где ставят автомобиль для экспонирования?",
                 "Автомобиль обычно размещается на первом этаже у входа. Точное место может зависеть от планировки.")
     assert reply.decision == ESCALATE
+
+
+def test_instruction_to_send_list_to_manager_is_an_answer_not_a_handoff():
+    # real_style 07.11: «нужен пропуск на ночной монтаж» — модель ответила по заметке, needs_manager=false,
+    # а слово «менеджеру» в середине ответа отправляло всё менеджеру
+    context = ("Вопрос: Что нужно организатору для монтажа? Ответ: Минимум за 3 дня до монтажа нужно прислать список "
+               "сотрудников — менеджер оформит разрешение. С собой паспорт.")
+    raw = lambda answer: json.dumps({"answer": answer, "confidence": 1, "needs_manager": False}, ensure_ascii=False)  # noqa: E731
+    assistant = Assistant(KB, Says(""))
+    reply = assistant._decide(raw("Минимум за 3 дня до монтажа отправьте список сотрудников менеджеру. С собой паспорт."),
+                              "что от нас надо для ночного монтажа?", [], context, [])
+    assert reply.decision == ANSWER and "менеджеру" in reply.text
+    # Обещание менеджера рядом — по-прежнему к менеджеру; и без опоры в базе — тоже
+    promise = assistant._decide(raw("Отправьте макет менеджеру, он уточнит сроки."), "что от нас надо?", [], context, [])
+    assert promise.decision == ESCALATE
+    bare = assistant._decide(raw("Отправьте список сотрудников менеджеру, и всё."), "что от нас надо?", [],
+                             "Ответ: за 3 дня нужен список сотрудников.", [])
+    assert bare.decision == ESCALATE
+
+
+def test_all_period_tiers_of_one_item_come_together():
+    # sales 07.11: «экран в атриуме и радио в веере, сколько стоит?» — в выдаче две ступени пакета из четырёх,
+    # остальные суммы модель брала из заметки, и ответ уходил менеджеру по проверке цен
+    from app.core.knowledge import PriceRow
+    pack = "Пакет: экраны + радио"
+    rows = [PriceRow(pack, "ВЕЕР Молл, Екатеринбург", f"1 месяц при размещении {p}", price, "без НДС")
+            for p, price in (("на 12 месяцев", 154275), ("до 3 месяцев", 224400), ("от 6 месяцев", 168300),
+                             ("от 3 месяцев", 179520))]
+    rows += [PriceRow("Цифровой экран", "ВЕЕР Молл, Екатеринбург — атриум", "1 месяц", 31500, ""),
+             PriceRow(pack, "ДЕПО, Нижний Тагил", "1 месяц при размещении от 3 месяцев", 99000, "")]
+    kb = KnowledgeBase([], rows, [])
+    hits = [h for h in kb.retrieve("пакет экраны и радио в веере на 12 месяцев", top_k=1) if h.chunk.kind == "price"]
+    assert [h.chunk.price for h in hits] == [224400, 179520, 168300, 154275], "все ступени, по порядку срока"
+    assert 99000 not in {h.chunk.price for h in kb.retrieve("пакет экраны и радио в веере", top_k=1)}, "чужой ТЦ не тянем"

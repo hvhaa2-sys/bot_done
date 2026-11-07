@@ -306,8 +306,11 @@ class Assistant:
         # Бот пишет от имени менеджера: «уточнит менеджер» значит, что ответа нет,
         # а обещание без уведомления менеджера никто не выполнит. Но если модель сама не просила
         # менеджера, ответ полный, а «свяжитесь с менеджером» дописано в конце — просто убираем хвост
-        if _MENTIONS_MANAGER_RE.search(text):
-            text, needs_manager = drop_manager_tail(text) if not needs_manager else (text, True)
+        # «Отправьте список сотрудников менеджеру» — инструкция из базы, а не «уточнит менеджер»: её не считаем
+        probe = hide_send_to_manager(text, context)
+        if _MENTIONS_MANAGER_RE.search(probe):
+            text, needs_manager = drop_manager_tail(probe) if not needs_manager else (text, True)
+            text = text.replace(_HIDDEN_MANAGER, "менеджер")
 
         # «…280 000 ₽ в месяц. Хотите забронировать даты?» — ответ полный, а бронь решает менеджер:
         # заключительный вопрос-предложение убираем, а не отдаём весь ответ менеджеру
@@ -418,6 +421,25 @@ def drop_offer_question(text: str) -> str:
         return text
     rest = "".join(sentences[:-1]).strip()
     return rest if len(rest) >= _MANAGER_TAIL_MIN and not _COMMITMENT_RE.search(rest) else text
+
+
+_SEND_TO_MANAGER_RE = re.compile(r"\b(?:отправ|присл|переда|направ|сда)\w*[^.!?\n]{0,80}?\bменеджер(?=(?:у|ам)\b)",
+                                 re.IGNORECASE)
+_HIDDEN_MANAGER = "\x00"
+
+
+def hide_send_to_manager(text: str, context: str) -> str:
+    """Спрятать «менеджер» в инструкции клиенту «отправьте … менеджеру», если и в базе так написано
+    («прислать список сотрудников — менеджер оформит разрешение»). В фразе с обещанием («отправьте макет
+    менеджеру, он уточнит сроки») не прячем: такой ответ по-прежнему уходит менеджеру."""
+    if "менеджер" not in context.lower():
+        return text
+    out = []
+    for sentence in re.findall(r"[^.!?\n]+[.!?]*\s*|\n", text):
+        if not _MANAGER_PROMISE_RE.search(sentence):
+            sentence = _SEND_TO_MANAGER_RE.sub(lambda m: m.group(0)[:-len("менеджер")] + _HIDDEN_MANAGER, sentence)
+        out.append(sentence)
+    return "".join(out)
 
 
 def drop_manager_tail(text: str) -> tuple[str, bool]:
