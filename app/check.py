@@ -77,7 +77,7 @@ async def check_max(settings: Settings) -> bool:
         return True
     from .channels.max_api import MaxApi, MaxError
 
-    api = MaxApi(settings.max_bot_token, settings.max_api_url)
+    api = MaxApi(settings.max_bot_token, settings.max_api_url, direct_interface=settings.direct_interface)
     try:
         me = await api.me()
         hooks = await api.subscriptions()

@@ -279,6 +279,14 @@ gap:8px;overflow-x:auto;padding-bottom:8px}.onboarding-steps li{flex:0 0 auto;ma
 height:max(520px,calc(100dvh - 190px));background:var(--card);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
 .list{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line)}
 .list-head{padding:12px 16px;border-bottom:1px solid var(--line);font-weight:600}
+.platforms{margin:0;padding:8px 12px 0;border-bottom:1px solid var(--line);gap:4px}
+.ch{display:inline-block;margin-right:8px;padding:1px 6px;border-radius:var(--radius-sm);font:600 11px/16px var(--mono);
+letter-spacing:.04em;vertical-align:2px;border:1px solid var(--line-strong);color:var(--muted)}
+.ch-max{color:var(--text);border-color:var(--text)}
+.chat .bubble.action{font-style:italic;color:var(--muted)}
+.composer{display:flex;flex-direction:column;gap:8px;padding:12px 20px;border-top:1px solid var(--line);background:var(--card)}
+.composer textarea{min-height:64px;resize:vertical}.composer-row{display:flex;gap:12px;align-items:center;justify-content:space-between}
+.composer-row .muted{font-size:13px}
 .items{position:relative;flex:1;overflow-y:auto}
 .item{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:10px;row-gap:1px;padding:12px 16px;
 border-bottom:1px solid var(--line);color:var(--text);text-decoration:none}
@@ -290,6 +298,7 @@ border-bottom:1px solid var(--line);color:var(--text);text-decoration:none}
 .thread{display:flex;flex-direction:column;min-width:0;min-height:0}
 .thread-head{display:flex;align-items:center;flex-wrap:wrap;gap:4px 12px;padding:12px 20px;border-bottom:1px solid var(--line)}
 .thread-head h2{margin:0;font-size:17px}
+.thread-head form{display:inline;margin:0}
 .thread-body{flex:1;overflow-y:auto;padding:20px 24px;background:var(--bg)}
 .thread .bubble{background:var(--card)}
 .thread-foot{padding:10px 20px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
@@ -1201,10 +1210,10 @@ def create_app(services: Services) -> FastAPI:
     # --- журнал ---
     @app.get("/dialogs", dependencies=[Depends(auth)])
     async def dialogs(f: str = "", q: str = "", conn: str = "", chat: str = "", done: str = "",
-                      keep: str = "") -> Response:
+                      keep: str = "", ch: str = "") -> Response:
         if f in ("observe", "watch"):  # раньше наблюдение жило вкладками «Диалогов»
             return RedirectResponse("/observe" + (f"?{urlencode({'q': q})}" if q else ""), status_code=303)
-        return page("Диалоги", dialogs_html(services, f, q, conn, chat, DRAFT_RESULTS.get(done, ""), keep), "/dialogs",
+        return page("Диалоги", dialogs_html(services, f, q, conn, chat, DRAFT_RESULTS.get(done, ""), keep, ch), "/dialogs",
                     wide=True, poll=LIVE_SECONDS)
 
     @app.get("/observe", dependencies=[Depends(auth)])
@@ -1256,11 +1265,27 @@ def create_app(services: Services) -> FastAPI:
 
     @app.post("/dialogs/{dialog_id}/draft", dependencies=[Depends(auth)])
     async def draft_decision(dialog_id: int, action: str = Form(...), text: str = Form(""),
-                             back: str = Form("/dialogs")) -> RedirectResponse:
-        """Ответ клиенту с сайта: отправить черновик, свой вариант или пропустить — как кнопки в Telegram."""
+                             back: str = Form("/dialogs"), close_older: str = Form("")) -> RedirectResponse:
+        """Ответ клиенту с сайта: отправить черновик, свой вариант или пропустить — как кнопки в Telegram.
+        close_older — ответ из поля внизу переписки: он закрывает и прежние ждущие вопросы этого чата
+        (клиент трижды написал «Скинь кп» — отвечаем один раз)."""
+        dialog = services.db.get_dialog(dialog_id)
         result = await services.decide_draft(dialog_id, action, text[:4096])
+        if result == "sent" and close_older and dialog:
+            for r in services.db.chat_dialogs(dialog["connection_id"] or "", dialog["chat_id"] or 0, WAITING):
+                if r["id"] < dialog_id:
+                    services.db.set_dialog_status(r["id"], D.DRAFT_EDITED, answer=text[:4096].strip())
         back = back if back.startswith("/dialogs") else "/dialogs"
         return RedirectResponse(f"{back}{'&' if '?' in back else '?'}done={result}#d{dialog_id}", status_code=303)
+
+    @app.post("/dialogs/resume", dependencies=[Depends(auth)])
+    async def resume_dialog_chat(connection_id: str = Form(...), chat_id: int = Form(...),
+                                 back: str = Form("/dialogs")) -> RedirectResponse:
+        """Вернуть бота в один чат: пауза после «Позвать менеджера» или ответа менеджера снимается раньше срока."""
+        if services.db.resume_chat(connection_id, chat_id):
+            services.event("Пауза снята из админки")
+        back = back if back.startswith("/dialogs") else "/dialogs"
+        return RedirectResponse(back, status_code=303)
 
     @app.get("/dialogs/{dialog_id}/review", dependencies=[Depends(auth)])
     async def review_form(dialog_id: int, back: str = "/dialogs?f=flagged") -> HTMLResponse:
@@ -2346,8 +2371,8 @@ def short_time(ts: float) -> str:
     return moment.strftime("%H:%M") if moment.date() == dt.date.today() else moment.strftime("%d.%m")
 
 
-def chat_link(connection_id: str | None, chat_id: int | None, f: str = "", q: str = "") -> str:
-    params = {"f": f, "q": q, "conn": connection_id or "", "chat": chat_id or 0}
+def chat_link(connection_id: str | None, chat_id: int | None, f: str = "", q: str = "", ch: str = "") -> str:
+    params = {"f": f, "q": q, "ch": ch, "conn": connection_id or "", "chat": chat_id or 0}
     return "/dialogs?" + urlencode({k: v for k, v in params.items() if v != ""})
 
 
@@ -2355,10 +2380,81 @@ def status_pill(status: str) -> str:
     return f'<span class="pill {PILL_TONE.get(status, "")}">{escape(STATUS_NAMES.get(status, status))}</span>'
 
 
-def turn_html(r, back: str, titles: dict[str, str]) -> str:
+WAITING = (D.ESCALATED, D.DRAFT_PENDING)  # вопрос ждёт менеджера
+CHANNELS = {"": "Все", "tg": "Telegram", "max": "MAX"}
+# Клиент нажал кнопку, а не написал: в журнале — служебная отметка, в переписке — понятная подпись
+BUTTON_TEXTS = {"[заявка]": "Нажал(а) «Оставить заявку»", "[просит менеджера]": "Нажал(а) «Позвать менеджера»"}
+
+
+def channel_of(connection_id: str | None) -> str:
+    connection_id = connection_id or ""
+    return "sandbox" if connection_id.startswith("sandbox:") else "max" if connection_id.startswith("max:") else "tg"
+
+
+def client_text(question: str) -> tuple[str, bool]:
+    """(что показать, нажата ли кнопка): «[заявка]\nзвонить после 18» → «Нажал(а) «Оставить заявку»: звонить после 18»."""
+    head, _, rest = (question or "").partition("\n")
+    label = BUTTON_TEXTS.get(head.strip())
+    if not label:
+        return question, False
+    return label + (f": {rest.strip()}" if rest.strip() else ""), True
+
+
+def channel_tag(connection_id: str | None) -> str:
+    kind = channel_of(connection_id)
+    return "" if kind == "sandbox" else f'<span class="ch ch-{kind}">{"MAX" if kind == "max" else "TG"}</span>'
+
+
+def collapse_repeats(turns: list) -> list[tuple]:
+    """Подряд один и тот же вопрос без ответа («Скинь кп по вееру» ×3) — один раз, с числом повторов."""
+    out: list[list] = []
+    for r in turns:
+        same = out and out[-1][0]["question"].strip().lower() == r["question"].strip().lower() \
+            and out[-1][0]["status"] in WAITING and r["status"] in WAITING
+        if same:
+            out[-1] = [r, out[-1][1] + 1]
+        else:
+            out.append([r, 1])
+    return [tuple(x) for x in out]
+
+
+def pause_html(services: Services, key: tuple[str, int], back: str) -> str:
+    """Бот молчит в этом чате: до какого часа и кнопка, чтобы вернуть его раньше."""
+    until = services.db.paused_until(*key)
+    if not until:
+        return ""
+    at = dt.datetime.fromtimestamp(until, services.local_now().tzinfo).strftime("%H:%M")
+    return (f'<span class="pill warn">Бот молчит до {at}</span>'
+            f"<form method='post' action='/dialogs/resume'><input type='hidden' name='connection_id' value='{escape(key[0])}'>"
+            f"<input type='hidden' name='chat_id' value='{key[1]}'><input type='hidden' name='back' value='{escape(back)}'>"
+            f"<button class='small light'>Вернуть бота</button></form>")
+
+
+def composer_html(turns: list, back: str, channel: str) -> str:
+    """Одно поле ответа внизу переписки, как в мессенджере: отвечает на последний ждущий вопрос
+    и закрывает прежние ждущие этого чата."""
+    waiting = [r for r in turns if r["status"] in WAITING]
+    if not waiting or channel == "sandbox":
+        return ""
+    last = waiting[-1]
+    where = "в MAX" if channel == "max" else "в Telegram"
+    count = f" · ждут ответа: {len(waiting)}" if len(waiting) > 1 else ""
+    return (f"<form class='composer' method='post' action='/dialogs/{last['id']}/draft' data-reply data-enter-send>"
+            f"<input type='hidden' name='back' value='{escape(back)}'><input type='hidden' name='action' value='edit'>"
+            f"<input type='hidden' name='close_older' value='1'>"
+            f"<textarea name='text' rows='2' maxlength='4096' required aria-label='Ответ клиенту' "
+            f"placeholder='Ответ клиенту {where} от вашего имени'></textarea>"
+            f"<div class='composer-row'><span class='muted'>Ответ уйдёт {where}{count}</span>"
+            f"<button>Отправить</button></div></form>")
+
+
+def turn_html(r, back: str, titles: dict[str, str], repeats: int = 1) -> str:
     """Вопрос клиента и что с ним сделал бот: ответ или черновик, на что опирался или почему передал, кнопка «Ошибка»."""
     flagged, status = bool(r["flagged"]), r["status"]
     when = dt.datetime.fromtimestamp(r["created_at"]).strftime("%d.%m %H:%M")
+    said, pressed = client_text(r["question"])
+    action = " action" if pressed else ""
+    times = f" · написал(а) {repeats} раза подряд" if 2 <= repeats <= 4 else f" · написал(а) {repeats} раз подряд" if repeats > 4 else ""
     draft = " draft" if status in (D.DRAFT_PENDING, D.DRAFT_REJECTED) else ""
     text = f"<div class='bubble{draft}'>{escape(r['answer'])}</div>" if r["answer"] else ""
     if r["decision"] == "answer":
@@ -2379,7 +2475,8 @@ def turn_html(r, back: str, titles: dict[str, str]) -> str:
         form = review_form_html(r, back, values, prefix=f"r{r['id']}-")
         review = f"<details class='review'{'' if r['reviewed'] else ' open'}><summary>{label}</summary>{form}</details>"
     return (f"<div class='turn{' flag' if flagged else ''}' id='d{r['id']}' data-key='{r['id']}:{status}:{int(flagged)}'>"
-            f"<div class='msg'><div class='muted'>Клиент · {when}</div><div class='bubble'>{escape(r['question'])}</div></div>"
+            f"<div class='msg'><div class='muted'>Клиент · {when}{times}</div>"
+            f"<div class='bubble{action}'>{escape(said)}</div></div>"
             f"<div class='msg me'><div class='muted'>Бот · {status_pill(status)}</div>{text}</div>"
             f"<div class='why'>{f'<span>{why}</span>' if why else ''}{flag_form}</div>{draft_form_html(r, back)}{review}</div>")
 
@@ -2387,9 +2484,9 @@ def turn_html(r, back: str, titles: dict[str, str]) -> str:
 def draft_form_html(r, back: str) -> str:
     """Вопрос ждёт менеджера — ответить можно прямо здесь: отправить черновик, свой вариант или пропустить.
     В тестовом чате отвечать некому."""
-    if r["status"] not in (D.DRAFT_PENDING, D.ESCALATED) or (r["connection_id"] or "").startswith("sandbox:"):
-        return ""
     has_draft = r["status"] == D.DRAFT_PENDING and r["answer"]
+    if not has_draft or (r["connection_id"] or "").startswith("sandbox:"):
+        return ""  # передачу без черновика закрывает поле ответа внизу переписки
     send = "<button name='action' value='send'>Отправить клиенту</button>" if has_draft else ""
     skip = "<button class='light' name='action' value='skip'>Пропустить</button>" if has_draft else ""
     return (f"<form class='reply' method='post' action='/dialogs/{r['id']}/draft' data-reply>"
@@ -2404,7 +2501,7 @@ def draft_form_html(r, back: str) -> str:
 
 
 def dialogs_html(services: Services, f: str, q: str, conn: str = "", chat: str = "", msg: str = "",
-                 keep: str = "") -> str:
+                 keep: str = "", ch: str = "") -> str:
     """«Диалоги» как ящик поддержки: слева разговоры по чатам, справа переписка выбранного с решениями бота."""
     f, q = (f if f in FILTERS else ""), q.strip()
     tabs = "".join(
@@ -2414,13 +2511,19 @@ def dialogs_html(services: Services, f: str, q: str, conn: str = "", chat: str =
 <input type="search" name="q" value="{escape(q)}" placeholder="Поиск по вопросам и ответам" aria-label="Поиск по вопросам и ответам">
 <button class="light">Найти</button></form>"""
     head = f'<h1>Диалоги</h1>{note(msg)}<div class="toolbar"><div class="tabs" data-live="tabs">{tabs}</div>{search}</div>'
-    chats: dict[tuple[str, int], list] = {}
+    ch = ch if ch in CHANNELS else ""
+    every: dict[tuple[str, int], list] = {}
     for r in services.db.recent_dialogs(500, query=q, **FILTERS[f][1]):
-        chats.setdefault((r["connection_id"] or "", r["chat_id"] or 0), []).append(r)
+        every.setdefault((r["connection_id"] or "", r["chat_id"] or 0), []).append(r)
+    chats = {k: v for k, v in every.items() if not ch or channel_of(k[0]) == ch}
+    platforms = "".join(
+        f'<a href="{escape("/dialogs?" + urlencode({k: v for k, v in (("f", f), ("q", q), ("ch", key)) if v}))}" '
+        f'class="{"on" if key == ch else ""}">{name}<span class="c">'
+        f'{sum(1 for k in every if not key or channel_of(k[0]) == key)}</span></a>' for key, name in CHANNELS.items())
     if not chats:
-        empty = ("Ничего не нашлось." if q else
+        empty = ("Ничего не нашлось." if q or ch else
                  "Здесь появятся разговоры, в которых участвует бот. Проверить его можно на «Обзоре».")
-        return f'{head}<div class="card empty">{empty}</div>'
+        return f'{head}<div class="platforms tabs">{platforms}</div><div class="card empty">{empty}</div>'
     chosen = next((k for k in chats if k[0] == conn and str(k[1]) == chat), None)
     # keep — разговор, который уже на экране: живое обновление не перескакивает на новый
     picked = chosen or next((k for k in chats if f"{k[0]}|{k[1]}" == keep), None) or next(iter(chats))
@@ -2428,27 +2531,34 @@ def dialogs_html(services: Services, f: str, q: str, conn: str = "", chat: str =
     for key, rows in chats.items():
         last, name = rows[0], chat_title(services, *key)
         mark = '<span class="pill warn">ошибка</span>' if any(r["flagged"] for r in rows) else ""
+        waiting = sum(r["status"] in WAITING for r in rows)
+        wait = f'<span class="pill warn">ждёт ответа{f" · {waiting}" if waiting > 1 else ""}</span>' if waiting else ""
+        silent = services.db.paused_until(*key)
+        hush = '<span class="pill">бот на паузе</span>' if silent else ""
         items.append(
-            f'<a class="item{" on" if key == picked else ""}" href="{escape(chat_link(*key, f, q))}" '
-            f'data-key="{key[0]}:{key[1]}:{last["id"]}:{last["status"]}">'
-            f'<span class="nm">{escape(name)}</span>'
-            f'<span class="tm">{short_time(last["created_at"])}</span><span class="pv">{escape(last["question"])}</span>'
-            f'<span class="st">{status_pill(last["status"])}{mark}</span></a>')
+            f'<a class="item{" on" if key == picked else ""}" href="{escape(chat_link(*key, f, q, ch))}" '
+            f'data-key="{key[0]}:{key[1]}:{last["id"]}:{last["status"]}:{int(bool(silent))}">'
+            f'<span class="nm">{channel_tag(key[0])}{escape(name)}</span>'
+            f'<span class="tm">{short_time(last["created_at"])}</span>'
+            f'<span class="pv">{escape(client_text(last["question"])[0])}</span>'
+            f'<span class="st">{wait or status_pill(last["status"])}{hush}{mark}</span></a>')
     turns = services.db.chat_dialogs(*picked, FILTERS[""][1]["statuses"])
     titles = {c.id: c.text for c in services.kb.chunks}
-    back = chat_link(*picked, f, q)
-    channel = ("тестовый чат админки" if picked[0].startswith("sandbox:")
-               else "MAX" if picked[0].startswith("max:") else "Telegram")
-    to_list = "/dialogs" + (f"?{urlencode({k: v for k, v in (('f', f), ('q', q)) if v})}" if f or q else "")
+    back = chat_link(*picked, f, q, ch)
+    kind = channel_of(picked[0])
+    channel = {"sandbox": "тестовый чат админки", "max": "MAX", "tg": "Telegram"}[kind]
+    to_list = "/dialogs" + (f"?{urlencode({k: v for k, v in (('f', f), ('q', q), ('ch', ch)) if v})}" if f or q or ch else "")
     export = ('<p><a class="btn light" href="/dialogs/flagged.csv">Скачать для экзамена (CSV)</a> '
               '<span class="muted">только проверенные примеры</span></p>' if f == "flagged" else "")
     return f"""{head}{export}<div class="inbox{" open" if chosen else ""}" data-live="inbox"
 data-chat="{escape(f"{picked[0]}|{picked[1]}")}">
-<div class="list"><div class="list-head">Разговоры · {len(chats)}</div><div class="items">{"".join(items)}</div></div>
+<div class="list"><div class="platforms tabs">{platforms}</div>
+<div class="list-head">Разговоры · {len(chats)}</div><div class="items">{"".join(items)}</div></div>
 <div class="thread"><div class="thread-head"><a class="back" href="{escape(to_list)}">← Все разговоры</a>
-<h2>{escape(chat_title(services, *picked))}</h2>
-<span class="muted">{channel} · {plural(len(turns), "вопрос", "вопроса", "вопросов")}</span></div>
-<div class="thread-body"><div class="chat">{"".join(turn_html(r, back, titles) for r in turns)}</div></div>
+<h2>{channel_tag(picked[0])}{escape(chat_title(services, *picked))}</h2>
+<span class="muted">{channel} · {plural(len(turns), "вопрос", "вопроса", "вопросов")}</span>{pause_html(services, picked, back)}</div>
+<div class="thread-body"><div class="chat">{"".join(turn_html(r, back, titles, n) for r, n in collapse_repeats(turns))}</div></div>
+{composer_html(turns, back, kind)}
 <div class="thread-foot">Разобранные ошибки попадают в экзамен.
 <span class="keys">↑ и ↓ — соседний разговор, / — поиск</span></div>
 </div></div>"""

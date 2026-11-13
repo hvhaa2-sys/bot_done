@@ -10,6 +10,9 @@ import asyncio
 
 import httpx
 
+from .. import netbind
+from ..tls import max_verify
+
 API_URL = "https://platform-api2.max.ru"
 TEXT_LIMIT = 4000  # MAX принимает текст короче 4000 символов
 POLL_TIMEOUT = 30  # столько секунд GET /updates ждёт новых событий, прежде чем вернуть пустой список
@@ -51,11 +54,16 @@ def keyboard(buttons: Buttons) -> dict:
 
 
 class MaxApi:
-    def __init__(self, token: str, base_url: str = "", transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(self, token: str, base_url: str = "", transport: httpx.AsyncBaseTransport | None = None,
+                 direct_interface: str = ""):
         if not token:
             raise ValueError("Не задан MAX_BOT_TOKEN")
-        self.client = httpx.AsyncClient(base_url=(base_url or API_URL).rstrip("/"), headers={"Authorization": token},
-                                        timeout=TIMEOUT, transport=transport)
+        base_url = (base_url or API_URL).rstrip("/")
+        verify = max_verify(base_url)
+        if transport is None:
+            transport = netbind.transport(direct_interface, verify, url=base_url)
+        self.client = httpx.AsyncClient(base_url=base_url, headers={"Authorization": token},
+                                        timeout=TIMEOUT, transport=transport, verify=verify)
 
     async def me(self) -> dict:
         return await self.request("GET", "/me")

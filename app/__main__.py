@@ -124,7 +124,8 @@ async def main() -> None:
         from .channels.max_api import MaxApi
         from .channels.max_bot import run_max
 
-        max_api = MaxApi(settings.max_bot_token, settings.max_api_url)
+        max_api = MaxApi(settings.max_bot_token, settings.max_api_url,
+                         direct_interface=settings.direct_interface)
         max_task = asyncio.create_task(run_max(max_api, services))
         max_task.add_done_callback(_log_crash)
         tasks.append(max_task)

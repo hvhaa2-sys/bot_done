@@ -68,7 +68,7 @@ def test_thread_offers_reply_and_reports_result(tmp_path):
     assert f"action='/dialogs/{draft}/draft'" in page and "value='send'>Отправить клиенту" in page
     assert "value='skip'>Пропустить" in page and ">Ролик нужен ваш.</textarea>" in page, "исправить — с черновиком в поле"
     other = client.get(f"/dialogs?conn={CONN}&chat=6").text.split('class="thread"')[1]
-    assert "Ответить клиенту" in other and "value='send'" not in other, "у передачи — только свой ответ"
+    assert "class='composer'" in other and "value='send'" not in other, "у передачи — только свой ответ, поле внизу"
     assert "/draft'" not in client.get("/dialogs?conn=sandbox%3Ax&chat=0").text, "в тестовом чате отвечать некому"
 
     r = client.post(f"/dialogs/{escalated}/draft", data={
@@ -139,3 +139,63 @@ def test_learn_is_a_queue_that_keeps_place_and_typed_answer(tmp_path):
     assert r.headers["location"] == "/learn?tab=questions&n=1"
     assert "2 из 2" in client.get(r.headers["location"]).text, "на место скрытого встал следующий"
     assert "Новых фактов из переписки нет" in client.get("/learn?tab=facts").text
+
+
+def test_platforms_button_labels_repeats_and_one_reply_for_all(tmp_path):
+    # 13.11, первый живой день MAX: «[просит менеджера]» вместо текста, три одинаковых вопроса — три открытые формы,
+    # Telegram и MAX в одном списке
+    client, services, sent = setup(tmp_path)
+    services.db.upsert_connection("max:2", 2, 2, True, True, "draft")
+    services.db.approve_connection("max:2")
+    services.client_senders["max"] = services.client_senders["telegram"]
+    log(services, 5, "Сколько стоит экран?", D.SENT_AUTO, answer="30 000 ₽.")
+    button = log(services, 9, "[просит менеджера]", D.ESCALATED, "escalate", conn="max:2")
+    first = log(services, 9, "Скинь кп по вееру", D.ESCALATED, "escalate", conn="max:2")
+    log(services, 9, "Скинь кп по вееру", D.ESCALATED, "escalate", conn="max:2")
+    last = log(services, 9, "Скинь кп по вееру", D.ESCALATED, "escalate", answer="Уточню и вернусь.", conn="max:2")
+
+    everything = client.get("/dialogs").text
+    assert ">Все<span class=\"c\">2</span>" in everything and ">Telegram<span class=\"c\">1</span>" in everything
+    assert ">MAX<span class=\"c\">1</span>" in everything and 'class="ch ch-max">MAX</span>' in everything
+    only_max = client.get("/dialogs?ch=max").text.split('class="items"')[1].split('class="thread"')[0]
+    assert "Скинь кп" in only_max and "Сколько стоит экран" not in only_max
+
+    thread = client.get("/dialogs?ch=max&conn=max%3A2&chat=9").text.split('class="thread"')[1]
+    assert "Нажал(а) «Позвать менеджера»" in thread and "[просит менеджера]" not in thread
+    assert thread.count(">Скинь кп по вееру<") == 1 and "написал(а) 3 раза подряд" in thread
+    assert thread.count("class='composer'") == 1 and f"action='/dialogs/{last}/draft'" in thread
+    assert "Ответ клиенту в MAX" in thread and "ждут ответа: 4" in thread
+
+    client.post(f"/dialogs/{last}/draft", data={"action": "edit", "text": "Отправила КП на почту.", "close_older": "1",
+                                                "back": "/dialogs?ch=max&conn=max%3A2&chat=9"})
+    assert len(sent) == 1, "один ответ — одно сообщение клиенту"
+    assert {services.db.get_dialog(i)["status"] for i in (button, first, last)} == {D.DRAFT_EDITED}
+    assert "class='composer'" not in client.get("/dialogs?conn=max%3A2&chat=9").text, "ждущих больше нет"
+
+
+def test_paused_chat_shows_label_and_resume_button_for_that_chat_only(tmp_path):
+    client, services, _ = setup(tmp_path, "auto")
+    log(services, 5, "Позови менеджера", D.ESCALATED, "escalate")
+    log(services, 6, "Сколько стоит экран?", D.ESCALATED, "escalate")
+    services.db.pause_chat(CONN, 5, 30)
+    services.db.pause_chat(CONN, 6, 30)
+
+    page = client.get(f"/dialogs?conn={CONN}&chat=5").text
+    head = page.split('class="thread"')[1]
+    assert "Бот молчит до" in head and "action='/dialogs/resume'" in head and "Вернуть бота" in head
+    assert page.count("бот на паузе") == 2, "в списке пометка у обоих чатов на паузе"
+
+    back = f"/dialogs?conn={CONN}&chat=5"
+    res = client.post("/dialogs/resume", data={"connection_id": CONN, "chat_id": 5, "back": back}, follow_redirects=False)
+    assert res.status_code == 303 and res.headers["location"] == back
+    assert not services.db.is_paused(CONN, 5) and services.db.is_paused(CONN, 6), "второй чат остаётся на паузе"
+    assert "Бот молчит до" not in client.get(back).text.split('class="thread"')[1]
+
+
+def test_resume_does_not_accept_foreign_back(tmp_path):
+    client, services, _ = setup(tmp_path, "auto")
+    log(services, 5, "Привет", D.ESCALATED, "escalate")
+    services.db.pause_chat(CONN, 5, 30)
+    res = client.post("/dialogs/resume", data={"connection_id": CONN, "chat_id": 5, "back": "https://evil.test/"},
+                      follow_redirects=False)
+    assert res.headers["location"] == "/dialogs" and not services.db.is_paused(CONN, 5)

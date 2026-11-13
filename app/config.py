@@ -54,6 +54,7 @@ class Settings:
     exam_files: str = "eval/questions*.csv"  # контрольные вопросы перед публикацией базы; пусто — без них
     max_bot_token: str = ""  # второй канал — бот организации в MAX; пусто — MAX выключен
     max_api_url: str = ""    # пусто — штатный адрес MAX Bot API
+    direct_interface: str = ""  # Mac с VPN: MAX и GigaChat напрямую через этот интерфейс (auto, en0), app/netbind.py
     max_webhook_url: str = ""     # https://домен/max/webhook; пусто — долгий опрос (для проверки, MAX просит вебхук)
     max_webhook_secret: str = ""  # MAX шлёт его в заголовке, чужие запросы отбрасываем
     telegram_api_url: str = ""  # свой релей к Telegram: с российских серверов api.telegram.org не отвечает
@@ -96,6 +97,7 @@ class Settings:
             exam_files=env("EXAM_FILES", "eval/questions*.csv"),
             max_bot_token=env("MAX_BOT_TOKEN", ""),
             max_api_url=env("MAX_API_URL", ""),
+            direct_interface=env("DIRECT_INTERFACE", ""),
             max_webhook_url=env("MAX_WEBHOOK_URL", ""),
             max_webhook_secret=env("MAX_WEBHOOK_SECRET", ""),
             telegram_api_url=env("TELEGRAM_API_URL", ""),
