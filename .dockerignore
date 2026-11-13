@@ -5,6 +5,8 @@
 !requirements-speech-overrides.txt
 !app/
 !app/**/*.py
+!app/certs/
+!app/certs/*.pem
 !app/static/
 !app/static/**
 !eval/

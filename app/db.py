@@ -754,6 +754,19 @@ class Database:
         self.conn.commit()
         return cur.rowcount
 
+    def resume_chat(self, connection_id: str, chat_id: int) -> bool:
+        """Снять паузу одного чата. True, если пауза была."""
+        cur = self.conn.execute("DELETE FROM pauses WHERE connection_id=? AND chat_id=?", (connection_id, chat_id))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def paused_until(self, connection_id: str, chat_id: int) -> float | None:
+        """Когда кончится пауза чата; None, если её нет или она уже прошла."""
+        row = self.conn.execute(
+            "SELECT until_ts FROM pauses WHERE connection_id=? AND chat_id=?", (connection_id, chat_id)
+        ).fetchone()
+        return row["until_ts"] if row and row["until_ts"] > time.time() else None
+
     def is_paused(self, connection_id: str, chat_id: int) -> bool:
         row = self.conn.execute(
             "SELECT until_ts FROM pauses WHERE connection_id=? AND chat_id=?", (connection_id, chat_id)

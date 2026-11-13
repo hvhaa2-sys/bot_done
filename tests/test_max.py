@@ -493,7 +493,8 @@ def test_launch_check_reports_max(monkeypatch, capsys):
         return httpx.Response(200, json={"subscriptions": [{"url": "https://example.org/hook"}]})
     real = max_api.MaxApi.__init__
     monkeypatch.setattr(max_api.MaxApi, "__init__",
-                        lambda self, token, base_url="": real(self, token, base_url, httpx.MockTransport(handler)))
+                        lambda self, token, base_url="", **kwargs:
+                        real(self, token, base_url, httpx.MockTransport(handler), **kwargs))
     settings = replace(Settings.load(), max_bot_token="T")
     assert asyncio.run(check.check_max(settings)) is False, "вебхук мешает опросу"
     out = capsys.readouterr().out
@@ -1255,3 +1256,21 @@ def test_admin_shows_consent_state_and_saves_text(env):
     text = services.consents.text()
     assert text.ready and text.version in client.get("/invite").text
 
+
+
+def test_human_card_in_auto_says_bot_is_silent_until_time(env):
+    services, bot, api = env
+    connect(bot)
+    feed(bot, message("/mode auto", MANAGER, MANAGER_CHAT))
+    press(bot, "menu:human")
+    card = to(api, MANAGER_CHAT)[-1]["text"]
+    assert "Бот молчит в этом чате до" in card and "/resume" in card and "«Вернуть бота»" in card
+    assert services.db.is_paused(CONN, CLIENT_CHAT)
+
+
+def test_human_card_in_drafts_has_no_pause_line(env):
+    services, bot, api = env
+    connect(bot)
+    press(bot, "menu:human")
+    assert "Бот молчит" not in to(api, MANAGER_CHAT)[-1]["text"]
+    assert not services.db.is_paused(CONN, CLIENT_CHAT)

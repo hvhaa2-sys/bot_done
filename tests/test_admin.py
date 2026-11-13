@@ -13,7 +13,8 @@ def make_client(tmp_path, login=True):
     for name in ("faq.md", "prices.csv", "stop_topics.txt"):
         (kb_dir / name).write_text((ROOT / "tests" / "fixtures" / "kb" / name).read_text(encoding="utf-8"), encoding="utf-8")
     settings = replace(Settings.load(), db_path=tmp_path / "a.db", kb_dir=kb_dir,
-                       llm_provider="mock", admin_token="secret", exam_files="")
+                       llm_provider="mock", admin_token="secret", exam_files="",
+                       telegram_bot_token="", max_bot_token="", max_webhook_url="", max_webhook_secret="")
     services = Services(settings)
     client = TestClient(create_app(services))
     if login:  # как после формы входа: токен живёт в cookie, а не в адресе страницы

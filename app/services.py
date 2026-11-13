@@ -15,6 +15,7 @@ from dataclasses import dataclass, replace
 from zoneinfo import ZoneInfo
 
 from .max_inbox import MaxInbox
+from .chat_names import ChatNames
 from .consent import Consents
 from .privacy import ChatPrivacy
 from .speech import SpeechRecognizer
@@ -175,9 +176,9 @@ class Services:
         self.max_worker: asyncio.Task | None = None
         self.max_status: dict | None = None  # то же для MAX: {ok, username, name} или {ok: False, error}
         self._chat_locks: dict[tuple[str, int], asyncio.Lock] = {}
-        # Лента «что делает бот» для админки и имена чатов (только в памяти, в базу не пишутся)
+        # Лента «что делает бот» для админки (только в памяти) и имена чатов (в базе, app/chat_names.py)
         self.events: deque[tuple[str, str]] = deque(maxlen=80)
-        self.chat_names: dict[int, str] = {}
+        self.chat_names = ChatNames(self.db.conn)
         self.owner_names: dict[int, str] = {}
         # Отправка клиенту из админки: канал при запуске кладёт сюда свою функцию (conn_id, chat_id, text) → bool:
         # «telegram» — __main__, «max» — run_max. Без неё ответить с сайта нельзя — админка так и скажет

@@ -631,10 +631,17 @@ class MaxBot:
             reason="human", confidence=0.0, status=D.ESCALATED, sources=[], latency_ms=0, mode=conn.mode,
             kb_version=services.kb_version)
         services.event("MAX: клиент попросил менеджера")
-        sent = await self.send_card(conn.owner_chat_id, f"{client} просит менеджера.\n{text}\n{known}", dialog_id)
+        auto = conn.mode == "auto"
+        quiet = ""
+        if auto:
+            minutes = services.settings.manager_pause_minutes
+            until = (services.local_now() + dt.timedelta(minutes=minutes)).strftime("%H:%M")
+            quiet = (f"\nБот молчит в этом чате до {until}, чтобы не перебивать вас. "
+                     "Вернуть раньше — /resume или кнопка «Вернуть бота» в админке.")
+        sent = await self.send_card(conn.owner_chat_id, f"{client} просит менеджера.\n{text}\n{known}{quiet}", dialog_id)
         if sent:
             self.called[chat_id] = time.time()
-            if conn.mode == "auto":
+            if auto:
                 services.db.pause_chat(conn.id, chat_id, services.settings.manager_pause_minutes)
         await self.send(chat_id, services.sign(HUMAN_DONE if sent else NOT_DELIVERED))
 
@@ -845,10 +852,15 @@ class MaxBot:
             previous = dialog["answer"] if dialog["status"] == D.DRAFT_EDITED else ""
             services.db.set_dialog_status(dialog["id"], D.DRAFT_EDITED,
                                          answer="\n".join(filter(None, (previous, text or "[файл]"))))
+            done = "Ваш вариант отправлен клиенту."
             if manager.mode == "auto":
                 # Менеджер взял разговор на себя: бот не перебивает, следующие сообщения идут ему (снять: /resume)
-                services.db.pause_chat(manager.id, dialog["chat_id"], services.settings.manager_pause_minutes)
-            await self.send(chat_id, "Ваш вариант отправлен клиенту.")
+                minutes = services.settings.manager_pause_minutes
+                services.db.pause_chat(manager.id, dialog["chat_id"], minutes)
+                until = (services.local_now() + dt.timedelta(minutes=minutes)).strftime("%H:%M")
+                done += (f"\nБот молчит в этом чате до {until}, чтобы не перебивать вас. "
+                         "Вернуть раньше — /resume или кнопка «Вернуть бота» в админке.")
+            await self.send(chat_id, done)
             if text:
                 services.in_background(collect_quietly(
                     services, "card", manager.id, dialog["chat_id"], dialog["id"], dialog["question"], text))

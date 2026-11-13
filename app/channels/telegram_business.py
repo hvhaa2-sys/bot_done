@@ -118,10 +118,11 @@ async def on_business_message(message: Message, bot: Bot, services: Services, bu
         return  # чужой аккаунт ещё не одобрен в админке — модель не тратим
     chat_id = message.chat.id
     chat = chat_title(message)
-    # Имя — только в памяти: по нему владелец в «Наблюдении» решает, какие чаты рабочие (одни номера ничего не говорят)
-    services.chat_names[chat_id] = chat
+    # Неразрешённый чат наблюдения: имя только в памяти — по нему владелец решает, рабочий ли это чат
     if conn.mode == D.OBSERVE and not services.privacy.allowed(conn.id, chat_id):
+        services.chat_names.remember(chat_id, chat)
         return
+    services.chat_names[chat_id] = chat
     # Наш же ответ: Telegram присылает его обратно от имени менеджера. Без этой
     # проверки бот после каждого своего ответа ставил бы себя на паузу.
     if message.sender_business_bot:
