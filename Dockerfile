@@ -18,6 +18,8 @@ RUN python -m pip install --no-cache-dir --require-hashes -r requirements.lock \
     && chown assistant:assistant /app/data
 
 COPY app ./app
+# Сертификат Минцифры нужен MAX и опционально GigaChat: сборка падает, если .dockerignore его потерял.
+RUN test -f /app/app/certs/russian_trusted_root_ca.pem
 COPY eval/*.py eval/questions*.csv ./eval/
 COPY tools/*.py ./tools/
 COPY deploy/container/entrypoint.py ./deploy/container/entrypoint.py

@@ -210,7 +210,7 @@ def test_concurrent_runs_are_rejected_without_duplicate_model_calls(tmp_path, mo
 
         monkeypatch.setattr(services, "answer", slow)
         transport = httpx.ASGITransport(app=client.app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", cookies={"admin_token": "secret"}) as web:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", headers={"Origin": "http://testserver"}, cookies={"admin_token": "secret"}) as web:
             first = asyncio.create_task(web.post("/onboarding/check", data=CASES))
             await asyncio.wait_for(started.wait(), timeout=2)
             second = await web.post("/onboarding/check", data=CASES)

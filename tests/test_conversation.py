@@ -85,7 +85,8 @@ def test_selection_survives_more_than_three_follow_ups(kb):
     assert "три месяца" in state.period
     assert state.budget == 80000
     assert "монтаж" in state.intent
-    assert len(llm.calls) == len(questions)
+    # 30 000 ₽ × три месяца больше общего бюджета 80 000 ₽: отказ в подборе без модели.
+    assert len(llm.calls) == len(questions) - 1
     assert VEER in llm.calls[-1][0]
     assert "80000" in state.query(questions[-1])
 

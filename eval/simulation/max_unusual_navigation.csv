@@ -1,0 +1,4 @@
+dialog,question,expected
+navigation_final,Сколько стоит экран на инфодеске в Бутово Молле на месяц?,answer
+navigation_final,Стоп перепутал. Не Бутово а ВЕЕР Молл. Тоже инфодеск. Сколько?,any
+navigation_final,То есть инфодеска в ВЕЕР нет? А навигационные стойки это не оно?,any

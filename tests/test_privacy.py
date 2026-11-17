@@ -59,7 +59,7 @@ def test_access_and_erase_require_auth_and_explicit_confirmation(env):
     services.settings = services.settings.__class__(**{**vars(services.settings), 'admin_token': 'test-secret'})
 
     async def scenario():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(services)), base_url='http://test') as c:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(services)), base_url='http://test', headers={'Origin': 'http://test'}) as c:
             assert (await c.post('/observe/erase', data={'chat_id': CLIENT_CHAT})).status_code in (401, 403)
             c.cookies.set('admin_token', 'test-secret')
             assert (await c.post('/observe/erase', data={'chat_id': CLIENT_CHAT})).status_code == 400

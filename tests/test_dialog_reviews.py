@@ -5,7 +5,7 @@ from dataclasses import replace
 from html import escape
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.admin_client import AdminClient as TestClient
 
 from app.admin import create_app
 from app.config import ROOT, Settings

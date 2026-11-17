@@ -19,7 +19,7 @@ from ..llm.base import LLMProvider
 from .conversation import MAX_CLARIFICATIONS, Conversation
 from .answer_grounding import budget_issues, price_period_issues, property_issues
 from .client_intent import active_request, is_ready_to_buy
-from .knowledge import KnowledgeBase, PriceRow, SearchHit, _format_words, format_rub, parse_budget
+from .knowledge import KnowledgeBase, PriceRow, SearchHit, _CITY_TOKENS, _format_words, format_rub, parse_budget
 from .price_guard import (drop_bracket_totals, computed_totals, drop_numbers, extract_amounts, extract_numbers,
                           row_multipliers, ungrounded_numbers,
                           unknown_amounts,
@@ -213,7 +213,33 @@ class Assistant:
 
         state = state if state is not None else Conversation()
         query = query or from_translit(question)
+        if state.venue and "infodesk" in self.kb.normalize(question):
+            venue = self.kb._venues_in(state.venue) - _CITY_TOKENS
+            available = [r for r in self.kb.prices if self.kb._venues_in(r.placement) & venue]
+            if available and not any("infodesk" in r.format.lower() for r in available):
+                navigation = [r for r in available if re.search(r"навигац|терминал", r.format, re.I)]
+                if re.search(r"навигац|терминал", question, re.I) and 1 <= len(navigation) <= 3:
+                    text = f"В прайсе {state.venue} указан формат «{navigation[0].format}».\n"
+                    text += "\n".join(list_item(r, with_venue=False) for r in navigation)
+                    sources = [f"price-{i}" for i, r in enumerate(self.kb.prices) if r in navigation]
+                    return Reply(ANSWER, text, 1.0, "navigation_format", sources)
+                return self._clarify(state, ("position", f"В прайсе {state.venue} нет позиции с названием infodesk. "
+                                             "Подскажите, какое место или устройство вы имеете в виду?"))
         hits = self.kb.retrieve(query, self.top_k, self.min_score)
+        if fact := self.kb.missing_requested_fact(question, hits):
+            # Клиент спросил тираж, тип файла или число столов, а в найденном контексте этого нет:
+            # пересказ соседних фактов выглядит как ответ, но нужного числа в нём не будет
+            return Reply(ESCALATE, self.holding_message, 0.0, f"missing_fact:{fact}")
+        if state.budget and (parse_budget(question.lower()) or re.search(
+                r"бюджет|влез|уклад|покаж|сколько|стоим|цен|за\s+\d|\bдо\s+\d|не дороже|не больше", question, re.I)):
+            from .price_options import fits_budget
+
+            eligible = [h for h in hits if h.chunk.kind == "price"
+                        and fits_budget(self.kb.prices[int(h.chunk.id.split("-")[1])], query, state.budget)]
+            if not eligible:
+                return Reply(ANSWER, f"В текущем прайсе нет подходящих вариантов под бюджет "
+                             f"{format_rub(state.budget)} с указанными сроком и условиями. "
+                             "Можно рассмотреть другой срок, формат или бюджет.", 1.0, "no_budget_options")
         if clarification := state.clarification(self.kb, question, hits=hits):
             return self._clarify(state, clarification)
         if len(hits) > 1 and all(h.chunk.kind == "catalog" for h in hits):
@@ -330,13 +356,15 @@ class Assistant:
         # «Реклама значительно повысит прибыль», «окупится за месяц», «30% посетителей» — обещаний эффекта
         # в базе нет: такие фразы вырезаем, а если без них ответа не остаётся — к менеджеру
         text, claimed = drop_claims(text, known)
-        text = drop_bracket_totals(text)
+        text = drop_bracket_totals(text).lstrip(" .,!?:;—–-")
         if claimed and len(text) < _MANAGER_TAIL_MIN:
             needs_manager = True
         # Сумма в рублях — только из контекста (не из всего прайса: так цена экрана проходила
         # как цена печати) или бюджет, который назвал сам клиент
         price_context = "\n".join(h.chunk.text for h in hits if h.chunk.kind == "price") if hits is not None else known
         allowed = set(extract_amounts(price_context)) | {parse_budget(question.lower()) or 0}
+        if state and state.budget:
+            allowed.add(state.budget)
         # Числа от 1000 без «₽» («27 тысяч») — из текущего контекста или запроса.
         seen = " ".join([known, question])
         bad = sorted(set(unknown_amounts(text, allowed)) | set(ungrounded_numbers(text, seen)))

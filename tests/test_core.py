@@ -1439,7 +1439,9 @@ def test_second_opinion_admitting_missing_data_still_goes_to_manager(kb):
                         "confidence": 1, "needs_manager": True}, ensure_ascii=False)
     llm = SequenceLLM("x", f"{price.format} можно разместить. Минимальный тираж в доступных данных не указан.")
     llm.answers[0] = first
-    r = run(Assistant(kb, llm).answer(f"Можно {price.format.lower()}? Какой минимальный тираж?"))
+    # «тираж» теперь отсекается до модели (tests/test_unsafe_2026_11_17.py): здесь важна именно
+    # вторая попытка, где модель сама признаёт, что данных нет
+    r = run(Assistant(kb, llm).answer(f"Можно {price.format.lower()}? Какие условия?"))
     assert len(llm.calls) == 2 and r.decision == ESCALATE
     from app.core.assistant import retry_hint
     assert not retry_hint("model_unsure", "Аренда промо-зоны на 2 дня стоит 80 000 ₽ в день, монтаж отдельно.", "",
