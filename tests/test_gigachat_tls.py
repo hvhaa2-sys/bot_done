@@ -24,3 +24,26 @@ def test_ca_bundle_takes_precedence_over_verify_flag(monkeypatch, tmp_path):
 def test_without_ca_bundle_keeps_previous_verify_flag(monkeypatch):
     assert _client_kwargs(monkeypatch, verify_ssl=False)["verify"] is False
     assert _client_kwargs(monkeypatch, verify_ssl=True)["verify"] is True
+
+
+class _Settings:
+    def __init__(self, verify: bool, bundle: str = ""):
+        self.gigachat_verify_ssl, self.gigachat_ca_bundle = verify, bundle
+
+
+def test_verify_true_uses_bundled_certificate():
+    from app.llm import _gigachat_verify
+
+    assert _gigachat_verify(_Settings(True)).endswith("app/certs/russian_trusted_root_ca.pem")
+
+
+def test_verify_false_does_not_enable_certificate():
+    from app.llm import _gigachat_verify
+
+    assert _gigachat_verify(_Settings(False)) is False
+
+
+def test_explicit_bundle_wins_over_flag():
+    from app.llm import _gigachat_verify
+
+    assert _gigachat_verify(_Settings(False, "/tmp/ca.pem")) == "/tmp/ca.pem"
