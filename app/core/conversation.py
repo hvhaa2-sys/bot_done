@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from .client_intent import active_request
 from .knowledge import (KnowledgeBase, SearchHit, _CITY_NAMES, _CITY_RE, _CITY_TOKENS, _NOT_TENANT_RE,
-                        _VENUE_ALIASES, format_rub, parse_budget, position_ranges, venue_tokens)
+                        _VENUE_ALIASES, canonical_query, format_rub, parse_budget, position_ranges, venue_tokens)
 from .text import drop_courtesy, from_translit, small_talk, stem
 
 MAX_CLARIFICATIONS = 2
@@ -87,7 +87,10 @@ def _selected_formats(kb: KnowledgeBase, text: str, format_tokens: set[str], kno
                    for chunk in kb.chunks):
                 selected.add(i)
                 break
-    return list(dict.fromkeys(words[i][0] for i in sorted(selected)))
+    found = list(dict.fromkeys(words[i][0] for i in sorted(selected)))
+    if any(stem(w) == stem("экран") for w in found):
+        found = [w for w in found if w != "infodesk"]
+    return found
 
 
 def _format_search_text(kb: KnowledgeBase, text: str, format_tokens: set[str], selected: list[str]) -> str:
@@ -236,11 +239,11 @@ class Conversation:
         self.changed = False
         if small_talk(question):
             return
-        text = active_request(from_translit(question)).lower().replace("ё", "е")
+        text = canonical_query(active_request(from_translit(question)))
         if _RESET.search(text):
             self.__dict__.update(Conversation().__dict__)
             self.changed = True
-        positive = _NEGATED.sub(" ", text)
+        positive = _NEGATED.sub(" ", _NOT_TENANT_RE.sub("внешние рекламодатели", text))
         # Псевдонимы те же, что в поиске: «в академе», «в депошке», «veer»
         tokens = {_VENUE_ALIASES.get(t, t) for t in kb.normalize(positive)}
         venues = [name for name, keys in self.venues(kb).items() if keys & tokens]
@@ -296,7 +299,8 @@ class Conversation:
             self.place = "место № " + ", ".join(str(a) if a == b else f"{a}–{b}" for a, b in position)
         if old_place and self.place != old_place:
             self.changed = True
-        period, season = _PERIOD.search(plain), _SEASON.search(plain)
+        found_periods = list(_PERIOD.finditer(plain))
+        period, season = found_periods[-1] if found_periods else None, _SEASON.search(plain)
         if period or season:
             duration = period or _PERIOD.search(self.period)
             month = season or _SEASON.search(self.period)
@@ -328,14 +332,15 @@ class Conversation:
             self.intent = " ".join(focus)
         elif not (venues or _OTHER_VENUES.search(text) or formats or places or position or period or season or budget or new_city
                   or _REFERS.search(text) or _BUSINESS.search(text) or _SELECTION.search(text)
-                  or self.pending or kb.matched_stop_topic(text)) and len(_WORDS.findall(plain)) > 2:
+                  or self.pending or _NOT_TENANT_RE.search(text) or kb.matched_stop_topic(text)) and len(_WORDS.findall(plain)) > 2:
             # «Спасибо, хорошего дня» — не новая тема: вежливые слова не считаем
             self.__dict__.update(Conversation().__dict__)
             self.changed = True
 
     def query(self, question: str) -> str:
         fields = (self.venue, self.city, self.format, self.place, self.period, self.client_type, self.intent)
-        current = _NEGATED.sub(" ", active_request(from_translit(question)).lower().replace("ё", "е"))
+        current = _NEGATED.sub(" ", _NOT_TENANT_RE.sub("внешние рекламодатели",
+                              canonical_query(active_request(from_translit(question)))))
         observed, filtered = getattr(self, "_format_query", (None, ""))
         if observed == question:
             current = filtered
@@ -361,6 +366,9 @@ class Conversation:
             return "budget", CLARIFICATIONS["budget"]
         if _ORDINAL.search(text):
             return "position", CLARIFICATIONS["position"]
+        named = set(kb.normalize(question))
+        if self.venue and not (self.format or self.place) and named and named <= set(kb.normalize(self.venue)):
+            return "format", CLARIFICATIONS["format"]
         if self.budget or _GENERAL_PRICE.search(text):
             return None
         price = _PRICE.search(text) or "цена" in self.intent or self.pending

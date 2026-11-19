@@ -27,6 +27,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .admin_guard import AdminGuard
 from . import db as D
 from . import onboarding
 from .channels.flow import human_reason
@@ -873,7 +874,7 @@ def login_page(msg: str = "", status: int = 401, with_password: bool = False) ->
 <p class="hint">Сменить: .venv/bin/python -m app.password</p>"""
     else:
         fields = """<label for="t">Токен админки</label>
-<input id="t" type="text" name="token" autocomplete="current-password" required autofocus>
+<input id="t" type="password" name="token" autocomplete="current-password" required autofocus>
 <p class="hint">Он записан в файле .env в строке ADMIN_TOKEN. Вместо токена можно задать логин и пароль:
 .venv/bin/python -m app.password</p>"""
     return HTMLResponse(f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
@@ -888,7 +889,9 @@ def note(msg: str) -> str:
 
 
 def create_app(services: Services) -> FastAPI:
-    app = FastAPI(title="AI Sales Assistant admin", docs_url=None, redoc_url=None)
+    app = FastAPI(title="AI Sales Assistant admin", docs_url=None, redoc_url=None, openapi_url=None)
+    app.add_middleware(AdminGuard, token=services.settings.admin_token,
+                       allowed_origins=services.settings.admin_allowed_origins)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")  # шрифты; без входа — нужны и форме входа
     exam: dict = {"running": False, "done": 0, "total": 0, "error": ""}
     onboarding_lock = asyncio.Lock()
@@ -944,7 +947,7 @@ def create_app(services: Services) -> FastAPI:
             return login_page(error, with_password=with_password)
         # Сессия — та же cookie, что и при входе по токену: проверка доступа не меняется
         response = RedirectResponse("/", status_code=303)
-        response.set_cookie("admin_token", st.admin_token, httponly=True, samesite="lax")
+        response.set_cookie("admin_token", st.admin_token, httponly=True, samesite="lax", secure=request.url.scheme == "https")
         return response
 
     @app.get("/logout")
@@ -970,7 +973,7 @@ def create_app(services: Services) -> FastAPI:
             failures.setdefault(ip, []).append(time.time())
             return login_page("Неверный токен в ссылке.", with_password=with_password)
         response = RedirectResponse(clean, status_code=303)
-        response.set_cookie("admin_token", token, httponly=True, samesite="lax")
+        response.set_cookie("admin_token", token, httponly=True, samesite="lax", secure=request.url.scheme == "https")
         return response
 
     @app.post("/max/webhook")

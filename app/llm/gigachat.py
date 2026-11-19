@@ -49,12 +49,14 @@ class GigaChatProvider(LLMProvider):
     name = "gigachat"
 
     def __init__(self, auth_key: str, scope: str, model: str, verify_ssl: bool,
-                 transport: httpx.AsyncBaseTransport | None = None, base_url: str = ""):
+                 transport: httpx.AsyncBaseTransport | None = None, base_url: str = "",
+                 ca_bundle: str = ""):
         if not auth_key:
             raise ValueError("Не задан GIGACHAT_AUTH_KEY")
         self.auth_key, self.scope, self.model = auth_key, scope, model
         self.api_url = f"{base_url.rstrip('/')}/chat/completions" if base_url else API_URL
-        self.client = httpx.AsyncClient(verify=verify_ssl, timeout=TIMEOUT, transport=transport)
+        # GIGACHAT_CA_BUNDLE — явный путь к корневому CA Минцифры; пусто — прежняя проверка по GIGACHAT_VERIFY_SSL
+        self.client = httpx.AsyncClient(verify=ca_bundle or verify_ssl, timeout=TIMEOUT, transport=transport)
         self._token: str | None = None
         self._token_expires = 0.0
 

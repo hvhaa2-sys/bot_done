@@ -51,7 +51,7 @@ def interface(setting: str) -> str:
     return _source(setting)[0]
 
 
-def transport(setting: str, verify: bool | ssl.SSLContext = True, url: str = "") -> httpx.AsyncBaseTransport | None:
+def transport(setting: str, verify: bool | str | ssl.SSLContext = True, url: str = "") -> httpx.AsyncBaseTransport | None:
     """Транспорт httpx с исходящим адресом интерфейса. Локальные адреса (песочница MAX на 127.0.0.1) не трогаем."""
     host = urlparse(url).hostname or ""
     if _local(host):
@@ -65,7 +65,7 @@ class DirectTransport(httpx.AsyncBaseTransport):
     """Запросы с исходящим адресом интерфейса; адрес пропал (Wi-Fi выключили) — как обычно, через систему."""
     RECHECK_SECONDS = 30
 
-    def __init__(self, setting: str, verify: bool | ssl.SSLContext):
+    def __init__(self, setting: str, verify: bool | str | ssl.SSLContext):
         self.setting, self.verify = setting, verify
         self.address, self.checked = "", 0.0
         self.inner: httpx.AsyncHTTPTransport | None = None

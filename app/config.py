@@ -62,6 +62,8 @@ class Settings:
     speech_enabled: bool = False
     speech_python: str = ""
     admin_password_hash: str = ""
+    admin_allowed_origins: str = ""
+    gigachat_ca_bundle: str = ""  # путь к корневому CA Минцифры; пусто — проверка по GIGACHAT_VERIFY_SSL
 
     @classmethod
     def load(cls) -> "Settings":
@@ -105,4 +107,6 @@ class Settings:
             speech_enabled=_bool(env("SPEECH_ENABLED", "false")),
             speech_python=env("SPEECH_PYTHON", ""),
             admin_password_hash=env("ADMIN_PASSWORD_HASH", ""),
+            admin_allowed_origins=env("ADMIN_ALLOWED_ORIGINS", ""),
+            gigachat_ca_bundle=env("GIGACHAT_CA_BUNDLE", ""),
         )

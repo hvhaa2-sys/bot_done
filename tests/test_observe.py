@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from aiogram import Bot
 from aiogram.types import Update
-from fastapi.testclient import TestClient
+from tests.admin_client import AdminClient as TestClient
 
 from app import db as D
 from app.admin import create_app
