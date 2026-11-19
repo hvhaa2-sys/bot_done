@@ -8,7 +8,7 @@ from dataclasses import replace
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
+from tests.admin_client import AdminClient as TestClient
 
 from app import db as D
 from app.admin import create_app
@@ -297,7 +297,7 @@ def test_max_modes_from_command_and_admin(env):
     feed(bot, message("/mode off", MANAGER, MANAGER_CHAT))
     assert services.db.get_connection(CONN).mode == D.OBSERVE and "/mode observe" in to(api, MANAGER_CHAT)[-1]["text"]
     from app.admin import create_app
-    from fastapi.testclient import TestClient
+    from tests.admin_client import AdminClient as TestClient
     client = TestClient(create_app(services))
     client.cookies.set("admin_token", services.settings.admin_token)
     page = client.get("/").text
@@ -682,7 +682,7 @@ def test_start_without_manager_is_told(env):
 
 
 def admin_client(services):
-    from fastapi.testclient import TestClient
+    from tests.admin_client import AdminClient as TestClient
 
     from app.admin import create_app
     return TestClient(create_app(services))

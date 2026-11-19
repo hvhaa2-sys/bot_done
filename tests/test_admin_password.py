@@ -1,7 +1,7 @@
 """Вход в админку по логину и паролю: хеш в .env, форма входа, токен по-прежнему работает."""
 from dataclasses import replace
 
-from fastapi.testclient import TestClient
+from tests.admin_client import AdminClient as TestClient
 
 from app import password as P
 from app.admin import create_app

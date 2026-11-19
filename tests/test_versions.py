@@ -1,7 +1,7 @@
 """Версии базы знаний: черновик, проверка перед публикацией, противоречия, откат."""
 from dataclasses import replace
 
-from fastapi.testclient import TestClient
+from tests.admin_client import AdminClient as TestClient
 
 from app.admin import create_app
 from app.config import Settings
