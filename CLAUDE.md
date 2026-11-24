@@ -98,9 +98,11 @@ deploy/mac-autostart.sh              # перезапуск живого бот�
   `TELEGRAM_BOT_TOKEN= python -m app` опрашивает настоящего бота, забирает его события (в них переписка клиентов)
   и конфликтует с живым. Запускать без Telegram только с подменой `app.config._load_dotenv` и чистым окружением
   либо через `replace(settings, telegram_bot_token="")`, как в `tools/max_sandbox.py`.
-- **Живой бот работает на Mac пользователя** (LaunchAgent `local.ai-sales-assistant`, лог
-  `~/Library/Logs/ai-sales-assistant.log`) и занимает порт 8000: `preview_start admin` в него упрётся. Админку открывать
-  в браузере, для проверок — `max-sandbox` из `.claude/launch.json`, перезапуск после правок — `deploy/mac-autostart.sh`.
+- **Живой бот с 15.11 работает на Buff** (`docs/BUFF-2026-11-15.md`), LaunchAgent на Mac выключен. В локальном `.env`
+  токены тех же ботов: `python -m app` и `preview_start admin` начнут опрашивать их параллельно с сервером и заберут
+  события клиентов. Для проверок — `python -m tools.max_sandbox --offline` (у `max-sandbox` в `launch.json` нет
+  `--offline`, он ходит в настоящий GigaChat). Выкладка на Buff — вручную по журналу 24.11: `deploy/release.sh` и
+  `tools.deploy` под раскладку сервера не подходят.
 - **GigaChat на freemium — один запрос за раз.** Два экзамена параллельно или экзамен рядом с живым ботом дают 429:
   экзамены гонять по очереди.
 - **Каждая правка промпта — экзаменами на Pro** (минимум основной и live): безобидная на вид формулировка уже давала
