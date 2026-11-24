@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from .client_intent import active_request
 from .knowledge import (KnowledgeBase, SearchHit, _CITY_NAMES, _CITY_RE, _CITY_TOKENS, _NOT_TENANT_RE,
-                        _VENUE_ALIASES, format_rub, parse_budget, position_ranges, venue_tokens)
+                        _VENUE_ALIASES, canonical_query, format_rub, parse_budget, position_ranges, venue_tokens)
 from .text import drop_courtesy, from_translit, small_talk, stem
 
 MAX_CLARIFICATIONS = 2
@@ -14,6 +14,8 @@ CLARIFICATIONS = {
     "position": "Подскажите название или место размещения нужного варианта — так я назову точную цену.",
     "venue": "В каком торговом центре рассматриваете размещение?",
     "format": "Какой формат рекламы вас интересует?",
+    "period": "На какой срок планируете размещение?",
+    "other_placement": "Какое второе размещение сравнить? Подскажите площадку, формат и срок.",
     "missing": "Подскажите название формата или место размещения, которое вас интересует.",
     "budget": "Какой бюджет на всё и сколько из него на размещение и подготовку макета?",
 }
@@ -87,7 +89,10 @@ def _selected_formats(kb: KnowledgeBase, text: str, format_tokens: set[str], kno
                    for chunk in kb.chunks):
                 selected.add(i)
                 break
-    return list(dict.fromkeys(words[i][0] for i in sorted(selected)))
+    found = list(dict.fromkeys(words[i][0] for i in sorted(selected)))
+    if any(stem(w) == stem("экран") for w in found):
+        found = [w for w in found if w != "infodesk"]
+    return found
 
 
 def _format_search_text(kb: KnowledgeBase, text: str, format_tokens: set[str], selected: list[str]) -> str:
@@ -188,6 +193,28 @@ def _budget_request(text: str) -> _Budget | None:
     return _Budget(None if ambiguous else total, placement, preparation, ambiguous)
 
 
+_BOTH = re.compile(r"\b(?:оба|обе|обоих|обеих|обоим|обеим|сравни(?:те|ть)?|сравним|два варианта|две позиции)\b")
+_ADDITION = re.compile(r"\b(?:еще|(?:такой|такая|такое|такую|тот|та|то) же|второй вариант|также|плюс)\b")
+_REPLACEMENT = re.compile(r"\b(?:вместо|только|лучше|не надо|передумал\w*)\b|^нет\b")
+_DURATION_MODIFIER = re.compile(r"\b(?:только|лучше)\s+(?=" + _PERIOD.pattern + ")", re.I)
+_INSTEAD = re.compile(r"\bвместо\s+(?:т[р]?ц\s+)?[«\"]?[\w-]+(?:\s+молл\w*)?[»\"]?")
+_ITEM_BREAK = re.compile(r"\n+|[.;]\s+|,?\s+\b(?:и|а)\b\s+")
+_ITEM_NUMBER = re.compile(r"\b(первый|первого|первому|второй|второго|второму)\b")
+
+
+@dataclass(frozen=True)
+class Placement:
+    venue: str
+    city: str
+    format: str
+    period: str
+    place: str
+    client_type: str
+
+    def description(self) -> str:
+        return ", ".join(filter(None, (self.venue, self.format, self.place, self.period)))
+
+
 @dataclass
 class Conversation:
     venue: str = ""
@@ -205,6 +232,28 @@ class Conversation:
     clarifications: int = 0
     changed: bool = False
     multiple_venues: bool = False
+    placements: tuple[Placement, ...] = ()
+
+    def _placement(self) -> Placement:
+        return Placement(self.venue, self.city, self.format, self.period, self.place, self.client_type)
+
+    def _comparison_target(self, venues: list[str], text: str) -> int:
+        named = [i for i, item in enumerate(self.placements) if item.venue in venues]
+        if len(named) == 1:
+            return named[0]
+        if number := _ITEM_NUMBER.search(text):
+            return int(number[1].startswith("втор"))
+        if self.pending in ("comparison_0", "comparison_1"):
+            return int(self.pending[-1])
+        return self.placements.index(self._placement())
+
+    def _sent_comparison_prompt(self, answer: str) -> str:
+        for i, item in enumerate(self.placements):
+            if any(f"{item.description()}. {q}" in answer for q in CLARIFICATIONS.values()):
+                return f"clarification:comparison_{i}"
+        if CLARIFICATIONS["other_placement"] in answer:
+            return "clarification:other_placement"
+        return ""
 
     @classmethod
     def replay(cls, kb: KnowledgeBase, turns) -> Conversation:
@@ -214,7 +263,11 @@ class Conversation:
             # Черновик вопроса менеджеру ещё не был задан клиенту.
             if turn["status"] in ("sent_auto", "draft_sent", "draft_edited", "sandbox"):
                 reason = turn["reason"] or ""
-                if turn["status"] == "draft_edited" and reason.startswith("clarification:"):
+                if turn["reason"] is None and "answer" in turn.keys():
+                    reason = state._sent_comparison_prompt(turn["answer"] or "")
+                elif turn["status"] == "draft_edited" and reason.startswith("clarification:comparison_"):
+                    reason = state._sent_comparison_prompt(turn["answer"])
+                elif turn["status"] == "draft_edited" and reason.startswith("clarification:"):
                     # Менеджер мог заменить уточнение полноценным ответом.
                     if not any(text in turn["answer"] for text in CLARIFICATIONS.values()):
                         reason = ""
@@ -232,18 +285,46 @@ class Conversation:
                 found[head] = tokens
         return found
 
-    def observe(self, kb: KnowledgeBase, question: str) -> None:
+    def observe(self, kb: KnowledgeBase, question: str, *, additional: bool = False) -> None:
         self.changed = False
         if small_talk(question):
             return
-        text = active_request(from_translit(question)).lower().replace("ё", "е")
+        text = canonical_query(active_request(from_translit(question)))
+        text = _DURATION_MODIFIER.sub("", text)
         if _RESET.search(text):
             self.__dict__.update(Conversation().__dict__)
             self.changed = True
-        positive = _NEGATED.sub(" ", text)
+        positive = _NEGATED.sub(" ", _NOT_TENANT_RE.sub("внешние рекламодатели", text))
+        positive = _INSTEAD.sub(" ", positive)
         # Псевдонимы те же, что в поиске: «в академе», «в депошке», «veer»
         tokens = {_VENUE_ALIASES.get(t, t) for t in kb.normalize(positive)}
         venues = [name for name, keys in self.venues(kb).items() if keys & tokens]
+        previous = self._placement()
+        comparing = bool(additional or self.pending == "other_placement"
+                         or _BOTH.search(positive) or _ADDITION.search(positive))
+        replacing = bool(_REPLACEMENT.search(text) or _NEGATED.search(text))
+        if len(venues) == 2 and comparing and not replacing:
+            for boundary in _ITEM_BREAK.finditer(text):
+                left, right = text[:boundary.start()], text[boundary.end():]
+                left_venues = kb._venues_in(left) - _CITY_TOKENS
+                right_venues = kb._venues_in(right) - _CITY_TOKENS
+                if left_venues and right_venues and left_venues.isdisjoint(right_venues):
+                    self.placements = ()
+                    self.observe(kb, left)
+                    self.observe(kb, right, additional=True)
+                    return
+        adding = not self.placements and comparing and not replacing and bool(previous.venue or previous.format)
+        target = None
+        if self.placements:
+            target = self._comparison_target(venues, positive)
+            item = self.placements[target]
+            self.venue, self.city = item.venue, item.city
+            self.format, self.period = item.format, item.period
+            self.place, self.client_type = item.place, item.client_type
+            if replacing or (item.venue and any(v != item.venue for v in venues)):
+                self.placements = ()
+        if adding and len(venues) == 1 and venues[0] != previous.venue:
+            self.period = ""  # «такой же экран» не задаёт срок на второй площадке
         city = _CITY_RE.search(positive)
         new_city = _CITY_NAMES[next(k for k, v in city.groupdict().items() if v)] if city else ""
         if new_city and self.city and new_city != self.city:
@@ -296,7 +377,8 @@ class Conversation:
             self.place = "место № " + ", ".join(str(a) if a == b else f"{a}–{b}" for a, b in position)
         if old_place and self.place != old_place:
             self.changed = True
-        period, season = _PERIOD.search(plain), _SEASON.search(plain)
+        found_periods = list(_PERIOD.finditer(plain))
+        period, season = found_periods[-1] if found_periods else None, _SEASON.search(plain)
         if period or season:
             duration = period or _PERIOD.search(self.period)
             month = season or _SEASON.search(self.period)
@@ -328,14 +410,27 @@ class Conversation:
             self.intent = " ".join(focus)
         elif not (venues or _OTHER_VENUES.search(text) or formats or places or position or period or season or budget or new_city
                   or _REFERS.search(text) or _BUSINESS.search(text) or _SELECTION.search(text)
-                  or self.pending or kb.matched_stop_topic(text)) and len(_WORDS.findall(plain)) > 2:
+                  or self.pending or comparing or _NOT_TENANT_RE.search(text)
+                  or kb.matched_stop_topic(text)) and len(_WORDS.findall(plain)) > 2:
             # «Спасибо, хорошего дня» — не новая тема: вежливые слова не считаем
             self.__dict__.update(Conversation().__dict__)
             self.changed = True
+        current = self._placement()
+        # Дополнение пустого поля («ещё уточню, на месяц») не создаёт вторую позицию.
+        distinct = any(a and b and a != b for a, b in (
+            (previous.venue, current.venue), (previous.format, current.format),
+            (previous.period, current.period), (previous.place, current.place)))
+        if adding and distinct and not self.multiple_venues:
+            self.placements = (previous, current)
+        elif self.placements and target is not None:
+            items = list(self.placements)
+            items[target] = current
+            self.placements = tuple(items) if not self.multiple_venues and items[0] != items[1] else ()
 
     def query(self, question: str) -> str:
         fields = (self.venue, self.city, self.format, self.place, self.period, self.client_type, self.intent)
-        current = _NEGATED.sub(" ", active_request(from_translit(question)).lower().replace("ё", "е"))
+        current = _NEGATED.sub(" ", _NOT_TENANT_RE.sub("внешние рекламодатели",
+                              canonical_query(active_request(from_translit(question)))))
         observed, filtered = getattr(self, "_format_query", (None, ""))
         if observed == question:
             current = filtered
@@ -347,9 +442,13 @@ class Conversation:
         return " ".join(filter(None, (budget, current, *fields)))
 
     def parameters(self) -> str:
+        if self.placements:
+            selected = tuple((f"Размещение {i}", item.description()) for i, item in enumerate(self.placements, 1))
+        else:
+            selected = (("ТЦ", self.venue), ("город", self.city), ("формат", self.format),
+                        ("место", self.place), ("срок", self.period))
         return "; ".join(f"{name}: {value}" for name, value in (
-            ("ТЦ", self.venue), ("город", self.city), ("формат", self.format), ("место", self.place),
-            ("срок", self.period), ("бюджет", format_rub(self.budget) if self.budget else ""),
+            *selected, ("бюджет", format_rub(self.budget) if self.budget else ""),
             ("на размещение", format_rub(self.placement_budget) if self.placement_budget else ""),
             ("на подготовку", format_rub(self.preparation_budget) if self.preparation_budget else ""),
             ("клиент", self.client_type)) if value)
@@ -361,6 +460,9 @@ class Conversation:
             return "budget", CLARIFICATIONS["budget"]
         if _ORDINAL.search(text):
             return "position", CLARIFICATIONS["position"]
+        named = set(kb.normalize(question))
+        if self.venue and not (self.format or self.place) and named and named <= set(kb.normalize(self.venue)):
+            return "format", CLARIFICATIONS["format"]
         if self.budget or _GENERAL_PRICE.search(text):
             return None
         price = _PRICE.search(text) or "цена" in self.intent or self.pending

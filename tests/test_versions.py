@@ -1,7 +1,7 @@
 """Версии базы знаний: черновик, проверка перед публикацией, противоречия, откат."""
 from dataclasses import replace
 
-from fastapi.testclient import TestClient
+from tests.admin_client import AdminClient as TestClient
 
 from app.admin import create_app
 from app.config import Settings
@@ -161,8 +161,9 @@ def test_new_answer_to_same_question_supersedes_old_one(tmp_path):
     ids = [services.db.add_candidate(connection_id="c", chat_id=1, dialog_id=None, source="chat", client_question="q",
                                      manager_text="m", question="Можно ли ролик со звуком?", answer=a)
            for a in ("Нет, экраны без звука.", "Нет, только без звука, звук выключен во всём ТЦ.")]
-    assert services.approve_candidates([ids[0]], "Можно ли ролик со звуком?", "Нет, экраны без звука.")[0]
-    assert services.approve_candidates([ids[1]], "можно ли ролик со звуком", "Нет, звук выключен во всём ТЦ.")[0]
+    assert services.approve_candidates([ids[0]], "Можно ли ролик со звуком?", "Нет, экраны без звука.", scope="business")[0]
+    assert services.approve_candidates([ids[1]], "можно ли ролик со звуком", "Нет, звук выключен во всём ТЦ.",
+                                       scope="business")[0]
     assert services.db.get_candidate(ids[0])["status"] == "superseded"
     assert services.db.get_candidate(ids[1])["status"] == "approved"
     assert services.kb_version == 3

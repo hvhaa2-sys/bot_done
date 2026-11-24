@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from .candidate_review import fact_scope
-from .knowledge import KnowledgeBase, venue_tokens
+from .knowledge import BUSINESS_NOTE, LEARNED_NOTES, KnowledgeBase, parse_faq, venue_tokens
 from .pii import mask_pd
 from .price_guard import extract_amounts
 from .text import tokenize
@@ -65,7 +66,8 @@ _PAIR_RE = re.compile(r'\{\s*"question"\s*:\s*' + _STRING + r'\s*,\s*"answer"\s*
 _LOOSE_PAIR_RE = re.compile(r'"question"\s*:\s*"(.*?)"\s*,\s*"answer"\s*:\s*"(.*?)"\s*\}', re.DOTALL)
 SIMILARITY = 0.45
 _COMMON_WORDS = frozenset({"молл", "тц", "трц", "торгов", "центр", "размест", "нужн", "подскаж"})
-NOTES_FOLDER = "Из переписки"
+NOTES_FOLDER = LEARNED_NOTES
+CASE_PREFIX = "[Только заявка] "
 
 
 @dataclass
@@ -245,18 +247,47 @@ def group(rows, kb: KnowledgeBase | None = None) -> list[list]:
     return sorted((items for _, items in groups), key=len, reverse=True)
 
 
-def target_note(kb: KnowledgeBase, question: str, answer: str) -> tuple[str, str]:
-    """(путь заметки внутри notes/, ТЦ). Один ТЦ в факте — его файл, иначе общий."""
-    mentioned = kb._venues_in(f"{question} {answer}")
-    heads = []
+def venue_names(kb: KnowledgeBase) -> list[str]:
+    heads = set()
     for row in kb.prices:
         head = re.sub(r"\s*\(.*?\)", "", row.placement.split(" — ", 1)[0]).split(",")[0].strip()
-        if venue_tokens(row.placement) & mentioned and head not in heads:
-            heads.append(head)
+        if head:
+            heads.add(head)
+    return sorted(heads)
+
+
+def target_note(kb: KnowledgeBase, question: str, answer: str, scope: str = "") -> tuple[str, str]:
+    """Возвращает путь, только если область действия известна."""
+    names = venue_names(kb)
+    mentioned = kb._venues_in(f"{question} {answer}")
+    heads = [head for head in names if venue_tokens(head) & mentioned]
+    if scope == "business" and not heads:
+        return f"{NOTES_FOLDER}/{BUSINESS_NOTE}", ""
+    if scope:
+        heads = [scope] if scope in names and (not heads or heads == [scope]) else []
     if len(heads) == 1:
-        name = re.sub(r"[^\w .-]", "", heads[0]).strip() or "Общее"
-        return f"{NOTES_FOLDER}/{name}.md", heads[0]
-    return f"{NOTES_FOLDER}/Общее.md", ""
+        name = re.sub(r"[^\w .-]", "", heads[0]).strip(" .")
+        if name and name not in ("Общее", Path(BUSINESS_NOTE).stem):
+            return f"{NOTES_FOLDER}/{name}.md", heads[0]
+    return "", ""
+
+
+def note_entries(path: Path) -> list[tuple[str, str]]:
+    if not path.is_file():
+        return []
+    return [(c.title, c.text.partition("\nОтвет: ")[2]) for c in parse_faq(path.read_text(encoding="utf-8"))]
+
+
+def write_note(path: Path, text: str) -> None:
+    """Оборванная запись не должна портить остальные утверждённые ответы."""
+    out = tempfile.NamedTemporaryFile(dir=path.parent, encoding="utf-8", mode="w", delete=False)
+    tmp = Path(out.name)
+    try:
+        with out:
+            out.write(text)
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def add_to_note(path: Path, venue: str, question: str, answer: str) -> None:
@@ -274,4 +305,4 @@ def add_to_note(path: Path, venue: str, question: str, answer: str) -> None:
         title = venue or "общие вопросы"
         text = (f"---\n{head}источник: переписка с клиентами, утверждено менеджером\n---\n"
                 f"# Из переписки: {title}\n\n{section}")
-    path.write_text(text.rstrip("\n") + "\n", encoding="utf-8")
+    write_note(path, text.rstrip("\n") + "\n")

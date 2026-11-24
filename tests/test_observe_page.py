@@ -1,6 +1,6 @@
 """Раздел админки «Наблюдение»: чаты, переписка по порядку, время ответа менеджера, поиск."""
 import pytest
-from fastapi.testclient import TestClient
+from tests.admin_client import AdminClient as TestClient
 
 from app.admin import create_app
 from tests.test_observe import CLIENT, CONN

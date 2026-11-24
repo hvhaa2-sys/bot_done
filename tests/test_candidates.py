@@ -5,7 +5,7 @@ import shutil
 from dataclasses import replace
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.admin_client import AdminClient as TestClient
 
 from app.admin import create_app
 from app.config import ROOT, Settings
@@ -173,7 +173,7 @@ def test_approved_fact_goes_to_the_mall_note_and_replaces_same_question(tmp_path
     kb = KnowledgeBase.load(make_kb(tmp_path))
     path, venue = C.target_note(kb, "Сколько ролик на экране в ВЕЕР?", "До 15 секунд.")
     assert (path, venue) == ("Из переписки/ВЕЕР Молл.md", "ВЕЕР Молл")
-    assert C.target_note(kb, "Делаете дизайн?", "Нет, макет готовит клиент.")[0] == "Из переписки/Общее.md"
+    assert C.target_note(kb, "Делаете дизайн?", "Нет, макет готовит клиент.") == ("", "")
     note = tmp_path / "notes" / path
     C.add_to_note(note, venue, "Какой длины ролик на экране в ВЕЕР", "До 15 секунд.")
     C.add_to_note(note, venue, "Какой длины ролик на экране в ВЕЕР?", "До 10 секунд.")
@@ -241,9 +241,9 @@ def test_admin_shows_candidates_and_approves_or_rejects(tmp_path):
     assert "Из переписки" in page and "Делаете ли вы дизайн баннера?" in page and "Откуда взято" in page
     ids = ",".join(str(r["id"]) for r in services.db.candidates())
     resp = client.post("/candidates/approve",
-                       data={"ids": ids, "question": fact["question"], "answer": fact["answer"]})
+                       data={"ids": ids, "question": fact["question"], "answer": fact["answer"], "scope": "business"})
     assert resp.status_code == 200 and "Факт утверждён" in resp.text and services.db.candidates() == []
-    note = services.settings.kb_dir / "notes" / "Из переписки" / "Общее.md"
+    note = services.settings.kb_dir / "notes" / "Из переписки" / "Для всех площадок.md"
     assert fact["answer"] in note.read_text(encoding="utf-8")
 
 
@@ -314,12 +314,12 @@ def test_manager_answer_in_client_chat_becomes_candidate(tmp_path):
 
 def test_summary_offers_candidates_and_button_approves(tmp_path):
     from app.channels.telegram_business import build_candidates_message
-    fact = {"question": "Делаете ли вы дизайн баннера?", "answer": "Дизайн не делаем, макет готовит рекламодатель."}
+    fact = {"question": "Делаете ли вы дизайн баннера в ВЕЕР?", "answer": "Дизайн не делаем, макет готовит рекламодатель."}
     services, feed, message, sent, now = tg_env(tmp_path, JsonLLM([fact]))
-    feed(message("а дизайн сделаете?"))
+    feed(message("а дизайн в ВЕЕР сделаете?"))
     feed(message("Дизайн не делаем, макет готовит рекламодатель.", from_id=OWNER))
     text, markup = build_candidates_message(services, services.db.get_connection(CONN))
-    assert "Предложения в базу знаний" in text and "Делаете ли вы дизайн баннера?" in text
+    assert "Предложения в базу знаний" in text and fact["question"] in text
     ok = markup.inline_keyboard[0][0].callback_data
     feed({"callback_query": {"id": "1", "chat_instance": "x", "data": ok,
                              "from": {"id": OWNER, "is_bot": False, "first_name": "M"}}})

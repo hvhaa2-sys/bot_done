@@ -15,6 +15,18 @@ from .client_intent import active_request
 from .text import STOPWORDS, fix_mixed_script, stem, tokenize
 
 
+LEARNED_NOTES = "Из переписки"
+UNSCOPED_NOTE = "Общее.md"
+BUSINESS_NOTE = "Для всех площадок.md"
+
+
+def canonical_query(text: str) -> str:
+    text = fix_mixed_script(text).lower().replace("ё", "е")
+    text = re.sub(r"\bвеер\s*молл?\w*\b", "веер молл", text)
+    text = re.sub(r"\bнавигационн\w*\s+стойк\w*\b", "навигационные терминалы", text)
+    return re.sub(r"\bинфодеск\w*\b", "infodesk", text)
+
+
 @dataclass
 class Chunk:
     id: str
@@ -28,6 +40,7 @@ class Chunk:
     place: frozenset[str] = frozenset()  # слова места внутри ТЦ: «парковка», «фуд-корт»
     price: int = 0                       # у позиций прайса — для подбора по бюджету
     period: str = ""
+    learned_at_venue: bool = False
 
 
 @dataclass
@@ -153,8 +166,17 @@ class KnowledgeBase:
         faq_path, price_path, stop_path = kb_dir / "faq.md", kb_dir / "prices.csv", kb_dir / "stop_topics.txt"
         faq = parse_faq(faq_path.read_text(encoding="utf-8")) if faq_path.exists() else []
         # Заметки: папка notes/ (её можно открыть как хранилище Obsidian) — по файлу на тему или ТЦ
-        for note in sorted((kb_dir / "notes").rglob("*.md")) if (kb_dir / "notes").is_dir() else []:
-            faq += parse_note(note.read_text(encoding="utf-8"), note.stem, start=len(faq))
+        notes = kb_dir / "notes"
+        next_id = len(faq)
+        for note in sorted(notes.rglob("*.md")) if notes.is_dir() else []:
+            chunks = parse_note(note.read_text(encoding="utf-8"), note.stem, start=next_id)
+            next_id += len(chunks)  # ссылки на источники в старых версиях сохраняют номера
+            if note.parent == notes / LEARNED_NOTES:
+                if note.name == UNSCOPED_NOTE:
+                    continue
+                for chunk in chunks:
+                    chunk.learned_at_venue = note.name != BUSINESS_NOTE
+            faq.extend(chunks)
         prices = parse_prices(price_path.read_text(encoding="utf-8")) if price_path.exists() else []
         stops = parse_stop_topics(stop_path.read_text(encoding="utf-8")) if stop_path.exists() else []
         return cls(faq, prices, stops)
@@ -169,6 +191,8 @@ class KnowledgeBase:
         # Назван ТЦ — позиции прайса других ТЦ в контекст не берём, чтобы модель
         # не назвала цену чужого ТЦ. FAQ остаётся.
         named = self._all_venues.intersection(q)
+        malls = self._venues_in(query) - _CITY_TOKENS
+        hits = [h for h in hits if not h.chunk.learned_at_venue or (malls and malls <= h.chunk.venue)]
         if named:
             hits = [h for h in hits if h.chunk.kind != "price" or h.chunk.venue & named]
         hits.sort(key=lambda h: h.score, reverse=True)
@@ -204,7 +228,7 @@ class KnowledgeBase:
         faq_answers = best["faq"] >= 5 and best["faq"] >= 2 * best["price"]
         listing = bool(_LIST_RE.search(low)) and not faq_answers
         city = _CITY_RE.search(low)
-        if _CHEAPEST_RE.search(low) and (named or fmt or city):
+        if _CHEAPEST_RE.search(low) and (named or fmt or city) and not parse_budget(low):
             # «Самая дешёвая реклама в ВЕЕР?» — смотрим весь прайс площадки, а не 8 строк: иначе модель
             # назовёт самой дешёвой ту, что случайно попала в выдачу. Сравниваем только месячные цены
             rows = self._for_position(self._in_city(self._price_hits(named), city), query)
@@ -215,13 +239,16 @@ class KnowledgeBase:
                 # Только прайс по возрастанию: с заметками впереди модель называла самой дешёвой вторую строку
                 return self._for_position(rows[:10], query)
         if budget := parse_budget(low):
+            from .price_options import fits_budget, option_cost
             # «Бюджет 30 тысяч, что можно в ВЕЕР?» — все месячные позиции не дороже бюджета
             # Цена за месяц или без срока (Бутово Молл: срок в прайсе не указан); «за 1 день» в бюджет месяца не сравниваем
             rows = self._for_position(
                 [h for h in self._in_city(self._price_hits(named), city)
-                 if h.chunk.price + self.prices[int(h.chunk.id.split("-")[1])].extras_total() <= budget
+                 if fits_budget(self.prices[int(h.chunk.id.split("-")[1])], query, budget)
                  and ("месяц" in h.chunk.period or not h.chunk.period)], query)
-            rows.sort(key=lambda h: h.chunk.price, reverse=True)
+            if fmt:
+                rows = [h for h in rows if h.chunk.fmt & fmt]
+            rows.sort(key=lambda h: option_cost(self.prices[int(h.chunk.id.split("-")[1])], query), reverse=True)
             # «Бюджет 25 000 — подходит экран у входа?» — сам экран дороже бюджета, но он нужен, чтобы ответить «нет»
             asked = [h for h in hits if h.chunk.kind == "price" and h.chunk.fmt & fmt][:3] if fmt else []
             picked = {h.chunk.id for h in asked}
@@ -509,7 +536,7 @@ class KnowledgeBase:
         vocab = self._bm25.idf
         out: list[str] = []
         # «не» — стоп-слово, и «мы не арендаторы» превращалось в «арендаторы»: находились не те цены
-        query = _NOT_TENANT_RE.sub("внешние рекламодатели", query.lower().replace("ё", "е"))
+        query = _NOT_TENANT_RE.sub("внешние рекламодатели", canonical_query(query))
         for word in _WORD_RE.findall(query):
             if word in STOPWORDS:
                 continue
@@ -539,6 +566,8 @@ class KnowledgeBase:
 
     def matched_stop_topic(self, question: str) -> str | None:
         low = active_request(fix_mixed_script(question)).lower().replace("ё", "е")
+        low = re.sub(r"^\s*про оплат\w* (?:понял[аи]?|понятно|ясно)[.!]\s*(?=(?:а\s+)?(?:цен|стоим|сколько))",
+                     "", low)
         low = _STOP_EXCEPTIONS_RE.sub(" ", low)
         for topic in self.stop_topics:
             # «Фото» в названии бизнеса и «коммерческие форматы» не означают просьбу прислать материал.
@@ -582,6 +611,23 @@ class KnowledgeBase:
             if m := _REQUIREMENT_RE.search(sentence):
                 missing += sorted(focus & set(tokenize(sentence[:m.start()])) - set(missing))
         return missing
+
+    def missing_requested_fact(self, question: str, hits: list[SearchHit]) -> str:
+        """Факт, который клиент спросил, а в найденном контексте его нет: тираж, формат файла, число столов.
+        Модель в таком случае пересказывает соседние факты или догадывается — отвечает менеджер.
+        Проверки узкие: «формат рекламы» и «столы» в названии позиции прайса их не запускают."""
+        low = question.lower().replace("ё", "е")
+        text = "\n".join(h.chunk.text for h in hits)
+        flat = text.lower().replace("ё", "е")
+        if _TIRAGE_RE.search(low) and not _TIRAGE_RE.search(flat):
+            return "tirage"
+        if _FILE_FORMAT_RE.search(low):
+            # «формат 16:9» — соотношение сторон, а не тип файла; нужен явный тип файла или его отсутствие
+            if _FILE_UNKNOWN_RE.search(flat) or not _FILE_EXT_RE.search(flat):
+                return "file_format"
+        if _TABLE_COUNT_RE.search(low) and not _TABLE_COUNT_ANSWER_RE.search(text):
+            return "tables"
+        return ""
 
     def allowed_amounts(self) -> set[int]:
         """Суммы, которые бот может называть: цены прайса и суммы из примечаний
@@ -668,7 +714,7 @@ _FAMILY_CUT_RE = re.compile(r"\s*(?:[,(:№]|\d|\bдо\b|\bдля\b).*$")
 _TRAILING_PREP_RE = re.compile(r"\s+(?:с|на|в|до|для)$")
 
 
-_BUDGET_RE = re.compile(r"\b(?:бюджет\w*(?:\s+на\s+рекламу)?|до|в пределах|не дороже|не больше|максимум|на|дешевле)"
+_BUDGET_RE = re.compile(r"\b(?:бюджет\w*(?:\s+на\s+рекламу)?|до|в пределах|не дороже|не больше|максимум|на|дешевле|есть|располагаем|располагаю|потолок)"
                         r"[\s:—–-]+(?:(?:около|примерно|порядка|где-то|в районе|до)\s+)?"
                         r"(?:\d[\d \u00a0\u202f]*\s*[-–—]\s*)?(\d[\d \u00a0\u202f]*(?:[.,]\d+)?)[ \u00a0]*"
                         r"(млн\w*|тыс\w*|т\.?р\.?|к\b|k\b|руб\w*|₽|р\.?(?!\w))?", re.IGNORECASE)
@@ -683,6 +729,26 @@ _CITY_TOKENS = frozenset(stem(w) for w in "москва тагил оренбу�
 _CITY_RE = re.compile(r"(?P<ekb>екатеринбург\w*|\bекб\b|\bебург\w*)|(?P<nt>тагил\w*)|(?P<msk>москв\w*)|(?P<orb>оренбург\w*)")
 _CITY_NAMES = {"ekb": "екатеринбург", "nt": "тагил", "msk": "москва", "orb": "оренбург"}
 _CHEAPEST_RE = re.compile(r"сам\w* (?:дешев|недорог|бюджетн|доступн)|минимальн\w* (?:цен|стоимост)|\b(?:по)?дешевле\b")
+
+
+# Запрошенный факт, которого нет в контексте. «Тираж» — только карты и талоны, «столы» — число
+# посадочных мест, а не тейбл-тенты на столах. Формат файла — тип (mp4, mov…), а не 16:9.
+_TIRAGE_RE = re.compile(r"\bтираж\w*", re.I)
+_TABLE_COUNT_RE = re.compile(
+    r"\b(?:сколько|какое\s+количество)\s+(?:же\s+)?(?:столов|столиков|посадочных\s+мест)\b", re.I)
+_TABLE_COUNT_ANSWER_RE = re.compile(r"\b\d[\d\s]*\s*(?:столов|столиков|посадочных\s+мест)\b", re.I)
+_FILE_FORMAT_RE = re.compile(
+    r"\b(?:в\s+каком\s+формате|какой\s+формат|формат\s+файла|тип\s+файла|какой\s+кодек)\b"
+    r"[^.!?]{0,50}\b(?:ролик|видео|файл|материал)\w*|"
+    r"\b(?:ролик|видео|файл|материал)\w*\b[^.!?]{0,50}\b"
+    r"(?:в\s+каком\s+формате|какой\s+формат|формат\s+файла|тип\s+файла|какой\s+кодек)\b|"
+    r"\b(?:mp4|mov|avi|mkv|mpeg|m4v|wmv|flv)\b|\bкодек\w*",
+    re.I)
+_FILE_EXT_RE = re.compile(r"\b(?:mp4|mov|avi|mkv|mpeg|m4v|wmv|flv)\b", re.I)
+_FILE_UNKNOWN_RE = re.compile(
+    r"(?:тип|формат)\s+файла[^.!?]{0,120}\bне\s+(?:указан|оговорен|уточнен|определен)\w*|"
+    r"\bфайл\w*[^.!?]{0,120}\bне\s+(?:указан|оговорен|уточнен|определен)\w*",
+    re.I)
 
 
 # Срок строки и часть ответа: «1 день в будни (понедельник–четверг)», «все выходные месяца»

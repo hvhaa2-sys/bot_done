@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import ssl
 import time
 import weakref
 import uuid
@@ -48,7 +49,7 @@ def request_gate() -> asyncio.Semaphore:
 class GigaChatProvider(LLMProvider):
     name = "gigachat"
 
-    def __init__(self, auth_key: str, scope: str, model: str, verify_ssl: bool,
+    def __init__(self, auth_key: str, scope: str, model: str, verify_ssl: bool | ssl.SSLContext,
                  transport: httpx.AsyncBaseTransport | None = None, base_url: str = ""):
         if not auth_key:
             raise ValueError("Не задан GIGACHAT_AUTH_KEY")

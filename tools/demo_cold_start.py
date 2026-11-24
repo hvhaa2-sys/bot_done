@@ -168,7 +168,8 @@ async def run_demo(folder: Path, offline: bool, out=say) -> dict:
             story.line(f"«{row['question']}» → {row['answer']}")
             if row["note"]:
                 story.line(f"  подсказка: {row['note']}")
-            ok, msg = services.approve_candidates([row["id"]], row["question"], row["answer"])
+            scope = "business" if row["manager_text"] == DIALOGS[1].manager else "ВЕЕР Молл"
+            ok, msg = services.approve_candidates([row["id"]], row["question"], row["answer"], scope=scope)
             story.line(f"  {'✓' if ok else '✗'} {msg}")
 
         story.head("Новые клиенты спрашивают другими словами")

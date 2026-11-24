@@ -34,7 +34,7 @@ from .. import db as D
 from . import voice
 from ..max_inbox import MaxInbox, event_key
 from ..core.assistant import R_CATALOG
-from ..core.real_flow import business_operation, named_thanks
+from ..core.real_flow import business_operation, mixed_request_hint, named_thanks, radio_change_request
 from ..core.conversation import Conversation
 from ..core.pii import find_phone
 from ..services import Services
@@ -494,8 +494,25 @@ class MaxBot:
             return
         if named_thanks(text):
             return
-        if conn.mode == D.OBSERVE or services.db.is_paused(conn.id, chat_id) or business_operation(text):
+        if conn.mode == D.OBSERVE or services.db.is_paused(conn.id, chat_id):
             await self.relay(conn, chat_id, {"body": {"text": text}}, client)
+            return
+        operation = business_operation(text)
+        if operation or radio_change_request(text):
+            hourly = int(services.current()["chat_hourly_limit"])
+            # Обычные операции всегда пересылались напрямую. Новая ветка
+            # замены радиоролика наследует часовой лимит прежнего маршрута.
+            if not operation and hourly and services.db.count_recent(conn.id, chat_id, 3600) >= hourly:
+                services.db.pause_chat(conn.id, chat_id, 60)
+                await self.relay_after_limit(conn, chat_id, text, client)
+                return
+            hint = ""
+            try:
+                if conn.mode == "auto" and services.auto_allowed():
+                    hint = mixed_request_hint(services.kb, text)
+            except Exception:  # noqa: BLE001 — сбой справки не должен потерять просьбу клиента
+                log.exception("MAX: не удалось подготовить справку для карточки")
+            await self.relay(conn, chat_id, {"body": {"text": text}}, client, hint=hint)
             return
         out = await process_client_message(services, conn, chat_id, text, client)
         outcome = ("бот ответил сам" if out.to_client and not out.to_manager
@@ -504,8 +521,7 @@ class MaxBot:
                    else "вопрос — менеджеру" if out.to_manager else "отвечать не нужно — молчит")
         services.event(f"MAX: {outcome}")
         if out.to_manager and not out.dialog_id:
-            await self.relay(conn, chat_id, {"body": {"text": text}}, client, "пишет после лимита сообщений")
-            self.throttled[chat_id] = time.time()
+            await self.relay_after_limit(conn, chat_id, text, client)
             return
         sent = False
         if out.greeting:
@@ -682,7 +698,12 @@ class MaxBot:
         else:
             await self.answer(callback_id, "Кнопка устарела.")
 
-    async def relay(self, conn: D.Connection, chat_id: int, message: dict, client: str, why: str = "") -> None:
+    async def relay_after_limit(self, conn: D.Connection, chat_id: int, text: str, client: str) -> None:
+        await self.relay(conn, chat_id, {"body": {"text": text}}, client, "пишет после лимита сообщений")
+        self.throttled[chat_id] = time.time()
+
+    async def relay(self, conn: D.Connection, chat_id: int, message: dict, client: str, why: str = "",
+                    *, hint: str = "") -> None:
         """Переслать сообщение клиента менеджеру без ответа бота: в наблюдении, на паузе, после простоя.
         Ответ менеджера на эту карточку бот отправит клиенту (`on_manager_message`)."""
         services, body = self.services, message.get("body") or {}
@@ -700,13 +721,11 @@ class MaxBot:
                                         role="client", text=shown, sent_at=sent_at)
             services.log_watch_message(conn.id, chat_id, "client", shown, sent_at)
             dialog_id = services.db.watch_question(conn.id, chat_id, shown, sent_at, services.kb_version)
-            services.event("MAX, наблюдение: сообщение клиента переслано менеджеру")  # в логе ни имён, ни текста
         else:
             dialog_id = services.db.log_dialog(
                 connection_id=conn.id, chat_id=chat_id, question=shown, answer="", decision="escalate",
                 reason="relayed", confidence=0.0, status=D.ESCALATED, sources=[], latency_ms=0, mode=conn.mode,
                 kb_version=services.kb_version)
-            services.event(f"MAX: клиент {why} — переслано менеджеру")
         if time.time() - self.throttled.get(chat_id, 0) < 60:
             return  # текст сохранён в Диалогах; защита от спама не должна спамить менеджеру
         if kind:
@@ -714,7 +733,9 @@ class MaxBot:
         head = f"{client} {why}" if why else client
         phone = contact_phone(body.get("attachments") or [])
         quote = f"«{text}»" if text else f"прислал(а) {kind}" + (f": {phone}" if phone else "")
-        await self.send_card(conn.owner_chat_id, f"{head}:\n{quote}", dialog_id)
+        if await self.send_card(conn.owner_chat_id, f"{head}:\n{quote}{hint}", dialog_id):
+            services.event("MAX, наблюдение: сообщение клиента переслано менеджеру" if conn.mode == D.OBSERVE
+                           else f"MAX: клиент {why} — переслано менеджеру")
 
     async def hand_media_to_manager(self, conn: D.Connection, chat_id: int, kind: str, client: str,
                                     body: dict | None = None) -> None:

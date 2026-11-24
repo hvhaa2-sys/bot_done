@@ -17,9 +17,9 @@ from dataclasses import dataclass, field
 
 from ..llm.base import LLMProvider
 from .conversation import MAX_CLARIFICATIONS, Conversation
-from .answer_grounding import budget_issues, price_period_issues, property_issues
+from .answer_grounding import billing_periods, budget_issues, check_price_periods, price_term_suffix, property_issues
 from .client_intent import active_request, is_ready_to_buy
-from .knowledge import KnowledgeBase, PriceRow, SearchHit, _format_words, format_rub, parse_budget
+from .knowledge import KnowledgeBase, PriceRow, SearchHit, _CITY_TOKENS, _format_words, format_rub, parse_budget
 from .price_guard import (drop_bracket_totals, computed_totals, drop_numbers, extract_amounts, extract_numbers,
                           row_multipliers, ungrounded_numbers,
                           unknown_amounts,
@@ -42,6 +42,7 @@ R_GREETING = "greeting"
 R_SMALL_TALK = "small_talk"
 R_LIMIT = "limit"
 R_TERMS = "terms_mismatch"
+R_VAT_UNKNOWN = "vat_unknown"  # в строке прайса НДС не указан: итоговую сумму подтверждает менеджер
 R_VENUE = "venue_mismatch"
 R_PERIOD = "period_mismatch"
 R_FORMAT = "format_mismatch"
@@ -148,6 +149,8 @@ class Reply:
 
 
 class Assistant:
+    check_requested_facts = False
+
     def __init__(self, kb: KnowledgeBase, llm: LLMProvider, *, min_score: float = 1.0,
                  confidence_threshold: float = 0.7, top_k: int = 8,
                  holding_message: str = HOLDING_MESSAGE, greeting_message: str = GREETING_MESSAGE,
@@ -173,7 +176,7 @@ class Assistant:
         history = [(clip(q, MAX_HISTORY_CHARS), clip(a, MAX_HISTORY_CHARS)) for q, a in history or []]
         memory = conversation is not None or bool(history) or bool(last_question)
         state = conversation if conversation is not None else Conversation.replay(self.kb, [
-            {"question": q, "decision": ANSWER, "reason": "", "status": "sent_auto"} for q, _ in history])
+            {"question": q, "answer": a, "decision": ANSWER, "reason": None, "status": "sent_auto"} for q, a in history])
         if last_question and (not history or last_question != history[-1][0]) and conversation is None:
             state.observe(self.kb, clip(last_question, MAX_HISTORY_CHARS))
         state.observe(self.kb, question)
@@ -181,7 +184,11 @@ class Assistant:
         query = state.query(question) if memory or scoped_budget else from_translit(question)
         if state.changed:
             history = []  # Ответ про старый ТЦ не подтверждает цены и условия нового.
-        reply = await self._answer(question, history, allow_llm, topic, state, query)
+        from .comparison import comparison_reply
+
+        reply = comparison_reply(self, state, question) if not topic and len(request) <= MAX_QUESTION_CHARS else None
+        if reply is None:
+            reply = await self._answer(question, history, allow_llm, topic, state, query)
         state.finish(reply.decision, reply.reason)
         reply.latency_ms = int((time.perf_counter() - started) * 1000)
         return reply
@@ -213,7 +220,32 @@ class Assistant:
 
         state = state if state is not None else Conversation()
         query = query or from_translit(question)
+        if state.venue and "infodesk" in self.kb.normalize(question):
+            venue = self.kb._venues_in(state.venue) - _CITY_TOKENS
+            available = [r for r in self.kb.prices if self.kb._venues_in(r.placement) & venue]
+            if available and not any("infodesk" in r.format.lower() for r in available):
+                navigation = [r for r in available if re.search(r"навигац|терминал", r.format, re.I)]
+                if re.search(r"навигац|терминал", question, re.I) and 1 <= len(navigation) <= 3:
+                    text = f"В прайсе {state.venue} указан формат «{navigation[0].format}».\n"
+                    text += "\n".join(list_item(r, with_venue=False) for r in navigation)
+                    sources = [f"price-{i}" for i, r in enumerate(self.kb.prices) if r in navigation]
+                    return Reply(ANSWER, text, 1.0, "navigation_format", sources)
+                return self._clarify(state, ("position", f"В прайсе {state.venue} нет позиции с названием infodesk. "
+                                             "Подскажите, какое место или устройство вы имеете в виду?"))
         hits = self.kb.retrieve(query, self.top_k, self.min_score)
+        if self.check_requested_facts:
+            if fact := self.kb.missing_requested_fact(question, hits):
+                return Reply(ESCALATE, self.holding_message, 0.0, f"missing_fact:{fact}")
+        if state.budget and (parse_budget(question.lower()) or re.search(
+                r"бюджет|влез|уклад|покаж|сколько|стоим|цен|за\s+\d|\bдо\s+\d|не дороже|не больше", question, re.I)):
+            from .price_options import fits_budget
+
+            eligible = [h for h in hits if h.chunk.kind == "price"
+                        and fits_budget(self.kb.prices[int(h.chunk.id.split("-")[1])], query, state.budget)]
+            if not eligible:
+                return Reply(ANSWER, f"В текущем прайсе нет подходящих вариантов под бюджет "
+                             f"{format_rub(state.budget)} с указанными сроком и условиями. "
+                             "Можно рассмотреть другой срок, формат или бюджет.", 1.0, "no_budget_options")
         if clarification := state.clarification(self.kb, question, hits=hits):
             return self._clarify(state, clarification)
         if len(hits) > 1 and all(h.chunk.kind == "catalog" for h in hits):
@@ -330,13 +362,15 @@ class Assistant:
         # «Реклама значительно повысит прибыль», «окупится за месяц», «30% посетителей» — обещаний эффекта
         # в базе нет: такие фразы вырезаем, а если без них ответа не остаётся — к менеджеру
         text, claimed = drop_claims(text, known)
-        text = drop_bracket_totals(text)
+        text = drop_bracket_totals(text).lstrip(" .,!?:;—–-")
         if claimed and len(text) < _MANAGER_TAIL_MIN:
             needs_manager = True
         # Сумма в рублях — только из контекста (не из всего прайса: так цена экрана проходила
         # как цена печати) или бюджет, который назвал сам клиент
         price_context = "\n".join(h.chunk.text for h in hits if h.chunk.kind == "price") if hits is not None else known
         allowed = set(extract_amounts(price_context)) | {parse_budget(question.lower()) or 0}
+        if state and state.budget:
+            allowed.add(state.budget)
         # Числа от 1000 без «₽» («27 тысяч») — из текущего контекста или запроса.
         seen = " ".join([known, question])
         bad = sorted(set(unknown_amounts(text, allowed)) | set(ungrounded_numbers(text, seen)))
@@ -365,8 +399,10 @@ class Assistant:
             return Reply(ESCALATE, text, confidence, f"{R_FORMAT}:{wrong}", sources, raw=raw)
         if hits and (wrong := self.kb.wrong_tier_amounts(text, hits, question) or self.kb.wrong_day_amounts(text, hits)):
             return Reply(ESCALATE, text, confidence, f"{R_PERIOD}:{wrong}", sources, raw=raw)
-        if hits and (wrong := price_period_issues(self.kb, text, hits, question)):
-            return Reply(ESCALATE, text, confidence, f"{R_PERIOD}:{wrong}", sources, raw=raw)
+        if hits:
+            priced_text, wrong = check_price_periods(self.kb, text, hits, question)
+            if wrong:
+                return Reply(ESCALATE, text, confidence, f"{R_PERIOD}:{wrong}", sources, raw=raw)
         if hits and state and (wrong := budget_issues(self.kb, text, hits, total=state.budget,
                                                     placement=state.placement_budget, preparation=state.preparation_budget)):
             return Reply(ESCALATE, text, confidence, f"{R_TERMS}:{wrong}", sources, raw=raw)
@@ -384,9 +420,13 @@ class Assistant:
             if problem := wrong_conditions(text, rows) or vat_claim_mismatch(text, hits, self.kb.prices):
                 # «С учётом сезонной наценки» у машины, «учесть НДС» сверх цены — к менеджеру
                 return Reply(ESCALATE, text, confidence, f"{R_TERMS}:{problem}", sources, raw=raw)
-            text = add_missing_conditions(drop_foreign_extras(text, rows), rows)
+            text = add_missing_conditions(drop_foreign_extras(priced_text, rows), rows)
             # Сезонные цены сверяем с текстом до перечня: дописанные строки несут их сами
             text = add_season_prices(complete_partial_list(text, question, hits, self.kb.prices), rows, said=text)
+            if unknown := vat_unknown_rows(text, hits, self.kb):
+                # Сумма без НДС в источнике — не оферта клиенту: черновик с оговоркой уходит менеджеру
+                return Reply(ESCALATE, add_vat_unknown(text, unknown, self.kb.rows_in_answer(text, hits)),
+                             confidence, R_VAT_UNKNOWN, sources, raw=raw)
         return Reply(ANSWER, text, confidence, "", sources, raw=raw)
 
 
@@ -612,11 +652,44 @@ def wrong_conditions(text: str, rows: list) -> str:
                  r"|(?:добав|начисл)\w*\s+(?:\w+\s+)?ндс|не включа\w*\s+(?:\w+\s+)?ндс", low.replace("ё", "е")) \
             and any(r.parts()["vat"] for r in rows):
         return "ндс"
-    # Обратное: «все суммы с НДС» про пакет, у которого «без НДС, НДС 5% начисляется сверху»
+    # Обратное: «все суммы с НДС» про пакет, у которого «без НДС, НДС 5% начисляется сверху» или НДС не указан
     if re.search(r"с (?:учетом )?ндс|ндс (?:уже )?(?:включ|в цен)|включ\w* ндс", low.replace("ё", "е")) \
-            and any("без ндс" in r.notes.lower() for r in rows):
+            and any("без ндс" in r.notes.lower() or vat_unknown(r) for r in rows):
         return "ндс"
     return ""
+
+
+_VAT_UNKNOWN_RE = re.compile(r"ндс[^;.]*не указан", re.IGNORECASE)
+
+
+def vat_unknown(row) -> bool:
+    """В примечании строки: «НДС в прайсе не указан»."""
+    return bool(_VAT_UNKNOWN_RE.search(row.notes))
+
+
+def vat_unknown_rows(text: str, hits: list[SearchHit], kb: KnowledgeBase) -> list:
+    """Строки без указанного НДС, чью цену называет ответ. Если формат не стоит рядом с суммой
+    («2 выхода — 25 200 ₽»), строку узнаём по самой сумме, кроме сумм, уже объяснённых другими строками."""
+    named = kb.rows_in_answer(text, hits)
+    if found := [r for r in named if vat_unknown(r)]:
+        return found
+    explained = {a for r in named for a in (r.price_rub, *extract_amounts(r.notes))}
+    amounts = set(extract_amounts(text)) - explained
+    found = []
+    for row in (kb.prices[int(h.chunk.id.split("-")[1])] for h in hits if h.chunk.kind == "price"):
+        if vat_unknown(row) and row.price_rub in amounts and row not in found:
+            found.append(row)
+    return found
+
+
+def add_vat_unknown(text: str, unknown: list, named: list) -> str:
+    """Оговорка про НДС, которую модель или обрезка хвоста про менеджера потеряли."""
+    if _VAT_UNKNOWN_RE.search(text):
+        return text
+    if all(r in unknown for r in named):
+        return _before_question(text, "НДС в прайсе не указан.")
+    venues = dict.fromkeys(r.placement.split(" — ")[0].split(",")[0].strip() for r in unknown)
+    return _before_question(text, f"НДС в прайсе не указан для позиций: {', '.join(venues)}.")
 
 
 _EXTRAS_CLAIM_RE = re.compile(r"[^.!?\n]*(?:печат|монтаж)[^.!?\n]*(?:оплачива|отдельно|дополнительн|доплат)[^.!?\n]*[.!?]?\s*",
@@ -688,7 +761,8 @@ def add_season_prices(text: str, rows: list, said: str | None = None) -> str:
 
 def _season_prices(row: PriceRow) -> list[str]:
     """Сезонные цены строки: только с суммой, «в декабре коэффициент 2» без неё клиенту ничего не называет."""
-    return [part for part in row.parts()["season"] if extract_amounts(part)]
+    return [part if billing_periods(part) else part.rstrip(".") + price_term_suffix(row.period)
+            for part in row.parts()["season"] if extract_amounts(part)]
 
 
 def _season_suffix(row: PriceRow) -> str:
@@ -736,7 +810,7 @@ def complete_partial_list(text: str, question: str, hits: list[SearchHit], price
 def list_item(row: PriceRow, with_venue: bool = True) -> str:
     """Строка прайса для перечня клиенту: «Баннер № 2, ВЕЕР Молл, Екатеринбург — атриум: 25 000 ₽ за 1 месяц»,
     без площадки — «Баннер № 2 — атриум: 25 000 ₽ за 1 месяц»."""
-    period = f" за {row.period}" if row.period else ""
+    period = price_term_suffix(row.period)
     vat = " (без НДС)" if "без ндс" in row.notes.lower() else ""
     return f"{_row_title(row, with_venue)}: {format_rub(row.price_rub)}{period}{vat}{_season_suffix(row)}"
 

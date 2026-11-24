@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import csv
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 import datetime as dt
 import hmac
 import io
@@ -27,13 +28,14 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .admin_guard import AdminGuard
 from . import db as D
 from . import onboarding
 from .channels.flow import human_reason
 from .core.assistant import SKIP
 from .core.conversation import Conversation
 from .core.knowledge import PriceRow, format_rub, parse_faq, parse_note, parse_prices, parse_stop_topics, prices_csv
-from .core.candidates import group as group_candidates
+from .core.candidates import group as group_candidates, target_note
 from .core.candidate_review import NOTE_PREFIX
 from .core.learning import faq_entry, group_questions
 from .core.price_guard import unknown_amounts
@@ -873,7 +875,7 @@ def login_page(msg: str = "", status: int = 401, with_password: bool = False) ->
 <p class="hint">Сменить: .venv/bin/python -m app.password</p>"""
     else:
         fields = """<label for="t">Токен админки</label>
-<input id="t" type="text" name="token" autocomplete="current-password" required autofocus>
+<input id="t" type="password" name="token" autocomplete="current-password" required autofocus>
 <p class="hint">Он записан в файле .env в строке ADMIN_TOKEN. Вместо токена можно задать логин и пароль:
 .venv/bin/python -m app.password</p>"""
     return HTMLResponse(f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
@@ -888,7 +890,9 @@ def note(msg: str) -> str:
 
 
 def create_app(services: Services) -> FastAPI:
-    app = FastAPI(title="AI Sales Assistant admin", docs_url=None, redoc_url=None)
+    app = FastAPI(title="AI Sales Assistant admin", docs_url=None, redoc_url=None, openapi_url=None)
+    app.add_middleware(AdminGuard, token=services.settings.admin_token,
+                       allowed_origins=services.settings.admin_allowed_origins)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")  # шрифты; без входа — нужны и форме входа
     exam: dict = {"running": False, "done": 0, "total": 0, "error": ""}
     onboarding_lock = asyncio.Lock()
@@ -944,7 +948,7 @@ def create_app(services: Services) -> FastAPI:
             return login_page(error, with_password=with_password)
         # Сессия — та же cookie, что и при входе по токену: проверка доступа не меняется
         response = RedirectResponse("/", status_code=303)
-        response.set_cookie("admin_token", st.admin_token, httponly=True, samesite="lax")
+        response.set_cookie("admin_token", st.admin_token, httponly=True, samesite="lax", secure=request.url.scheme == "https")
         return response
 
     @app.get("/logout")
@@ -970,7 +974,7 @@ def create_app(services: Services) -> FastAPI:
             failures.setdefault(ip, []).append(time.time())
             return login_page("Неверный токен в ссылке.", with_password=with_password)
         response = RedirectResponse(clean, status_code=303)
-        response.set_cookie("admin_token", token, httponly=True, samesite="lax")
+        response.set_cookie("admin_token", token, httponly=True, samesite="lax", secure=request.url.scheme == "https")
         return response
 
     @app.post("/max/webhook")
@@ -1345,13 +1349,16 @@ def create_app(services: Services) -> FastAPI:
 
     @app.post("/candidates/approve", dependencies=[Depends(auth)])
     async def candidates_approve(ids: str = Form(...), question: str = Form(...), answer: str = Form(...),
-                                 source_reviewed: bool = Form(False), n: int = Form(0)) -> HTMLResponse:
+                                 scope: str = Form(""), source_reviewed: bool = Form(False),
+                                 n: int = Form(0)) -> HTMLResponse:
         parts = [i.strip() for i in ids.split(",")]
         id_list = [int(i) for i in parts] if all(re.fullmatch(r"[0-9]+", i) for i in parts) else []
-        ok, msg = services.approve_candidates(id_list, question, answer, source_reviewed=source_reviewed)
+        ok, msg = services.approve_candidates(id_list, question, answer, scope=scope, source_reviewed=source_reviewed)
         if not ok:
             return page("Обучение", learn_html(services, msg, tab="facts", n=n,
-                                               candidate_edit=(id_list, question, answer)), "/learn")
+                                               candidate_edit=(id_list, question, answer), scope=scope), "/learn")
+        if scope == "case":
+            return page("Обучение", learn_html(services, msg, tab="facts", n=n), "/learn")
         check = await answer_check(services, question.strip(), "Факт добавлен")
         return page("Обучение", learn_html(services, f"Факт утверждён. {msg}", check, tab="facts", n=n), "/learn")
 
@@ -1364,6 +1371,26 @@ def create_app(services: Services) -> FastAPI:
     async def learn_hide(ids: str = Form(...), n: int = Form(0)) -> RedirectResponse:
         services.db.mark_learned([int(i) for i in ids.split(",") if i.isdigit()])
         return RedirectResponse(f"/learn?tab=questions&n={max(n, 0)}", status_code=303)
+
+    @app.post("/learn/review", dependencies=[Depends(auth)])
+    async def review_unscoped(question: str = Form(""), original_answer: str = Form(""), scope: str = Form(""),
+                              answer: str = Form(""), source_reviewed: bool = Form(False), n: int = Form(0)) -> HTMLResponse:
+        # Браузер отправляет переводы строк формы как CRLF, черновик читается с LF.
+        original_answer = original_answer.replace("\r\n", "\n")
+        answer = answer.replace("\r\n", "\n")
+        ok = False
+        if not question.strip() or not original_answer.strip():
+            msg = "Нужны исходные вопрос и ответ. Обновите страницу."
+        elif scope not in ("business", "case") and scope not in services.fact_venues():
+            msg = "Выберите, где действует правило."
+        elif scope != "case" and not answer.strip():
+            msg = "Заполните ответ для базы."
+        else:
+            ok, msg = services.review_unscoped_fact(question, original_answer, scope,
+                                                    answer=None if scope == "case" else answer,
+                                                    source_reviewed=source_reviewed)
+        edit = None if ok else UnscopedEdit((question, original_answer), answer, scope, source_reviewed)
+        return page("Обучение", learn_html(services, msg, tab="unscoped", n=n, unscoped_edit=edit), "/learn")
 
     # --- база знаний ---
     @app.get("/kb", dependencies=[Depends(auth)])
@@ -2170,20 +2197,38 @@ def consent_html(services: Services) -> str:
 <div class="row"><button class="small">Сохранить</button></div></form></div>"""
 
 
+@dataclass
+class UnscopedEdit:
+    fact: tuple[str, str]
+    answer: str
+    scope: str
+    source_reviewed: bool
+
+
 def learn_html(services: Services, msg: str = "", check: str = "", *, tab: str = "", n: int = 0,
-               candidate_edit: tuple[list[int], str, str] | None = None,
-               learn_edit: tuple[list[int], str, str] | None = None) -> str:
-    """«Обучение» очередью: на экране один факт из переписки или один вопрос без ответа, справа — что дальше.
-    Утвердили, ответили или скрыли — на его место встаёт следующий. Две вкладки: факты и вопросы."""
+               candidate_edit: tuple[list[int], str, str] | None = None, scope: str = "",
+               learn_edit: tuple[list[int], str, str] | None = None, unscoped_edit: UnscopedEdit | None = None) -> str:
+    """В каждой вкладке одна карточка на проверку и список следующих."""
     facts = group_candidates(services.db.candidates(), services.kb)
+    unscoped = services.unscoped_facts()
     questions = group_questions(services.db.to_learn())
-    tab = tab if tab in ("facts", "questions") else "facts" if facts else "questions"
+    if tab not in ("facts", "questions", "unscoped"):
+        tab = "facts" if facts else "unscoped" if unscoped else "questions"
+    queues = [("facts", "Из переписки", len(facts)), ("questions", "Вопросы без ответа", len(questions))]
+    if unscoped or tab == "unscoped":
+        queues.insert(1, ("unscoped", "Старые правила", len(unscoped)))
     tabs = "".join(
         f'<a href="/learn?tab={key}" class="{"on" if key == tab else ""}">{name}<span class="c">{count}</span></a>'
-        for key, name, count in (("facts", "Из переписки", len(facts)), ("questions", "Вопросы без ответа", len(questions))))
+        for key, name, count in queues)
     if tab == "facts":
         intro = "Факты из ваших ответов клиентам. Пока вы их не утвердите, бот их не видит."
-        body = candidates_html(services, candidate_edit, n, groups=facts)
+        body = candidates_html(services, candidate_edit, n, groups=facts, scope=scope)
+    elif tab == "unscoped":
+        intro = "У этих правил из черновика ещё не указана область. Пока они скрыты из поиска."
+        if unscoped_edit and unscoped_edit.fact in unscoped:
+            n = unscoped.index(unscoped_edit.fact)
+        body = queue_html(tab, n, unscoped, lambda fact, i, skip: unscoped_card(services, fact, i, skip, unscoped_edit),
+                          lambda fact: (fact[0], ""), "Все старые правила проверены.")
     else:
         intro = ("Вопросы, на которые у бота не нашлось ответа, и ответы с отметкой «Ошибка». Ответьте один раз, "
                  "и дальше бот ответит сам. Цены не пишите: бот берёт их из прайса.")
@@ -2304,22 +2349,27 @@ SOURCE_NAMES = {"card": "ответ на карточку бота", "chat": "о
 
 
 def candidates_html(services: Services, candidate_edit: tuple[list[int], str, str] | None = None, n: int = 0, *,
-                    groups: list | None = None) -> str:
+                    groups: list | None = None, scope: str = "") -> str:
     """Факты из ответов менеджера клиентам очередью: утвердить, поправить или отклонить. До утверждения бот их не видит."""
     groups = group_candidates(services.db.candidates(), services.kb) if groups is None else groups
     if candidate_edit:  # утвердить не вышло — показываем тот же факт с вашей правкой
         n = next((i for i, items in enumerate(groups) if {r["id"] for r in items} == set(candidate_edit[0])), n)
-    return queue_html("facts", n, groups, lambda items, i, skip: candidate_card(services, items, i, skip, candidate_edit),
+    return queue_html("facts", n, groups,
+                      lambda items, i, skip: candidate_card(services, items, i, skip, candidate_edit, scope),
                       lambda items: (items[0]["question"], plural(len(items), "источник", "источника", "источников")),
                       "Новых фактов из переписки нет.")
 
 
 def candidate_card(services: Services, items: list, n: int, skip: str,
-                   candidate_edit: tuple[list[int], str, str] | None = None) -> str:
+                   candidate_edit: tuple[list[int], str, str] | None = None, scope: str = "") -> str:
     top = items[0]
     question, answer = top["question"], top["answer"]
     if candidate_edit and set(candidate_edit[0]) == {r["id"] for r in items}:
         _, question, answer = candidate_edit
+    else:
+        scope = ""
+    if not scope:
+        _, scope = target_note(services.draft_kb(), question, answer)
     ids = ",".join(str(r["id"]) for r in items)
     when = dt.datetime.fromtimestamp(top["created_at"]).strftime("%d.%m %H:%M")
     warnings = services.candidate_warnings(items, question, answer)
@@ -2328,8 +2378,7 @@ def candidate_card(services: Services, items: list, n: int, skip: str,
     notes = list(dict.fromkeys([line for r in items for line in r["note"].splitlines()
                                if line and not line.startswith(NOTE_PREFIX)] + warnings))
     warn = "".join(f'<p class="warn">{escape(n)}</p>' for n in notes)
-    reviewed = ('<label><input type="checkbox" name="source_reviewed" value="true"> '
-                'Сверил с исходным ответом</label>') if warnings else ""
+    reviewed = review_checkbox() if warnings else ""
     sources = "".join(
         f"<li><b>Клиент:</b> {escape(r['client_question'])}<br><b>Вы ({SOURCE_NAMES.get(r['source'], r['source'])}):</b> "
         f"{escape(r['manager_text'])}</li>" for r in items)
@@ -2339,9 +2388,51 @@ def candidate_card(services: Services, items: list, n: int, skip: str,
 <form method="post" action="/candidates/approve"><input type="hidden" name="ids" value="{ids}"><input type="hidden" name="n" value="{n}">
 <label>Вопрос</label><input type="text" name="question" value="{escape(question)}">
 <label>Ответ для базы</label><textarea name="answer" rows="3">{escape(answer)}</textarea>{reviewed}
+{scope_select(services.fact_venues(), scope)}
 <p class="row"><button>Утвердить</button>{skip}</p></form>
 <form method="post" action="/candidates/reject"><input type="hidden" name="ids" value="{ids}"><input type="hidden" name="n" value="{n}">
 <button class="light small">Отклонить</button></form>"""
+
+
+def scope_select(venues: list[str], selected: str = "", *, old: bool = False) -> str:
+    placeholder = "Выберите область" if old else "Выберите область перед утверждением"
+    choices = [("", placeholder), ("business", "Для всех площадок"), *((v, v) for v in venues),
+               ("case", "Оставить скрытым" if old else "Только эта заявка (вне поиска)")]
+    options = "".join(f'<option value="{escape(value)}"{" selected" if value == selected else ""}>{escape(label)}</option>'
+                      for value, label in choices)
+    return (f'<label for="fact-scope">Где действует правило?</label>'
+            f'<select id="fact-scope" name="scope" required>{options}</select>')
+
+
+def review_checkbox(checked: bool = False) -> str:
+    return (f'<label><input type="checkbox" name="source_reviewed" value="true"{" checked" if checked else ""}> '
+            'Сверил с исходным ответом</label>')
+
+
+def unscoped_card(services: Services, fact: tuple[str, str], n: int, skip: str, edit: UnscopedEdit | None) -> str:
+    edit = edit if edit and edit.fact == fact else None
+    question, original = fact
+    answer = edit.answer if edit else original
+    sources = services.unscoped_sources(*fact)
+    reviewed = ""
+    if sources:
+        items = "".join(f"<li><b>Клиент:</b> {escape(q)}<br><b>Менеджер:</b> {escape(a)}</li>" for q, a in sources)
+        source_html = (f'<details open><summary>Откуда взято</summary>'
+                       f'<ul style="white-space:pre-wrap;overflow-wrap:anywhere">{items}</ul></details>')
+        rows = [{"client_question": q, "manager_text": a} for q, a in sources]
+        warnings = services.candidate_warnings(rows, question, answer)
+        reviewed = "".join(f'<p class="warn">{escape(w)}</p>' for w in warnings)
+        if warnings or edit:
+            reviewed += review_checkbox(bool(edit and edit.source_reviewed))
+    else:
+        source_html = '<p class="muted">Переписка не найдена. Сверьте правило вручную.</p>'
+    return f"""<h2>{escape(question)}</h2>{source_html}
+<form method="post" action="/learn/review"><input type="hidden" name="n" value="{n}">
+<input type="hidden" name="question" value="{escape(question)}"><input type="hidden" name="original_answer" value="{escape(original)}">
+<label for="review-answer">Ответ для базы</label><textarea id="review-answer" name="answer" rows="3">{escape(answer)}</textarea>{reviewed}
+{scope_select(services.fact_venues(), edit.scope if edit else "", old=True)}
+<p class="hint">Если сомневаетесь, оставьте правило скрытым.</p>
+<p class="row"><button>Сохранить решение</button>{skip}</p></form>"""
 
 
 def growth_html(services: Services) -> str:

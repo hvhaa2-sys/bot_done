@@ -8,8 +8,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .knowledge import KnowledgeBase, SearchHit, _CITY_TOKENS, parse_budget
-from .price_guard import amount_spans, extract_amounts
+from .knowledge import KnowledgeBase, PriceRow, SearchHit, _CITY_TOKENS, parse_budget
+from .price_guard import _NUMBER_RE, amount_spans, extract_amounts, extract_numbers
 from .text import drop_courtesy, tokenize
 
 _SENTENCES = re.compile(r"(?<!руб\.)(?<!р\.)(?<!сек\.)(?<!мес\.)(?<=[.!?])\s+|\n+", re.I)
@@ -174,6 +174,61 @@ def periods(text: str) -> list[tuple[tuple[str, int], int, int]]:
 
 
 _LIST_ITEM = re.compile(r"\s*(?:[-–—•*]|\d+[.)])\s")
+_PRICE_SEPARATOR = re.compile(r"[,;](?!\d)|\s+(?:и|или)\s+", re.I)
+_BUDGET_LABEL = re.compile(r"(?:бюджет\w*|лимит\w*|потолок|располагаете)(?:\s+на\s+(?:размещение|рекламу|подготовку))?"
+                           r"(?:\s+до)?[\s:—–-]*$", re.I)
+_BUDGET_OFFER = re.compile(r"\s*(?:(?:в|на) месяц\s+)?(?:доступн|можно|подойд)|[\s—–-]*(?:ваш\s+)?(?:бюджет|лимит)", re.I)
+_EXTRA = r"(?:печат|монтаж|демонтаж|изготовлен|производств|доплат)\w*"
+_EXTRA_LABEL = re.compile(rf"\b{_EXTRA}[^,;:]{{0,35}}[:—–-]?\s*$", re.I)
+_EXTRA_AFTER = re.compile(rf"[\s—–-]*(?:за |на ){_EXTRA}", re.I)
+_UNKNOWN_TERM = re.compile(r"[\s(.,;—–-]*(?:срок|период)(?: размещения)?\s+(?:в прайсе\s+)?"
+                           r"(?:не указан|неизвест|нужно уточнить)", re.I)
+_PRICE_LABEL = re.compile(r"(?:[—–:-]|\bстоит|\bстоят|\bстоимость|\bцена)\s*$", re.I)
+_FREQUENCY = re.compile(r"\b(?:(?:выход|показ)(?:а|ов|ы)?|раза?)\s+(?:в|за|на)\s*$", re.I)
+_OTHER_UNIT = re.compile(r"\b(?:(\d+)\s+)?(час(?:а|ов)?|сезон(?:а|ов)?)\b", re.I)
+
+
+def price_term_suffix(period: str) -> str:
+    return f" за {period}" if period else " (срок в прайсе не указан)"
+
+
+def _price_spans(text: str) -> list[tuple[int, int, int]]:
+    spans = {}
+    for amount, start, end in amount_spans(text):
+        # Общий парсер сумм возвращает начало «руб» и для полного слова «рублей».
+        ending = re.match(r"(?:лей|ля|ль)\b", text[end:], re.I)
+        spans[start] = (amount, start, end + (ending.end() if ending else 0))
+    for match in _NUMBER_RE.finditer(text):
+        if match.start() in spans or not _PRICE_LABEL.search(text[:match.start()]):
+            continue
+        if re.match(r"\s*(?:$|[.,;!?)]|/|\b(?:в|за|на|при)\b)", text[match.end():], re.I):
+            amount, = extract_numbers(match[0])
+            if amount >= 1000:
+                spans[match.start()] = (amount, match.start(), match.end())
+    return sorted(spans.values(), key=lambda span: span[1])
+
+
+def billing_periods(text: str) -> list[tuple[tuple[str, int], int, int]]:
+    found = periods(text)
+    for match in _OTHER_UNIT.finditer(text):
+        unit = "hour" if match[2].lower().startswith("час") else "season"
+        if unit == "season" and re.search(r"\bв\s+$", text[:match.start()], re.I) and re.match(
+                r"\s*[-–—:]?\s*\d", text[match.end():]):
+            continue  # «В сезон — 45 360 ₽» называет сезонную цену, не срок размещения.
+        found.append(((unit, int(match[1] or 1)), match.start(), match.end()))
+    return [(value, start, end) for value, start, end in sorted(found, key=lambda item: item[1])
+            if not _FREQUENCY.search(text[:start])]
+
+
+def _price_parts(sentence: str):
+    """Не переносить ТЦ или срок через границу двух цен в одном предложении."""
+    spans = _price_spans(sentence)
+    start = 0
+    for (_, _, end), (_, following, _) in zip(spans, spans[1:]):
+        if separator := _PRICE_SEPARATOR.search(sentence, end, following):
+            yield sentence[start:separator.start()]
+            start = separator.end()
+    yield sentence[start:]
 
 
 def _scoped_parts(kb: KnowledgeBase, answer: str, current: Scope):
@@ -184,22 +239,62 @@ def _scoped_parts(kb: KnowledgeBase, answer: str, current: Scope):
         item = _LIST_ITEM.match(line)
         if item:
             current = heading
-        for part in _SENTENCES.split(line):
-            current = scope(kb, part, current)
-            yield part, current
+        for sentence in _SENTENCES.split(line):
+            for part in _price_parts(sentence):
+                current = scope(kb, part, current)
+                yield part, current
         if not item and line.strip():
             heading = current
 
 
 def price_period_issues(kb: KnowledgeBase, answer: str, hits: list[SearchHit], question: str) -> list[int]:
+    return check_price_periods(kb, answer, hits, question)[1]
+
+
+def _billing_for_amount(part, mentioned, left, start, end, right):
+    after = [(p, a) for p, a, _ in mentioned if end <= a < right]
+    before = [(p, b) for p, _, b in mentioned if left <= b <= start]
+    # В «на полгода — 18 000 ₽ за месяц» подпись после цены важнее срока кампании перед ней.
+    for period, at in after:
+        if not re.search(r"[,;]", part[end:at]):
+            return period
+    for period, at in reversed(before):
+        if re.fullmatch(r"\s*[-–—:]\s*", part[at:start]):
+            return period
+    return after[0][0] if after else before[-1][0] if before else None
+
+
+def _placement_terms(rows: list[PriceRow], amount: int) -> set[str]:
+    terms = {row.period for row in rows if row.price_rub == amount}
+    for row in rows:
+        for note in row.parts()["season"]:
+            for part in _price_parts(note):
+                if amount not in extract_amounts(part):
+                    continue
+                term = row.period
+                if quoted := billing_periods(part):
+                    unit, start, end = quoted[0]
+                    base = billing_periods(row.period)
+                    if not base or unit != base[0][0]:
+                        term = part[start:end]
+                terms.add(term)
+    return terms
+
+
+def check_price_periods(kb: KnowledgeBase, answer: str, hits: list[SearchHit], question: str) -> tuple[str, list[int]]:
+    """Проверить названный срок и подписать пропущенный у каждой цены размещения."""
     rows = [kb.prices[int(h.chunk.id.split("-")[1])] for h in hits if h.chunk.kind == "price"]
     if not rows:
-        return []
-    budget = parse_budget(question.lower())  # бюджет клиента, повторённый в ответе, — не цена формата
+        return answer, []
+    budget = parse_budget(question.lower())
+    insertions = []
     bad = []
+    offset = 0
     for part, current in _scoped_parts(kb, answer, scope(kb, question)):
-        spans = amount_spans(part)
-        mentioned = periods(part)
+        pos = answer.index(part, offset)
+        offset = pos + len(part)
+        spans = _price_spans(part)
+        mentioned = billing_periods(part)
         if _PRORATE.search(part):
             requested = {p for p, _, _ in mentioned}
             fitting = [r for r in rows if compatible(current, scope(kb, f"{r.format}, {r.placement}"), price=True)]
@@ -210,28 +305,35 @@ def price_period_issues(kb: KnowledgeBase, answer: str, hits: list[SearchHit], q
         for i, (amount, start, end) in enumerate(spans):
             right = spans[i + 1][1] if i + 1 < len(spans) else len(part)
             left = spans[i - 1][2] if i else 0
-            if amount == budget or re.search(r"(?:бюджет|лимит|потолок|располагаете)[^,;:.]{0,40}$",
-                                             part[max(left, start - 60):start], re.I):
+            prefix, tail = part[left:start], part[end:right]
+            if _BUDGET_LABEL.search(prefix) or (amount == budget and
+                    (re.search(r"\bдо\s*$", prefix, re.I) or _BUDGET_OFFER.match(tail))):
                 continue  # повторение бюджета клиента не является ценой услуги
-            after = [(p, a - end) for p, a, b in mentioned if end <= a < right]
-            before = [(p, start - b) for p, a, b in mentioned if left <= b <= start]
-            # «день — 6 000 ₽, неделя — 18 000 ₽»: срок подписью перед ценой относится к ней, а не к следующей.
-            # Но «на полгода — 18 000 ₽ за месяц»: срок сразу после цены в той же части фразы важнее подписи
-            near = [x for x in after if not re.search(r"[,;]", part[end:end + x[1]])]
-            label = [p for p, a, b in mentioned if left <= b <= start and re.fullmatch(r"\s*[-–—:]\s*", part[b:start])]
-            billing = min(near, key=lambda x: x[1])[0] if near else label[0] if label else \
-                min(after, key=lambda x: x[1])[0] if after else min(before, key=lambda x: x[1])[0] if before else None
             # Чужой формат с такой же суммой не подтверждает цену запрошенного экрана.
             candidates = [r for r in rows if amount == r.price_rub or amount in extract_amounts(r.notes)]
             matching = [r for r in candidates if compatible(current, scope(kb, f"{r.format}, {r.placement}"), price=True)]
-            if candidates and not matching:
-                bad.append(amount)
-            elif billing and matching:
-                main = [r for r in matching if amount == r.price_rub]
-                # Печать и монтаж разовые: их проверяет существующая защита дополнительных расходов.
-                if main and not any(periods(r.period) and billing == periods(r.period)[0][0] for r in main):
+            if not matching:
+                if candidates:
                     bad.append(amount)
-    return sorted(set(bad))
+                continue
+            if (_EXTRA_LABEL.search(prefix) or _EXTRA_AFTER.match(tail)) and any(
+                    amount in extract_amounts(note) for r in matching for note in r.parts()["extra"]):
+                continue
+            terms = _placement_terms(matching, amount)
+            if not terms:  # Только сумма из примечания, например печать за один флаг.
+                continue
+            if billing := _billing_for_amount(part, mentioned, left, start, end, right):
+                if not any(quoted and billing == quoted[0][0] for quoted in map(billing_periods, terms)):
+                    bad.append(amount)
+            elif _UNKNOWN_TERM.match(answer, pos + end):
+                if len(terms) == 1 and "" not in terms:
+                    bad.append(amount)
+            elif not any(term and term.casefold() in part.casefold() for term in terms):
+                suffix = price_term_suffix(next(iter(terms))) if len(terms) == 1 else " (срок нужно уточнить)"
+                insertions.append((pos + end, suffix))
+    for end, suffix in reversed(insertions):
+        answer = answer[:end] + suffix + answer[end:]
+    return answer, sorted(set(bad))
 
 
 def budget_issues(kb: KnowledgeBase, answer: str, hits: list[SearchHit], *, total: int | None,

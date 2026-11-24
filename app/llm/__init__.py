@@ -14,9 +14,13 @@ def make_provider(settings: Settings) -> LLMProvider:
     if name == "gigachat":
         from .. import netbind
         from .gigachat import GigaChatProvider
+        import ssl
+
+        verify = (ssl.create_default_context(cafile=settings.gigachat_ca_bundle)
+                  if settings.gigachat_ca_bundle else settings.gigachat_verify_ssl)
         return GigaChatProvider(settings.gigachat_auth_key, settings.gigachat_scope,
-                                settings.gigachat_model, settings.gigachat_verify_ssl,
-                                transport=netbind.transport(settings.direct_interface, settings.gigachat_verify_ssl),
+                                settings.gigachat_model, verify,
+                                transport=netbind.transport(settings.direct_interface, verify),
                                 base_url=settings.gigachat_base_url)
     if name == "openai":
         from .openai_compat import OpenAICompatProvider

@@ -24,7 +24,7 @@ from .core.assistant import GREETING_MESSAGE, HOLDING_MESSAGE
 from .core.real_flow import BusinessAssistant as Assistant
 from .core import candidates, versions
 from .core.candidate_review import NOTE_PREFIX, review_candidate
-from .core.knowledge import KnowledgeBase, format_rub
+from .core.knowledge import LEARNED_NOTES, UNSCOPED_NOTE, KnowledgeBase, format_rub, venue_tokens
 from .core.pii import mask_pd
 from .core.price_guard import unknown_amounts
 from .core.waits import wait_summary
@@ -317,7 +317,7 @@ class Services:
                                                     row["client_question"])))
 
     def approve_candidates(self, ids: list[int], question: str, answer: str, *,
-                           source_reviewed: bool = False) -> tuple[bool, str]:
+                           source_reviewed: bool = False, scope: str = "") -> tuple[bool, str]:
         """Утвердить кандидата (группу похожих) — записать в заметку черновика и опубликовать по правилам
         версий. Возвращает (утверждено ли, фраза для менеджера). Цены — только из прайса: сумму из переписки
         бот назвать всё равно не сможет."""
@@ -329,23 +329,89 @@ class Services:
             return False, "Набор кандидатов изменился: есть отсутствующие или уже рассмотренные. Обновите страницу."
         if not question or not answer:
             return False, "Нужны и вопрос, и ответ."
+        if scope == "case":
+            self.db.decide_candidates(ids, "case", question, answer)
+            return True, "Сохранено только для этой заявки."
         draft = self.draft_kb()
-        if bad := unknown_amounts(answer, draft.allowed_amounts()):
-            sums = ", ".join(format_rub(a) for a in bad)
-            return False, (f"В ответе сумма {sums}, которой нет в прайсе: бот не сможет её назвать. "
-                           "Добавьте позицию в прайс («База знаний») или уберите сумму из ответа.")
-        if conflict := candidates.price_conflict(draft, question, answer):
-            return False, (f"{conflict}. Клиентам бот называет цены только из прайса: исправьте прайс («База знаний») "
-                           "или уберите сумму из ответа.")
+        path, venue = candidates.target_note(draft, question, answer, scope)
+        title = self._fact_title(draft, venue, question)
+        if error := self._fact_price_error(draft, title, answer):
+            return False, error
         if warnings := self.candidate_warnings(rows, question, answer):
             if not source_reviewed:
                 return False, ("Нужна сверка с исходным ответом. " + " ".join(warnings) +
                                " Исправьте факт или отметьте «Сверил с исходным ответом» после проверки.")
-        path, venue = candidates.target_note(draft, question, answer)
-        candidates.add_to_note(self.settings.kb_dir / "notes" / path, venue, question, answer)
-        self.db.supersede_candidates(question)
-        self.db.decide_candidates(ids, "approved", question, answer)
-        return True, self.kb_changed(f"Утверждён факт из переписки: «{question}»")
+        if not path:
+            return False, "Укажите в «Обучении», где действует факт. Выбранная площадка должна совпадать с текстом."
+        candidates.add_to_note(self.settings.kb_dir / "notes" / path, venue, title, answer)
+        self.db.supersede_candidates(title)
+        self.db.decide_candidates(ids, "approved", title, answer)
+        return True, self.kb_changed(f"Утверждён факт из переписки: «{title}»")
+
+    @staticmethod
+    def _fact_title(draft: KnowledgeBase, venue: str, question: str) -> str:
+        if venue and not venue_tokens(venue) & draft._venues_in(question):
+            return f"{venue} — {question}"
+        return question
+
+    @staticmethod
+    def _fact_price_error(draft: KnowledgeBase, question: str, answer: str) -> str:
+        if bad := unknown_amounts(answer, draft.allowed_amounts()):
+            sums = ", ".join(format_rub(a) for a in bad)
+            return (f"В ответе сумма {sums}, которой нет в прайсе: бот не сможет её назвать. "
+                    "Добавьте позицию в прайс («База знаний») или уберите сумму из ответа.")
+        if conflict := candidates.price_conflict(draft, question, answer):
+            return (f"{conflict}. Клиентам бот называет цены только из прайса: исправьте прайс («База знаний») "
+                    "или уберите сумму из ответа.")
+        return ""
+
+    def fact_venues(self) -> list[str]:
+        return candidates.venue_names(self.draft_kb())
+
+    def unscoped_facts(self) -> list[tuple[str, str]]:
+        entries = candidates.note_entries(self.settings.kb_dir / "notes" / LEARNED_NOTES / UNSCOPED_NOTE)
+        return [(q, a) for q, a in entries if not q.startswith(candidates.CASE_PREFIX)]
+
+    def unscoped_sources(self, question: str, answer: str) -> list[tuple[str, str]]:
+        matches = self.db.conn.execute("""
+            SELECT DISTINCT client_question, manager_text FROM candidates
+            WHERE status IN ('approved', 'superseded') AND rtrim(question, ' ?')=? AND answer=?
+        """, (question.rstrip(" ?"), answer))
+        return [(row[0], row[1]) for row in matches]
+
+    def review_unscoped_fact(self, question: str, original_answer: str, scope: str, *,
+                             answer: str | None = None, source_reviewed: bool = False) -> tuple[bool, str]:
+        notes = self.settings.kb_dir / "notes"
+        old = notes / LEARNED_NOTES / UNSCOPED_NOTE
+        facts = self.unscoped_facts()
+        if [a for q, a in facts if q == question] != [original_answer]:
+            return False, "Факт изменился или уже разобран. Обновите страницу."
+        raw = old.read_text(encoding="utf-8")
+        section = rf"^## {re.escape(question)}[ \t]*\n.*?(?=^## |\Z)"
+        rest, removed = re.subn(section, lambda m: "## " + candidates.CASE_PREFIX + m[0][3:] if scope == "case" else "",
+                                raw, count=1, flags=re.MULTILINE | re.DOTALL)
+        if not removed:
+            return False, "Не удалось сопоставить раздел. Проверьте заметку в базе."
+        if scope != "case":
+            answer = original_answer if answer is None else answer.strip()
+            if not answer:
+                return False, "Нужен ответ для базы."
+            draft = self.draft_kb()
+            path, venue = candidates.target_note(draft, question, answer, scope)
+            if not scope or not path:
+                return False, "Выберите область действия факта."
+            title = self._fact_title(draft, venue, question)
+            if error := self._fact_price_error(draft, title, answer):
+                return False, error
+            if not source_reviewed:
+                for client, manager in self.unscoped_sources(question, original_answer):
+                    if warnings := review_candidate(draft, title, answer, manager, client):
+                        return False, "Нужна сверка с исходным ответом. " + " ".join(warnings)
+            if any(q.casefold() == title.casefold() and a != answer for q, a in candidates.note_entries(notes / path)):
+                return False, "Для этой области уже записан другой ответ. Сверьте его в базе."
+            candidates.add_to_note(notes / path, venue, title, answer)
+        candidates.write_note(old, rest)
+        return True, self.kb_changed(f"Проверена область действия факта: «{question}»")
 
     # --- версии базы знаний: черновик → проверка → публикация, откат ---
     def version_dir(self, version_id: int) -> Path:

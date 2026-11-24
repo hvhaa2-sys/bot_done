@@ -40,6 +40,8 @@ htmlcov/
 *.tar.gz
 *.zip
 *.pem
+# Публичный корневой сертификат Минцифры для MAX и GigaChat, не ключ (app/certs/README.md): без него образ из коммита теряет TLS
+!app/certs/russian_trusted_root_ca.pem
 *.key
 Презентация/ИИ-помощник продажника.pptx
 Презентация/ИИ-помощник продажника.pdf

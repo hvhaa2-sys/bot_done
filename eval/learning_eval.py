@@ -83,10 +83,14 @@ async def ask(services: Services, question: str, must: str) -> dict:
             "text": reply.text if reply.is_answer else "", "reason": "" if reply.is_answer else reply.reason}
 
 
-def approve(services: Services, row, answer: str) -> tuple[bool, str]:
-    ok, msg = services.approve_candidates([row["id"]], row["question"], answer)
+def approve(services: Services, row, answer: str, example: dict) -> tuple[bool, str]:
+    # Область берём из эталонного диалога, до извлечения факта моделью.
+    _, scope = C.target_note(services.kb, example["client"], example["manager"])
+    if not scope and example["id"] in {"mockup_approval", "designer", "radio_where", "music_rao", "extend_monthly"}:
+        scope = "business"
+    ok, msg = services.approve_candidates([row["id"]], row["question"], answer, scope=scope)
     if not ok and "сверка" in msg:  # менеджер сверил с исходным ответом и подтвердил
-        ok, msg = services.approve_candidates([row["id"]], row["question"], answer, source_reviewed=True)
+        ok, msg = services.approve_candidates([row["id"]], row["question"], answer, scope=scope, source_reviewed=True)
     return ok, msg
 
 
@@ -113,7 +117,7 @@ async def run(folder: Path, offline: bool, pairs: list[dict]) -> tuple[list[dict
                 todo = [(new[0], C.drop_promises(C.tidy(p["manager"])))]
             approved, fixed, blocked, unpublished = 0, 0, [], []
             for r, answer in todo:
-                ok, msg = approve(services, r, answer)
+                ok, msg = approve(services, r, answer, p)
                 approved += ok
                 fixed += ok and not good
                 if not ok:

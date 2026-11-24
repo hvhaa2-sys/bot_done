@@ -28,9 +28,10 @@ _FALLBACK = _rx(r"иначе|в противном случае|если.{0,120}
 _DEFAULT = _rx(r"\bобычно\b|\bкак правило\b|\bпо умолчанию\b")
 _CLEANUP_ACTION = _rx(r"\b(?:убрат|убир)\w*\b")
 _ONLY = _rx(r"\bтолько\b|исключительно")
+_EXCEPTION = _rx(r"\b(?:кроме|за исключением)\s+(.+)")
 _ALLOW = _rx(r"допустим|допуска|разреш|\bнужен\b|\bнужна\b")
 _FORMATS = {
-    "медиа-куб": _rx(r"медиа[ -]?куб"),
+    "медиа-куб": _rx(r"медиа[ -]?куб|\bна кубе(?=[^.!?\n]*(?:ролик|текст|гран))"),
     "атриум": _rx(r"атриум"),
     "экран": _rx(r"экран"),
     "баннер": _rx(r"баннер"),
@@ -158,6 +159,7 @@ def review_candidate(kb: KnowledgeBase, question: str, answer: str, manager_text
         if message not in warnings:
             warnings.append(message)
 
+    previous_related = False
     for statement in statements:
         text = statement.text
         anchors = _anchors(text, statement.venues)
@@ -167,6 +169,9 @@ def review_candidate(kb: KnowledgeBase, question: str, answer: str, manager_text
         # Общий «ролик» сам по себе не повод переносить правило другого объекта.
         related = bool(anchors & context_anchors) or bool(properties & target_properties) or bool(
             set(_SUBJECTS.findall(text.lower())) & set(_SUBJECTS.findall(target.lower())))
+        if previous_related and re.match(r"(?:их|его|её|ее|это)\s", text, re.I) and _ONLY.search(text):
+            related = True
+        previous_related = related and same_scope
         if not same_scope:
             shared = properties & target_properties
             if (shared and shared <= scoped_properties) or (len(overlap) >= 2 and overlap <= scoped_anchors):
@@ -176,6 +181,10 @@ def review_candidate(kb: KnowledgeBase, question: str, answer: str, manager_text
             continue
         if not related:
             continue
+        if exception := _EXCEPTION.search(text):
+            retained = _EXCEPTION.search(target)
+            if not retained or not _anchors(exception[1], named) <= _anchors(retained[1], named):
+                warn(f"Исключение: проверьте, кому или чему правило не подходит: «{text}».")
         if statement.venues and (not named or not named <= statement.venues):
             warn(f"ТЦ: потеряна или расширена область правила. В исходнике: «{text}»")
         source_kinds, target_kinds = statement.formats - _PLACES, formats - _PLACES

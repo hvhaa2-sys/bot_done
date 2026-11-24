@@ -25,7 +25,7 @@ from pathlib import Path
 
 from .assistant import search_query
 from .facts import contains, norm
-from .knowledge import KnowledgeBase, format_rub, parse_note, parse_prices, parse_stop_topics
+from .knowledge import LEARNED_NOTES, UNSCOPED_NOTE, KnowledgeBase, format_rub, parse_note, parse_prices, parse_stop_topics
 from .price_guard import extract_amounts, extract_numbers
 from .text import tokenize
 
@@ -139,7 +139,8 @@ def conflicts(kb_dir: Path, kb: KnowledgeBase) -> list[str]:
             listed = " и ".join(format_rub(p) for p in sorted(prices))
             found.append(f"В прайсе две цены на одно и то же: {fmt}, {place} {period} — {listed}".replace("  ", " "))
     allowed = kb.allowed_amounts()
-    all_sections = sections(kb_dir)
+    quarantine = str(Path(NOTES, LEARNED_NOTES, UNSCOPED_NOTE))
+    all_sections = [s for s in sections(kb_dir) if s.file != quarantine]
     for s in all_sections:
         if bad := [a for a in extract_amounts(s.answer) if a not in allowed]:
             found.append(f"«{s.title}» ({s.file}): сумма {', '.join(format_rub(a) for a in bad)}, "

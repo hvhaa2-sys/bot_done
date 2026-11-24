@@ -205,7 +205,7 @@ async def run_simulation(folder: Path, *, allow_api: bool = False, max_calls: in
                 t.casefold() in row["answer"].casefold() for t in fact["forbidden_terms"]))
             if valid:
                 collected.add(topic)
-                ok, detail = services.approve_candidates([row["id"]], row["question"], row["answer"])
+                ok, detail = services.approve_candidates([row["id"]], row["question"], row["answer"], scope="ВЕЕР Молл")
                 if ok:
                     approved.add(topic)
             else:

@@ -8,7 +8,7 @@ from dataclasses import replace
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
+from tests.admin_client import AdminClient as TestClient
 
 from app import db as D
 from app.admin import create_app
@@ -297,7 +297,7 @@ def test_max_modes_from_command_and_admin(env):
     feed(bot, message("/mode off", MANAGER, MANAGER_CHAT))
     assert services.db.get_connection(CONN).mode == D.OBSERVE and "/mode observe" in to(api, MANAGER_CHAT)[-1]["text"]
     from app.admin import create_app
-    from fastapi.testclient import TestClient
+    from tests.admin_client import AdminClient as TestClient
     client = TestClient(create_app(services))
     client.cookies.set("admin_token", services.settings.admin_token)
     page = client.get("/").text
@@ -463,10 +463,23 @@ def test_knowledge_proposals_are_decided_from_max(env):
     feed(bot, callback(f"cand:no:{drop}"))
     assert services.db.get_candidate(drop)["status"] == "rejected"
     feed(bot, callback(f"cand:ok:{keep}"))
+    assert services.db.get_candidate(keep)["status"] == "new"
+    assert "Обучении" in api.answers[-1]["notification"]
+    assert not any("макет готовит наш дизайнер" in c.text for c in services.kb.chunks)
+    row = services.db.get_candidate(keep)
+    assert services.approve_candidates([keep], row["question"], row["answer"], scope="business")[0]
     assert services.db.get_candidate(keep)["status"] == "approved"
     assert any("макет готовит наш дизайнер" in c.text for c in services.kb.chunks), "бот уже отвечает по новому факту"
     feed(bot, callback(f"cand:ok:{keep}"))
     assert api.answers[-1]["notification"] == "Уже разобрано."
+
+    with (services.settings.kb_dir / "prices.csv").open("a", encoding="utf-8") as prices:
+        prices.write("Видеоэкран,ВЕЕР Молл,1 месяц,10000,\n")
+    scoped = services.db.add_candidate(connection_id=CONN, chat_id=CLIENT_CHAT, dialog_id=None, source="card",
+                                      client_question="Есть ли звук в ВЕЕР?", manager_text="В ВЕЕР экраны без звука.",
+                                      question="Есть ли звук в ВЕЕР?", answer="В ВЕЕР экраны без звука.")
+    feed(bot, callback(f"cand:ok:{scoped}"))
+    assert services.db.get_candidate(scoped)["status"] == "approved"
 
 
 def test_edited_message_while_waiting_is_answered_as_edited(env):
@@ -682,7 +695,7 @@ def test_start_without_manager_is_told(env):
 
 
 def admin_client(services):
-    from fastapi.testclient import TestClient
+    from tests.admin_client import AdminClient as TestClient
 
     from app.admin import create_app
     return TestClient(create_app(services))
