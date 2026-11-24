@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 
 from .answer_grounding import billing_periods, check_price_periods, periods
-from .assistant import ANSWER, ESCALATE, R_NO_CONTEXT, Assistant, Reply
+from .assistant import ANSWER, ESCALATE, R_NO_CONTEXT, R_VAT_UNKNOWN, Assistant, Reply, vat_unknown
 from .conversation import (CLARIFICATIONS, Conversation, Placement, _ADDITION, _BOTH,
                            _DURATION_MODIFIER, _ITEM_NUMBER, _SEASON)
 from .knowledge import KnowledgeBase, SearchHit, canonical_query, format_rub
@@ -49,6 +49,7 @@ class _Quote:
     source: str = ""
     prompt: str = ""
     needs_manager: bool = False
+    vat_unknown: bool = False  # цена есть, но НДС в прайсе не указан: итоговую сумму подтверждает менеджер
 
 
 def _quote(kb: KnowledgeBase, item: Placement) -> _Quote:
@@ -95,7 +96,8 @@ def _quote(kb: KnowledgeBase, item: Placement) -> _Quote:
     line, wrong = check_price_periods(kb, line, [SearchHit(chunk, 0.0)], label)
     if wrong:
         return _Quote(f"{label} — срок тарифа нужно уточнить.", needs_manager=True)
-    return _Quote(line, chunk.id, needs_manager=needs_manager)
+    unknown = vat_unknown(row)
+    return _Quote(line, chunk.id, needs_manager=needs_manager or unknown, vat_unknown=unknown)
 
 
 def comparison_reply(assistant: Assistant, state: Conversation, question: str) -> Reply | None:
@@ -124,7 +126,9 @@ def comparison_reply(assistant: Assistant, state: Conversation, question: str) -
     # Отсутствующий тариф подтверждает менеджер. В карточке остаются условия
     # обеих позиций и черновик с теми ценами, для которых есть источник.
     if any(quote.needs_manager for quote in quotes):
-        return Reply(ESCALATE, "\n".join(lines) if sources else assistant.holding_message, 0.0, R_NO_CONTEXT, sources)
+        only_vat = all(q.vat_unknown or not q.needs_manager for q in quotes)
+        return Reply(ESCALATE, "\n".join(lines) if sources else assistant.holding_message, 0.0,
+                     R_VAT_UNKNOWN if only_vat else R_NO_CONTEXT, sources)
     for index, quote in enumerate(quotes):
         if not quote.prompt:
             continue

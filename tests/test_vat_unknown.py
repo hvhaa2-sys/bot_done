@@ -13,8 +13,11 @@ import pytest
 
 from app.channels.flow import REASONS
 from app.core.assistant import ANSWER, ESCALATE, R_TERMS, R_VAT_UNKNOWN, Assistant
+from app.core.conversation import Conversation
 from app.core.knowledge import KnowledgeBase, PriceRow
+from app.core.real_flow import BusinessAssistant
 from app.llm.base import LLMProvider
+from app.llm.mock import MockProvider
 
 ROOT = Path(__file__).resolve().parent.parent
 GLOBUS = "ТРЦ «Глобус», Екатеринбург (ул. Щербакова, 4)"
@@ -93,6 +96,17 @@ def test_rows_with_known_vat_are_answered_as_before():
     reply = ask([radio(KIT, 15120, "с НДС 5%; 720 выходов в месяц")], "Сколько стоит радио в КИТ?",
                 "Радио в КИТ, 2 выхода в час — 15 120 ₽ за 1 месяц.")
     assert reply.decision == ANSWER and CAVEAT not in reply.text
+
+
+def test_comparison_without_model_also_goes_to_manager():
+    # «Сравни» собирается кодом без модели — та же оговорка и тот же черновик менеджеру
+    rows = [PriceRow("Экран", "Бутово Молл, Москва", "1 месяц", 31000, "НДС в прайсе не указан"),
+            PriceRow("Экран", "ВЕЕР Молл, Екатеринбург — атриум", "1 неделя", 9000, "")]
+    bot, state = BusinessAssistant(KnowledgeBase([], rows, []), MockProvider()), Conversation()
+    asyncio.run(bot.answer("Бутово экран на месяц", conversation=state))
+    reply = asyncio.run(bot.answer("В ВЕЕРе такой же на неделю. Сколько оба?", conversation=state))
+    assert reply.decision == ESCALATE and reply.reason == R_VAT_UNKNOWN, reply.reason
+    assert "31 000" in reply.text and "9 000" in reply.text and CAVEAT in reply.text
 
 
 def test_manager_card_explains_why():
