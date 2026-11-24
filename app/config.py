@@ -63,7 +63,7 @@ class Settings:
     speech_python: str = ""
     admin_password_hash: str = ""
     admin_allowed_origins: str = ""
-    gigachat_ca_bundle: str = ""
+    gigachat_ca_bundle: str = ""  # путь к корневому CA Минцифры; пусто — проверка по GIGACHAT_VERIFY_SSL
 
     @classmethod
     def load(cls) -> "Settings":

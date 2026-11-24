@@ -22,8 +22,8 @@ from pathlib import Path, PurePosixPath
 MAX_BYTES = 512 * 1024 * 1024
 # Что нужно серверу из репозитория. Презентации и материалы показов на сервере не нужны
 BUNDLE_CODE = (".dockerignore", ".env.example", "Dockerfile", "docker-compose.yml", "setup", "Makefile", "README.md",
-               "pyproject.toml", "requirements.lock", "requirements.txt", "app", "deploy", "eval", "tools", "data/kb",
-               "docs/DOCKER.md", "docs/ПЕРЕНОС.md")
+               "pyproject.toml", "requirements.lock", "requirements.txt", "app", "app/certs/russian_trusted_root_ca.pem",
+               "deploy", "eval", "tools", "data/kb", "docs/DOCKER.md", "docs/ПЕРЕНОС.md")
 # Compose всё равно задаёт пути и порт сам. Ключ Яндекса серверу не нужен, пока модель — GigaChat
 SERVER_ENV_SKIP = {"DB_PATH", "KB_DIR", "ADMIN_HOST", "ADMIN_PORT"}
 

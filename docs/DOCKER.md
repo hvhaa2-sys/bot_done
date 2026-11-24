@@ -53,6 +53,24 @@ ASSISTANT_ENV_FILE=.env.demo docker compose --env-file .env.demo up -d --build -
 Значения DB_PATH, KB_DIR, ADMIN_PORT и ADMIN_HOST из `.env` намеренно перекрыты настройками
 Compose. Публикация порта на хосте остаётся локальной.
 
+## Сертификаты MAX и GigaChat
+
+Публичный корневой сертификат Минцифры входит в образ по пути
+`/app/app/certs/russian_trusted_root_ca.pem` (происхождение — `app/certs/README.md`).
+Клиент официального MAX API использует его автоматически. Для GigaChat проверка TLS по
+умолчанию выключена, как и раньше (`GIGACHAT_VERIFY_SSL=false`). Если включить её, встроенный
+сертификат подхватится сам: задайте `GIGACHAT_VERIFY_SSL=true`, а `GIGACHAT_CA_BUNDLE` можно
+оставить пустым. Явный `GIGACHAT_CA_BUNDLE` нужен, только если сертификат лежит по другому пути
+или их несколько:
+
+```bash
+GIGACHAT_VERIFY_SSL=true
+GIGACHAT_CA_BUNDLE=/app/app/certs/russian_trusted_root_ca.pem
+```
+
+`GIGACHAT_CA_BUNDLE` перекрывает `GIGACHAT_VERIFY_SSL`. Включение проверки обратимо: верните
+`GIGACHAT_VERIFY_SSL=false` и перезапустите контейнер.
+
 ## Обновление
 
 Замените код дистрибутива, сохранив `.env` и именованный том:
