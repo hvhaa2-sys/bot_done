@@ -11,6 +11,7 @@ from app import db as D
 from app.channels.telegram_business import build_dispatcher
 from app.config import ROOT, Settings
 from app.services import Services
+from tests.test_core import FakeLLM
 
 OWNER, CLIENT, CONN = 100, 555, "bc-test"
 NOW = int(dt.datetime.now().timestamp())
@@ -107,13 +108,43 @@ def test_send_draft_via_button(env):
     connect(dp, bot)
     feed(dp, bot, client_message("Какие требования к макету?"))
     dialog_id = services.db.recent_dialogs(1)[0]["id"]
+    button = rec.sent[-1]["reply_markup"].inline_keyboard[0][0]
+    assert button.callback_data == f"send:{dialog_id}"
     feed(dp, bot, {"callback_query": {
-        "id": "cb1", "chat_instance": "x", "data": f"send:{dialog_id}",
+        "id": "cb1", "chat_instance": "x", "data": button.callback_data,
         "from": {"id": OWNER, "is_bot": False, "first_name": "Manager"},
     }})
     msg = [m for m in rec.sent if m.get("business_connection_id")][-1]
     assert msg["chat_id"] == CLIENT and "PDF" in msg["text"]
     assert services.db.get_dialog(dialog_id)["status"] == D.DRAFT_SENT
+
+
+@pytest.mark.parametrize("mode", ["auto", "draft"])
+def test_rejected_price_draft_requires_manager_reply(env, mode):
+    services, dp, bot, rec = env
+    connect(dp, bot)
+    services.db.set_mode(mode, connection_id=CONN)
+    services.assistant.llm = FakeLLM("Лайтбокс стоит 20 000 ₽.")
+    feed(dp, bot, client_message("Сколько стоит лайтбокс у главного входа?"))
+    row = services.db.recent_dialogs(1)[0]
+    assert row["reason"].startswith("price_mismatch")
+    card = rec.sent[-1]
+    before = list(to_client(rec))
+    expected = [services.assistant.holding_message] if mode == "auto" else []
+    assert [msg["text"] for msg in before] == expected
+    feed(dp, bot, {"callback_query": {
+        "id": "old", "chat_instance": "x", "data": f"send:{row['id']}",
+        "from": {"id": OWNER, "is_bot": False, "first_name": "Manager"},
+    }})
+    assert to_client(rec) == before
+    assert services.db.get_dialog(row["id"])["status"] == row["status"]
+    assert [[b.callback_data for b in line] for line in card["reply_markup"].inline_keyboard] == [[f"skip:{row['id']}"]]
+    assert "20 000" in card["text"] and "исправ" in card["text"].lower() and "Нажмите «Отправить»" not in card["text"]
+    feed(dp, bot, manager_reply(card["text"], row["answer"]))
+    assert to_client(rec) == before
+    feed(dp, bot, manager_reply(card["text"], "Лайтбокс стоит 25 000 ₽ за месяц."))
+    assert to_client(rec)[-1]["text"] == "Лайтбокс стоит 25 000 ₽ за месяц."
+    assert services.db.get_dialog(row["id"])["status"] == D.DRAFT_EDITED
 
 
 def auto_env(env):

@@ -28,7 +28,7 @@ from aiogram.types import (BusinessConnection, BusinessMessagesDeleted, Callback
                            InlineKeyboardMarkup, Message)
 
 from .. import db as D
-from ..services import Services
+from ..services import EDIT_REQUIRED_MESSAGE, Services, can_send_draft, copies_rejected_draft
 from .flow import HOLDING_NOT_SENT, HOLDING_SENT, process_client_message
 from .observation import observe
 from . import voice
@@ -53,11 +53,11 @@ class MessageBuffer:
         return "\n".join(text for _, text in self.parts.pop(key, []))
 
 
-def draft_keyboard(dialog_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Отправить", callback_data=f"send:{dialog_id}"),
-        InlineKeyboardButton(text="Пропустить", callback_data=f"skip:{dialog_id}"),
-    ]])
+def draft_keyboard(dialog_id: int, *, allow_send: bool = True) -> InlineKeyboardMarkup:
+    buttons = [InlineKeyboardButton(text="Пропустить", callback_data=f"skip:{dialog_id}")]
+    if allow_send:
+        buttons.insert(0, InlineKeyboardButton(text="Отправить", callback_data=f"send:{dialog_id}"))
+    return InlineKeyboardMarkup(inline_keyboard=[buttons])
 
 
 # --- подключение бота к аккаунту менеджера ---
@@ -354,7 +354,7 @@ async def _answer_client(bot: Bot, services: Services, connection_id: str, chat_
         await safe_send(bot, conn.owner_chat_id, out.notice, services=services, connection_id=conn.id)
     if out.to_manager:
         card = out.to_manager if sent or not out.to_client else out.to_manager.replace(HOLDING_SENT, HOLDING_NOT_SENT)
-        markup = draft_keyboard(out.dialog_id) if out.with_buttons else None
+        markup = draft_keyboard(out.dialog_id, allow_send=out.allow_send) if out.with_buttons else None
         await safe_send(bot, conn.owner_chat_id, card, reply_markup=markup, services=services, connection_id=conn.id)
 
 
@@ -381,6 +381,9 @@ async def on_draft_decision(cb: CallbackQuery, bot: Bot, services: Services) -> 
     elif not conn.can_reply:
         claimed, ok, note = True, False, send_failure(conn)
     else:
+        if not can_send_draft(dialog["status"], dialog["decision"], dialog["answer"]):
+            await cb.answer(EDIT_REQUIRED_MESSAGE, show_alert=True)
+            return
         # Сначала закрываем черновик, потом шлём: второе нажатие, пока идёт отправка, ничего не сделает
         claimed = services.db.claim_dialog(dialog["id"], D.DRAFT_SENT)
         if claimed:
@@ -418,6 +421,9 @@ async def on_manager_edit(message: Message, bot: Bot, services: Services) -> Non
         return
     if not conn.can_reply:
         await message.answer(send_failure(conn))
+        return
+    if copies_rejected_draft(dialog, message.text):
+        await message.answer(EDIT_REQUIRED_MESSAGE)
         return
     if not services.db.claim_dialog(dialog["id"], D.DRAFT_EDITED, answer=message.text):
         await message.answer("Этот черновик уже обработан.")

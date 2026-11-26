@@ -41,7 +41,7 @@ from .core.learning import faq_entry, group_questions
 from .core.price_guard import unknown_amounts
 from .core.versions import SHOWN as SHOWN_CHANGES, Report
 from .password import verify_password
-from .services import DAY_NAMES, MODELS, Services, model_key, model_title, validate
+from .services import DAY_NAMES, EDIT_REQUIRED_MESSAGE, MODELS, Services, can_send_draft, model_key, model_title, validate
 
 STATUS_NAMES = {
     D.SENT_AUTO: "Бот ответил сам",
@@ -102,6 +102,7 @@ SEARCH_PLACES = [
 ]
 # Итог ответа клиенту с сайта (коды — Services.decide_draft): показываем над перепиской
 DRAFT_RESULTS = {
+    "edit_required": EDIT_REQUIRED_MESSAGE,
     "sent": "Отправлено клиенту.",
     "skipped": "Черновик пропущен: клиенту ничего не ушло.",
     "handled": "Этот вопрос уже обработан — возможно, вы ответили в Telegram.",
@@ -2539,7 +2540,7 @@ def composer_html(turns: list, back: str, channel: str) -> str:
             f"<button>Отправить</button></div></form>")
 
 
-def turn_html(r, back: str, titles: dict[str, str], repeats: int = 1) -> str:
+def turn_html(r, back: str, titles: dict[str, str], holding_message: str, repeats: int = 1) -> str:
     """Вопрос клиента и что с ним сделал бот: ответ или черновик, на что опирался или почему передал, кнопка «Ошибка»."""
     flagged, status = bool(r["flagged"]), r["status"]
     when = dt.datetime.fromtimestamp(r["created_at"]).strftime("%d.%m %H:%M")
@@ -2569,26 +2570,28 @@ def turn_html(r, back: str, titles: dict[str, str], repeats: int = 1) -> str:
             f"<div class='msg'><div class='muted'>Клиент · {when}{times}</div>"
             f"<div class='bubble{action}'>{escape(said)}</div></div>"
             f"<div class='msg me'><div class='muted'>Бот · {status_pill(status)}</div>{text}</div>"
-            f"<div class='why'>{f'<span>{why}</span>' if why else ''}{flag_form}</div>{draft_form_html(r, back)}{review}</div>")
+            f"<div class='why'>{f'<span>{why}</span>' if why else ''}{flag_form}</div>"
+            f"{draft_form_html(r, back, holding_message)}{review}</div>")
 
 
-def draft_form_html(r, back: str) -> str:
+def draft_form_html(r, back: str, holding_message: str) -> str:
     """Вопрос ждёт менеджера — ответить можно прямо здесь: отправить черновик, свой вариант или пропустить.
     В тестовом чате отвечать некому."""
-    has_draft = r["status"] == D.DRAFT_PENDING and r["answer"]
-    if not has_draft or (r["connection_id"] or "").startswith("sandbox:"):
+    if r["status"] not in WAITING or not r["answer"] or (r["connection_id"] or "").startswith("sandbox:"):
+        return ""
+    if r["status"] == D.ESCALATED and r["answer"] == holding_message:
         return ""  # передачу без черновика закрывает поле ответа внизу переписки
-    send = "<button name='action' value='send'>Отправить клиенту</button>" if has_draft else ""
-    skip = "<button class='light' name='action' value='skip'>Пропустить</button>" if has_draft else ""
+    allowed = can_send_draft(r["status"], r["decision"], r["answer"])
+    send = "<button name='action' value='send'>Отправить клиенту</button>" if allowed else ""
     return (f"<form class='reply' method='post' action='/dialogs/{r['id']}/draft' data-reply>"
             f"<input type='hidden' name='back' value='{escape(back)}'>{send}"
-            f"<details{'' if has_draft else ' open'}><summary class='btn light'>"
-            f"<span class='closed'>{'Исправить' if has_draft else 'Ответить клиенту'}</span>"
-            f"<span class='opened'>{'Отменить правку' if has_draft else 'Свернуть'}</span></summary>"
+            f"<details><summary class='btn light'>"
+            f"<span class='closed'>{'Исправить' if allowed else 'Написать свой ответ'}</span>"
+            f"<span class='opened'>Отменить правку</span></summary>"
             f"<textarea name='text' rows='3' maxlength='4096' aria-label='Ваш ответ клиенту' "
-            f"placeholder='Ответ уйдёт клиенту от вашего имени'>{escape(r['answer']) if has_draft else ''}</textarea>"
-            f"<button name='action' value='edit'>Отправить {'свой вариант' if has_draft else 'ответ'}</button></details>"
-            f"{skip}</form>")
+            f"placeholder='Ответ уйдёт клиенту от вашего имени'>{escape(r['answer']) if allowed else ''}</textarea>"
+            f"<button name='action' value='edit'>Отправить свой вариант</button></details>"
+            f"<button class='light' name='action' value='skip'>Пропустить</button></form>")
 
 
 def dialogs_html(services: Services, f: str, q: str, conn: str = "", chat: str = "", msg: str = "",
@@ -2648,7 +2651,7 @@ data-chat="{escape(f"{picked[0]}|{picked[1]}")}">
 <div class="thread"><div class="thread-head"><a class="back" href="{escape(to_list)}">← Все разговоры</a>
 <h2>{channel_tag(picked[0])}{escape(chat_title(services, *picked))}</h2>
 <span class="muted">{channel} · {plural(len(turns), "вопрос", "вопроса", "вопросов")}</span>{pause_html(services, picked, back)}</div>
-<div class="thread-body"><div class="chat">{"".join(turn_html(r, back, titles, n) for r, n in collapse_repeats(turns))}</div></div>
+<div class="thread-body"><div class="chat">{"".join(turn_html(r, back, titles, services.assistant.holding_message, n) for r, n in collapse_repeats(turns))}</div></div>
 {composer_html(turns, back, kind)}
 <div class="thread-foot">Разобранные ошибки попадают в экзамен.
 <span class="keys">↑ и ↓ — соседний разговор, / — поиск</span></div>

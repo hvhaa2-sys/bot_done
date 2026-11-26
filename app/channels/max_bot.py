@@ -37,7 +37,7 @@ from ..core.assistant import R_CATALOG
 from ..core.real_flow import business_operation, mixed_request_hint, named_thanks, radio_change_request
 from ..core.conversation import Conversation
 from ..core.pii import find_phone
-from ..services import Services
+from ..services import EDIT_REQUIRED_MESSAGE, Services, can_send_draft, copies_rejected_draft
 from .flow import HOLDING_SENT, cut, process_client_message
 from .observation import collect_observed
 from .max_api import REQUEST_CONTACT, Buttons, MaxApi, MaxError
@@ -115,8 +115,11 @@ def text_parts(text: str, limit: int = 3999) -> list[str]:
     return [*parts, text]
 
 
-def draft_buttons(dialog_id: int) -> Buttons:
-    return [[("Отправить", f"send:{dialog_id}"), ("Пропустить", f"skip:{dialog_id}")]]
+def draft_buttons(dialog_id: int, *, allow_send: bool = True) -> Buttons:
+    buttons = [("Пропустить", f"skip:{dialog_id}")]
+    if allow_send:
+        buttons.insert(0, ("Отправить", f"send:{dialog_id}"))
+    return [buttons]
 
 
 def active_connection(services: Services) -> D.Connection | None:
@@ -543,7 +546,7 @@ class MaxBot:
         if out.to_manager:
             card = out.to_manager if sent or not out.to_client else out.to_manager.replace(HOLDING_SENT, HOLDING_NOT_SENT)
             await self.send_card(conn.owner_chat_id, _CARD_ID_RE.sub("", for_max(card)).replace(cut(text), text), out.dialog_id,
-                                 draft_buttons(out.dialog_id) if out.with_buttons else None)
+                                 draft_buttons(out.dialog_id, allow_send=out.allow_send) if out.with_buttons else None)
 
     def take_waiting(self, chat_id: int) -> str:
         kind, since = self.waiting.pop(chat_id, ("", 0.0))
@@ -864,6 +867,9 @@ class MaxBot:
         dialog = services.db.get_dialog(dialog["id"])
         if not dialog:
             return
+        if text and copies_rejected_draft(dialog, text):
+            await self.send(chat_id, EDIT_REQUIRED_MESSAGE)
+            return
         services.sending_dialogs.add(dialog["id"])
         try:
             sent = await self.send(dialog["chat_id"], text, files=files)
@@ -956,6 +962,9 @@ class MaxBot:
         if action == "skip":
             claimed, note = services.db.claim_dialog(dialog["id"], D.DRAFT_REJECTED), "Пропущено."
         else:
+            if not can_send_draft(dialog["status"], dialog["decision"], dialog["answer"]):
+                await self.answer(callback_id, EDIT_REQUIRED_MESSAGE)
+                return
             # Сначала закрываем черновик, потом шлём: второе нажатие, пока идёт отправка, ничего не сделает
             claimed = services.db.claim_dialog(dialog["id"], D.DRAFT_SENT)
             note = ""

@@ -345,12 +345,28 @@ def test_duration_after_place_word_does_not_invent_a_position_number(kb):
     "Свободен ли экран в атриуме ВЕЕР на ноябрь?",
     "Экран в ВЕЕР занят?", "Есть свободные места в ВЕЕР?",
     "Какие свободные даты у экрана ВЕЕР?", "Занятость экрана в ВЕЕР на декабрь",
+    "Свободен ДП-Ф2 с 9 по 15 декабря?", "Свободен ДП-Ф2 на 9 декабря?",
+    "Свободен ДП-Ф2 с 09.12.2026 до 15.12.2026?",
+    "Свободен ДП-Ф2 на неделю с 9 декабря?", "Свободен ДП-Ф2 с 9 декабря — 15 декабря?",
 ])
 def test_availability_goes_to_manager_even_if_model_could_reply_with_price(kb, question):
     llm = FakeLLM()
     reply = answer(Assistant(kb, llm), Conversation(), question)
     assert reply.decision == ESCALATE and reply.reason == "stop_topic:занятость"
     assert llm.calls == []
+
+
+@pytest.mark.parametrize(("period", "reason"), [
+    ("по 15 декабря", "missing_period_start"), ("до 15.12.2026", "missing_period_start"),
+    ("с 9 декабря", "missing_period_end"), ("от 09.12.2026", "missing_period_end"),
+    ("с 9 декабря и дадите скидку", "stop_topic:скидк"),
+])
+def test_availability_with_one_period_boundary(kb, period, reason):
+    llm = FakeLLM()
+    assistant = Assistant(kb, llm)
+    reply = answer(assistant, Conversation(), f"Свободен ли ДП-Ф2 {period}?")
+    assert (reply.decision, reply.reason, reply.text) == (ESCALATE, reason, assistant.holding_message)
+    assert not llm.calls
 
 
 def test_free_shop_windows_are_a_format_not_availability(kb):
