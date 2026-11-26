@@ -1,5 +1,0 @@
--r requirements.txt
--r requirements-tools.txt
-ruff
-pytest-cov
-pip-audit

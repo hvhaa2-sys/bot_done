@@ -43,6 +43,6 @@ BM25, эмбеддинги GigaChat и RRF сравниваются на оди�
 
 ## Опорные исходники
 
-- `../Опорная_сборка_2026-10-22/eval/retrieval_eval.py`
-- `../Опорная_сборка_2026-10-22/eval/retrieval_qrels.csv`
-- `../Опорная_сборка_2026-10-22/docs/RETRIEVAL.md`
+- `5a73765:eval/retrieval_eval.py`
+- `5a73765:eval/retrieval_qrels.csv`
+- `5a73765:docs/RETRIEVAL.md`

@@ -5,16 +5,27 @@ import argparse
 import asyncio
 from contextlib import closing
 from dataclasses import replace
+import io
 import json
 import os
 from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+import tarfile
 import tempfile
 
 HERE = Path(__file__).resolve().parent
-SNAPSHOT = HERE / "Опорная_сборка_2026-10-22"
+# Все пять репетиций используют тот же набор файлов, что и в октябре.
+_demo_dir = tempfile.TemporaryDirectory(prefix="sales-demo-october-")
+SNAPSHOT = Path(_demo_dir.name)
+tree = "5a7376505d6589fca058d549c7ffe97466908ed2:Итерации/Опорная_сборка_2026-10-22"
+try:
+    archive = subprocess.check_output(["git", "archive", "--format=tar", tree], cwd=HERE.parent)
+except subprocess.CalledProcessError as error:
+    raise SystemExit("Для репетиции нужна локальная история Git с коммитом 5a73765 (22.10.2026).") from error
+with tarfile.open(fileobj=io.BytesIO(archive)) as source:
+    source.extractall(SNAPSHOT, filter="data")
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(SNAPSHOT))
 

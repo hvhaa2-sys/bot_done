@@ -43,7 +43,7 @@
 
 ## Опорные исходники
 
-- `../Опорная_сборка_2026-10-22/app/core/versions.py`
-- `../Опорная_сборка_2026-10-22/app/services.py`
-- `../Опорная_сборка_2026-10-22/tests/test_versions.py`
-- `../Опорная_сборка_2026-10-22/tools/demo_cold_start.py`
+- `5a73765:app/core/versions.py`
+- `5a73765:app/services.py`
+- `5a73765:tests/test_versions.py`
+- `5a73765:tools/demo_cold_start.py`

@@ -44,6 +44,6 @@
 
 ## Опорные исходники
 
-- `../Опорная_сборка_2026-10-22/app/core/assistant.py`
-- `../Опорная_сборка_2026-10-22/app/core/knowledge.py`
-- `../Опорная_сборка_2026-10-22/app/core/price_guard.py`
+- `5a73765:app/core/assistant.py`
+- `5a73765:app/core/knowledge.py`
+- `5a73765:app/core/price_guard.py`

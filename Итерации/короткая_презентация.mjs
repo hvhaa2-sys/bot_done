@@ -38,7 +38,7 @@ t.cells.block({row:0,column:0,rowCount:5,columnCount:1}).assign({textStyle:{font
 t.borders.assign({fill:PAPER,width:1,style:'solid'});
 for(let i=0;i<5;i++)t.rows[i].height=66;
 text(s,'06',1160,663,60,30,18,GRAY);
-s.speakerNotes.text='Роли предлагаются для согласования, не подтверждают личное авторство уже готовых модулей. Каждый участник показывает конкретный материал, который подготовил или независимо проверил. Распределение задач и результатов к пяти встречам: Итерации/КОМАНДА.md.';
+s.speakerNotes.text='Роли предлагаются для согласования, не подтверждают личное авторство уже готовых модулей. Каждый участник показывает конкретный материал, который подготовил или независимо проверил. Распределение задач и результатов к пяти встречам сохранено в Git (96ce8e0:Итерации/КОМАНДА.md).';
 for(let i=0;i<6;i++){
   const image=await p.export({slide:p.slides.items[i],format:'png',scale:1});
   await fs.writeFile(path.join(build,`slide-${i+1}.png`),new Uint8Array(await image.arrayBuffer()));

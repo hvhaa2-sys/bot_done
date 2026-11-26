@@ -1,14 +1,11 @@
-"""Собрать материалы контрольных встреч и опорную сборку без ключей и рабочих переписок."""
+"""Собрать материалы пяти контрольных встреч по опорной версии от 22 октября."""
 from __future__ import annotations
 
-import hashlib
-import json
 from pathlib import Path
 import shutil
 
 HERE = Path(__file__).resolve().parent
 PROJECT = HERE.parent
-SNAPSHOT = HERE / "Опорная_сборка_2026-10-22"
 STAGES = [
     ("01_23-24_октября_Основа", "23 или 24 октября", "Работающий помощник на готовой базе", "У1 и У3",
      "Ответ по прайсу с указанием площадки и безопасная передача вопроса менеджеру.",
@@ -100,40 +97,7 @@ STAGES = [
 ]
 
 
-def fingerprint(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def freeze():
-    if SNAPSHOT.exists():
-        raise SystemExit("Опорная сборка уже существует. Не перезаписываю её: выберите новую дату/версию.")
-    sources = []
-    for folder in ("app", "tools", "eval", "deploy"):
-        sources.extend((PROJECT / folder).rglob("*.py"))
-    sources.extend((PROJECT / "eval").glob("questions*.csv"))
-    sources.extend((PROJECT / "data/kb").rglob("*.md"))
-    sources.extend((PROJECT / "data/kb").glob("*.csv"))
-    sources.extend((PROJECT / "data/kb").glob("*.txt"))
-    for filename in ("requirements.lock", "requirements.txt", "requirements-dev.lock", "requirements-dev.txt",
-                     "Dockerfile", "docker-compose.yml", ".dockerignore", "setup", "eval/retrieval_qrels.csv",
-                     "deploy/container/smoke.sh", "docs/DOCKER.md", "docs/RETRIEVAL.md"):
-        sources.append(PROJECT / filename)
-    sources = sorted(set(p for p in sources if p.is_file()))
-    hashes = {str(p.relative_to(PROJECT)): fingerprint(p) for p in sources}
-    for src in sources:
-        dst = SNAPSHOT / src.relative_to(PROJECT)
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
-    if any(fingerprint(PROJECT / name) != sha or fingerprint(SNAPSHOT / name) != sha for name, sha in hashes.items()):
-        raise SystemExit("Исходники изменились при копировании, сборка требует повторной подготовки.")
-    (SNAPSHOT / "СБОРКА.json").write_text(json.dumps({"date": "2026-10-22", "kind": "current-source-snapshot",
-        "notice": "Одна текущая сборка для пяти демонстрационных сценариев, не история разработки.",
-        "sha256": hashes}, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"Опорная сборка: {len(sources)} файлов, без .env, рабочих SQLite и истории чатов")
-
-
 def main():
-    freeze()
     for index, (name, date, title, owners, goal, demo, acceptance, tasks, state, refs) in enumerate(STAGES, 1):
         folder = HERE / name
         folder.mkdir(exist_ok=False)
@@ -146,7 +110,7 @@ def main():
                    "\n\n## Репетиция\n\n```bash\n./показ\n```\n\nБез сети и затрат API. "
                    "Это проверка сценария на учебных данных; она не доказывает качество чат-модели. "
                    "Лог последней репетиции хранится в `Материалы/Репетиция.txt`.\n\n"
-                   "## Опорные исходники\n\n" + "\n".join(f"- `../Опорная_сборка_2026-10-22/{v}`" for v in refs) + "\n")
+                   "## Опорные исходники\n\n" + "\n".join(f"- `5a73765:{v}`" for v in refs) + "\n")
         (folder / "README.md").write_text(content, encoding="utf-8")
         launcher = folder / "показ"
         launcher.write_text('#!/usr/bin/env bash\nset -euo pipefail\n'
