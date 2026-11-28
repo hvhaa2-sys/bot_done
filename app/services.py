@@ -20,7 +20,7 @@ from .consent import Consents
 from .privacy import ChatPrivacy
 from .speech import SpeechRecognizer
 from .config import ROOT, Settings
-from .core.assistant import GREETING_MESSAGE, HOLDING_MESSAGE
+from .core.assistant import ANSWER, GREETING_MESSAGE, HOLDING_MESSAGE
 from .core.real_flow import BusinessAssistant as Assistant
 from .core import candidates, versions
 from .core.candidate_review import NOTE_PREFIX, review_candidate
@@ -41,6 +41,18 @@ MODELS = {
     "mock": "Заглушка — без нейросети, для проверки",
 }
 MODEL_NAMES = {"GigaChat": "GigaChat Lite", "GigaChat-Pro": "GigaChat Pro", "GigaChat-Max": "GigaChat Max"}
+
+EDIT_REQUIRED_MESSAGE = "Черновик требует исправления. Напишите свой ответ."
+
+
+def can_send_draft(status: str, decision: str, answer: str) -> bool:
+    return status == D.DRAFT_PENDING and decision == ANSWER and bool(answer.strip())
+
+
+def copies_rejected_draft(dialog, text: str) -> bool:
+    # В MAX на карточку отвечают несколько раз. После правки в answer уже хранится текст менеджера.
+    return (dialog["decision"] != ANSWER and dialog["status"] != D.DRAFT_EDITED
+            and text.split() == dialog["answer"].split())
 
 
 @dataclass(frozen=True)
@@ -216,7 +228,7 @@ class Services:
         """Решение по вопросу из админки — как кнопки и ответ на карточку в мессенджере. send — отправить черновик,
         edit — отправить свой текст (из него, как из ответа на карточку, собираются кандидаты в базу), skip — пропустить.
         Возвращает код итога для админки: sent, skipped, handled, no_conn, off, observe, empty, no_channel,
-        cant_reply, failed."""
+        cant_reply, edit_required, failed."""
         dialog = self.db.get_dialog(dialog_id)
         if not dialog or dialog["status"] not in (D.DRAFT_PENDING, D.ESCALATED):
             return "handled"
@@ -228,7 +240,11 @@ class Services:
         # В MAX наблюдение не тихое: бот и так пересылает ответы менеджера клиентам
         if conn.mode in D.SILENT_MODES and not conn.id.startswith("max:"):
             return "off" if conn.mode == "off" else "observe"
-        draft = action == "send" and dialog["status"] == D.DRAFT_PENDING
+        draft = action == "send"
+        if draft and not can_send_draft(dialog["status"], dialog["decision"], dialog["answer"]):
+            return "edit_required"
+        if action == "edit" and text.strip() and copies_rejected_draft(dialog, text):
+            return "edit_required"
         text = self.sign(dialog["answer"]) if draft else text.strip() if action == "edit" else ""
         if not text:
             return "empty"

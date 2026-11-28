@@ -18,6 +18,7 @@ from app.channels.max_bot import (AFTER_ANSWER, ASK_CONTACT, BUDGET_ASK, CLIENT_
                                   NOT_DELIVERED, OBSERVE_MENU, REVOKED_DONE, MaxBot, handle_queue, run_max, run_webhook)
 from app.config import ROOT, Settings
 from app.services import Services
+from tests.test_core import FakeLLM
 
 BOT, MANAGER, MANAGER_CHAT, CLIENT, CLIENT_CHAT = 1, 100, 1000, 555, 5550
 CONN = f"{CONN_PREFIX}{MANAGER}"
@@ -170,6 +171,32 @@ def test_failed_send_keeps_draft_and_buttons(env):
     api.fail = True
     feed(bot, callback(f"send:{dialog_id}", "карточка"))
     assert services.db.get_dialog(dialog_id)["status"] == D.DRAFT_PENDING, "можно нажать ещё раз"
+
+
+@pytest.mark.parametrize("mode", ["auto", "draft"])
+def test_rejected_price_draft_requires_manager_reply(env, mode):
+    services, bot, api = env
+    connect(bot)
+    services.db.set_mode(mode, connection_id=CONN)
+    services.assistant.llm = FakeLLM("Лайтбокс стоит 20 000 ₽.")
+    feed(bot, message("Сколько стоит лайтбокс у главного входа?"))
+    row = services.db.recent_dialogs(1)[0]
+    assert row["reason"].startswith("price_mismatch")
+    card = to(api, MANAGER_CHAT)[-1]
+    before = list(to(api, CLIENT_CHAT))
+    expected = [services.assistant.holding_message] if mode == "auto" else []
+    assert [msg["text"] for msg in before] == expected
+    feed(bot, callback(f"send:{row['id']}", card["text"]))
+    assert to(api, CLIENT_CHAT) == before
+    assert services.db.get_dialog(row["id"])["status"] == row["status"]
+    assert card["buttons"] == [[("Пропустить", f"skip:{row['id']}")]]
+    assert "20 000" in card["text"] and "исправ" in card["text"].lower() and "Нажмите «Отправить»" not in card["text"]
+    assert "исправ" in api.answers[-1]["notification"].lower()
+    feed(bot, reply_to(card["text"], row["answer"]))
+    assert to(api, CLIENT_CHAT) == before
+    feed(bot, reply_to(card["text"], "Лайтбокс стоит 25 000 ₽ за месяц."))
+    assert to(api, CLIENT_CHAT)[-1]["text"] == "Лайтбокс стоит 25 000 ₽ за месяц."
+    assert services.db.get_dialog(row["id"])["status"] == D.DRAFT_EDITED
 
 
 def test_skip_button_and_stranger_button(env):

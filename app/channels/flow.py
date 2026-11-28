@@ -13,7 +13,7 @@ from ..core.client_intent import is_ready_to_buy
 from ..core.conversation import Conversation
 from ..core.text import is_short_reaction
 from ..db import Connection
-from ..services import Services
+from ..services import Services, can_send_draft
 
 REASONS = {
     "stop_topic": "тема для менеджера",
@@ -25,6 +25,8 @@ REASONS = {
     "terms_mismatch": "бот написал, что печать или монтаж входят в цену, а в прайсе этого нет",
     "vat_unknown": "в прайсе не указан НДС — итоговую сумму подтверждает менеджер",
     "venue_mismatch": "бот назвал цену другого ТЦ",
+    "missing_period_start": "для проверки занятости уточните у клиента дату начала",
+    "missing_period_end": "для проверки занятости уточните у клиента дату окончания",
     "period_mismatch": "бот назвал цену для другого срока или других дней размещения (будни/выходные)",
     "format_mismatch": "бот назвал цену другого формата",
     "order_talk": "бот начал подводить итог или оформлять заказ: это решает менеджер",
@@ -55,6 +57,7 @@ class Outgoing:
     with_buttons: bool = False       # кнопки «Отправить / Пропустить»
     notice: str | None = None        # «клиент готов к заказу» — бот ответил сам, но менеджеру стоит подключиться
     greeting: str | None = None      # приветствие в черновиках: Telegram молчит (менеджер видит чат), MAX здоровается
+    allow_send: bool = False         # иначе на карточку можно ответить своим текстом или пропустить
 
 
 async def process_client_message(services: Services, conn: Connection, chat_id: int, text: str,
@@ -122,7 +125,8 @@ async def process_client_message(services: Services, conn: Connection, chat_id: 
     card = manager_card(dialog_id, text, reply, holding_sent=bool(to_client), has_draft=has_draft, client=client,
                         summary=summary)
     return Outgoing(dialog_id, to_client=to_client, to_manager=card,
-                    with_buttons=has_draft or mode == "draft")
+                    with_buttons=has_draft or mode == "draft",
+                    allow_send=can_send_draft(status, reply.decision, reply.text))
 
 
 def human_reason(reason: str) -> str:
@@ -141,7 +145,10 @@ def manager_card(dialog_id: int, question: str, reply: Reply, *, holding_sent: b
         lines.append(HOLDING_SENT)
     if not reply.is_answer:
         lines.append(f"Почему бот не ответил: {human_reason(reply.reason)}.")
-    if has_draft:
+    if has_draft and not reply.is_answer:
+        lines += ["", "Черновик требует исправления:", cut(reply.text), "",
+                  f"Вопрос #{dialog_id}. Ответьте на это сообщение исправленным текстом."]
+    elif has_draft:
         lines += ["", "Черновик ответа:", cut(reply.text), "",
                   f"Черновик #{dialog_id}. Нажмите «Отправить» или ответьте на это сообщение своим текстом."]
     else:

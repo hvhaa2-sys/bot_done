@@ -1,6 +1,8 @@
 """Админка как рабочее место: ответ клиенту с сайта, разбор ошибки в переписке, уведомления и поиск ⌘K."""
 import asyncio
 
+import pytest
+
 from app import db as D
 from tests.test_admin import make_client
 from tests.test_admin_layout import log
@@ -31,7 +33,7 @@ def test_draft_is_sent_edited_or_skipped_from_admin_once(tmp_path):
     assert asyncio.run(services.decide_draft(draft, "send")) == "handled" and len(sent) == 1, "второе нажатие не шлёт"
 
     escalated = log(services, 6, "Можно скидку?", D.ESCALATED, "escalate", answer="Уточню и вернусь.")
-    assert asyncio.run(services.decide_draft(escalated, "send")) == "empty", "у передачи нет черновика — нужен свой текст"
+    assert asyncio.run(services.decide_draft(escalated, "send")) == "edit_required", "у передачи нужен свой текст"
     assert asyncio.run(services.decide_draft(escalated, "edit", "  Скидка от 3 месяцев — 10%.  ")) == "sent"
     row = services.db.get_dialog(escalated)
     assert row["status"] == D.DRAFT_EDITED and row["answer"] == "Скидка от 3 месяцев — 10%." == sent[-1][2]
@@ -56,6 +58,48 @@ def test_draft_from_admin_respects_mode_channel_and_failures(tmp_path):
     assert asyncio.run(services.decide_draft(draft, "send")) == "failed"
     row = services.db.get_dialog(draft)
     assert row["status"] == D.DRAFT_PENDING and row["answer"] == "30 000 ₽ в месяц.", "черновик вернулся, можно ещё раз"
+
+
+@pytest.mark.parametrize("reason", ["price_mismatch:20000", "period_mismatch:сутки", "terms_mismatch:монтаж",
+                                    "venue_mismatch:ДЕПО", "format_mismatch:экран", "vat_unknown"])
+def test_old_rejected_draft_cannot_be_sent_directly(tmp_path, reason):
+    _, services, sent = setup(tmp_path)
+    draft = log(services, 5, "Какие условия?", D.DRAFT_PENDING, "escalate", reason=reason, answer="Ошибочный ответ")
+    assert asyncio.run(services.decide_draft(draft, "send", "подмена")) == "edit_required"
+    assert not sent and services.db.get_dialog(draft)["status"] == D.DRAFT_PENDING
+
+
+@pytest.mark.parametrize("status", [D.DRAFT_PENDING, D.ESCALATED])
+def test_old_rejected_draft_in_web_requires_written_reply(tmp_path, status):
+    client, services, sent = setup(tmp_path)
+    answer = "Лайтбокс стоит 20 000 ₽."
+    draft = log(services, 5, "Сколько стоит лайтбокс?", status, "escalate",
+                reason="price_mismatch:20000", answer=answer)
+    back = f"/dialogs?conn={CONN}&chat=5"
+    url = f"/dialogs/{draft}/draft"
+    page = client.post(url, data={"action": "send", "back": back}).text
+    assert not sent and services.db.get_dialog(draft)["status"] == status
+    thread = page.split('class="thread"')[1]
+    assert "value='send'" not in thread and f">{answer}</textarea>" not in thread
+    assert "Написать свой ответ" in thread and "value='skip'" in thread
+    unchanged = client.post(url, data={"action": "edit", "text": answer.replace("стоит ", "стоит\r\n")},
+                            follow_redirects=False)
+    assert "done=edit_required" in unchanged.headers["location"] and not sent
+    client.post(url, data={"action": "edit", "text": "Лайтбокс стоит 25 000 ₽ за месяц."})
+    assert sent == [(CONN, 5, "Лайтбокс стоит 25 000 ₽ за месяц.")]
+    assert services.db.get_dialog(draft)["status"] == D.DRAFT_EDITED
+
+
+@pytest.mark.parametrize(("question", "missing"), [
+    ("С 9 декабря свободен ДП-Ф2?", "дату окончания"), ("Добрый день, свободен ДП-Ф2 по 15 декабря?", "дату начала"),
+])
+def test_sandbox_hands_incomplete_period_to_manager(tmp_path, question, missing):
+    client, services, sent = setup(tmp_path)
+    page = client.post("/sandbox", data={"question": question})
+    row = services.db.recent_dialogs(1)[0]
+    assert page.status_code == 200 and f"уточните у клиента {missing}" in page.text
+    assert (row["decision"], row["answer"]) == ("escalate", services.assistant.holding_message)
+    assert not sent
 
 
 def test_thread_offers_reply_and_reports_result(tmp_path):

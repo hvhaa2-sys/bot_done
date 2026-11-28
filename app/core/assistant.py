@@ -57,6 +57,15 @@ _AVAILABILITY_RE = re.compile(r"\bсвобод(?:ен|на|но|ны)\b|\bзан
                               r"|\b(?:есть|какие|остал\w*|нужны)\b[^.!?]{0,35}\bсвободн\w*\s+"
                               r"(?:мест|экран|дат|период|витрин)", re.I)
 
+# Явная граница периода в вопросе о занятости. Ничего не вычисляем из одной даты.
+_MONTH_NAME = r"(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)"
+_OPEN_DATE = re.compile(rf"\b(с|со|от|по|до)\s+\d{{1,2}}(?:\s+{_MONTH_NAME}(?:\s+\d{{4}})?|"
+                        r"\.\d{1,2}(?:\.\d{4})?)\b(?!\.\d)", re.I)
+_OTHER_DATE = re.compile(rf"\b(?:с|со|от|по|до|между|завтра|сегодня|вчера)\b|"
+                         rf"\d{{1,2}}(?:\s+{_MONTH_NAME}\b|\.\d{{1,2}}\b)|(?<!\w)[–—-]\s*\d|\d\s*[–—-]|"
+                         r"\b(?:на|через|\d+)\s+(?:\d+\s+)?(?:день|дня|дней|недел\w*|месяц\w*|сутк\w*)\b|"
+                         r"\b(?:или|и)\s+\d", re.I)
+
 # Длиннее в модель не отправляем: простыня текста — это лишние токены, а не лучший ответ
 MAX_QUESTION_CHARS = 1500
 MAX_HISTORY_CHARS = 600
@@ -205,7 +214,12 @@ class Assistant:
 
         topic = topic or self.kb.matched_stop_topic(question)
         if topic:
-            return Reply(ESCALATE, self.holding_message, 0.0, f"{R_STOP_TOPIC}:{topic}")
+            reason = f"{R_STOP_TOPIC}:{topic}"
+            if topic == "занятость" and (edge := _OPEN_DATE.search(question)):
+                rest = question[:edge.start()] + " " + question[edge.end():]
+                if not _OTHER_DATE.search(rest):
+                    reason = "missing_period_end" if edge[1].lower() in ("с", "со", "от") else "missing_period_start"
+            return Reply(ESCALATE, self.holding_message, 0.0, reason)
         if _BILLBOARD_RE.search(question) and not self.kb._venues_in(question):
             street = "; ".join("{} ({}) — {} за {}{}".format(
                 re.sub(r" *\(.*?\)", "", r.placement.split(" — ")[0]), r.placement.split(" — ")[-1],
