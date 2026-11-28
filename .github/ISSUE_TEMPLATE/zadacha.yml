@@ -1,0 +1,33 @@
+name: Передача задачи
+description: Результат одного участника нужен другому
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Какую проблему решаем
+    validations:
+      required: true
+  - type: textarea
+    id: input
+    attributes:
+      label: Чей результат берём и где он лежит
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Что сдаёт исполнитель
+    validations:
+      required: true
+  - type: textarea
+    id: check
+    attributes:
+      label: Как воспроизвести и принять результат
+    validations:
+      required: true
+  - type: input
+    id: receiver
+    attributes:
+      label: Кто принимает работу
+    validations:
+      required: true

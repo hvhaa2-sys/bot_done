@@ -1,0 +1,14 @@
+# Карта для заполнения после подтверждения логинов. GitHub не применяет этот пример.
+# Сначала широкие пути, ниже — более узкие правила, у которых приоритет.
+# /app/core/                   Глеб
+# /app/channels/               Глеб
+# /data/kb/                    Данил
+# /docs/сверка-*               Данил
+# /app/admin*.py               Роман
+# /app/onboarding.py           Роман
+# /app/static/                 Роман
+# /eval/                       Иван
+# /tests/                      Иван
+# /app/core/knowledge.py       Владислав
+# /eval/retrieval_eval.py      Владислав
+# /eval/retrieval_qrels.csv    Владислав
