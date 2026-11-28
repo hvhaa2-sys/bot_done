@@ -80,7 +80,7 @@ async def main() -> None:
     settings = Settings.load()
     if port_busy(settings.admin_host, settings.admin_port):
         # Второй экземпляр: Telegram не даст двум копиям бота читать сообщения, а админке некуда встать
-        log.error("Порт %d занят — бот, похоже, уже запущен (в другом терминале или в приложении Claude). "
+        log.error("Порт %d занят — бот, похоже, уже запущен (в другом терминале или в другом приложении). "
                   "Остановите его или задайте другой ADMIN_PORT в .env.", settings.admin_port)
         sys.exit(1)
     services = Services(settings)
