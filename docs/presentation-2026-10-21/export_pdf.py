@@ -6,7 +6,7 @@ from reportlab.pdfgen import canvas
 
 
 ROOT = Path(__file__).resolve().parents[2]
-RENDERS = Path('/Users/glebsuchodoev/Library/Application Support/Codex/artifact-sessions/exports/latest/'
+RENDERS = Path('/Users/glebsuchodoev/Library/Application Support/artifacts/artifact-sessions/exports/latest/'
                '6ef21f48a50fd451f0d292bfdafb2b9bcf673ef57f61f61ee4ee11d0d39fb460')
 output = ROOT / 'Презентация/Защита проекта 2026-10-21.pdf'
 if output.exists():
