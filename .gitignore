@@ -31,10 +31,8 @@ data/kb_versions/
 htmlcov/
 .ruff_cache/
 .DS_Store
-.claude/
 .frontend-slides/
 .build/
-.codex-finalizer/
 .playwright-mcp/
 *.log
 *.tar.gz
